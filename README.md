@@ -1,6 +1,6 @@
-# Transcriptor
+# Transcripto
 
-Transcriptor is a clean, mobile-friendly Progressive Web App for **live speech transcription + translation** during keynotes, rehearsals, meetings, and other spoken events.
+Transcripto is a clean, mobile-friendly Progressive Web App for **live speech transcription + translation** during keynotes, rehearsals, meetings, and other spoken events.
 
 It listens through the browser microphone, keeps a **source-language transcript**, translates each finalized segment into a **target language**, and stores sessions locally so they can be reopened or exported later.
 
@@ -19,9 +19,10 @@ GitHub Pages: https://rene-david-bot.github.io/transcriptor/
   - start / pause / resume / stop
   - end session
   - status indicator
-  - current live source draft
-  - current live translation draft
-  - scrolling bilingual transcript
+- current live source draft
+- current live translation draft
+- best-effort background speaker attribution + timing
+- scrolling bilingual transcript
 - local session history with reopen, rename, export, and delete
 - export as **Markdown**, **TXT**, and **JSON**
 - local recovery / resume of the last active session
@@ -37,14 +38,18 @@ Because there is no server runtime in GitHub Pages, the current build uses a **d
 
 - **Realtime transcription**: OpenAI Realtime API over WebRTC
   - session type: `transcription`
-  - transcription model: `gpt-4o-transcribe`
+  - transcription model: `gpt-4o-mini-transcribe`
 - **Translation**: OpenAI Responses API
-  - translation model: `gpt-4.1-mini`
+  - draft translation model: `gpt-4o-mini`
+  - final translation model: `gpt-4.1-mini`
+- **Speaker diarization**: OpenAI Audio Transcriptions API
+  - diarization model: `gpt-4o-transcribe-diarize`
 
 ### Why this split
 
 - Realtime transcription gives low-latency live text from microphone input.
-- Translation is handled explicitly per segment so transcript state stays durable, readable, and easier to recover.
+- Draft translation is tuned for speed during speech, while finalized translation stays higher quality.
+- Speaker diarization runs as a separate best-effort background path so live text remains the priority.
 - This also makes local session storage and export simpler than an all-in-one speech-to-speech flow.
 
 ## API key handling
@@ -138,6 +143,8 @@ Core session objects are stored locally in IndexedDB.
   "targetLanguage": "en",
   "sourceText": "string",
   "translatedText": "string",
+  "speakerLabel": "Speaker A",
+  "speakerStatus": "pending | done | unsupported",
   "createdAt": "ISO timestamp"
 }
 ```
@@ -147,7 +154,8 @@ Core session objects are stored locally in IndexedDB.
 - This is a **personal tool**, not a public multi-user SaaS product.
 - Because the app is static, it currently relies on a **client-side OpenAI key**.
 - Browser microphone + WebRTC behavior can vary slightly across browsers, especially on iOS.
-- Live draft translation intentionally favors stability over very aggressive update frequency.
+- Live draft translation is optimized for speed, but still best-effort rather than word-by-word streaming.
+- Speaker attribution/timing is lower-priority background analysis and may lag by roughly 20 to 40 seconds.
 - If OpenAI or the browser interrupts a long live session, the app keeps the saved transcript and lets the user resume.
 
 ## Next obvious upgrade path

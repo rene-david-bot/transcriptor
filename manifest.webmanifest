@@ -1,6 +1,6 @@
 {
-  "name": "Transcriptor",
-  "short_name": "Transcriptor",
+  "name": "Transcripto",
+  "short_name": "Transcripto",
   "description": "Live bilingual speech transcription and translation with OpenAI, local session history, and resume support.",
   "start_url": "./",
   "scope": "./",

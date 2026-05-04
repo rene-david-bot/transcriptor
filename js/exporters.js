@@ -25,9 +25,17 @@ function download(content, filename, mimeType) {
 }
 
 function formatSegmentForMarkdown(segment, timestamp) {
+  const speakerLine = segment.speakerLabel
+    ? `- Speaker: ${segment.speakerLabel}`
+    : segment.speakerStatus === 'pending'
+      ? '- Speaker: analyzing'
+      : null;
+
   return [
     `### ${timestamp}`,
     '',
+    speakerLine,
+    speakerLine ? '' : null,
     `**${segment.sourceLanguage.toUpperCase()}**`,
     '',
     segment.sourceText || '',
@@ -36,18 +44,29 @@ function formatSegmentForMarkdown(segment, timestamp) {
     '',
     segment.translatedText || '',
     '',
-  ].join('\n');
+  ]
+    .filter(Boolean)
+    .join('\n');
 }
 
 function formatSegmentForText(segment, timestamp) {
+  const speakerLine = segment.speakerLabel
+    ? `Speaker: ${segment.speakerLabel}`
+    : segment.speakerStatus === 'pending'
+      ? 'Speaker: analyzing'
+      : null;
+
   return [
     `[${timestamp}] ${segment.sourceLanguage.toUpperCase()}`,
+    speakerLine,
     segment.sourceText || '',
     '',
     `[${timestamp}] ${segment.targetLanguage.toUpperCase()}`,
     segment.translatedText || '',
     '',
-  ].join('\n');
+  ]
+    .filter(Boolean)
+    .join('\n');
 }
 
 export function exportSessionMarkdown(session, segments, formatTimestamp) {

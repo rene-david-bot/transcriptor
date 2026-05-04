@@ -1,8 +1,10 @@
 const REALTIME_URL = 'https://api.openai.com/v1/realtime/calls';
 const RESPONSES_URL = 'https://api.openai.com/v1/responses';
+const AUDIO_TRANSCRIPTIONS_URL = 'https://api.openai.com/v1/audio/transcriptions';
 const REALTIME_TRANSCRIPTION_MODEL = 'gpt-4o-mini-transcribe';
 const DRAFT_TRANSLATION_MODEL = 'gpt-4o-mini';
 const FINAL_TRANSLATION_MODEL = 'gpt-4.1-mini';
+const SPEAKER_DIARIZATION_MODEL = 'gpt-4o-transcribe-diarize';
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -65,7 +67,7 @@ function extractResponseText(payload) {
 }
 
 export class RealtimeTranscriptionClient {
-  constructor({ apiKey, sourceLanguage, sourceLanguageName, targetLanguageName, glossary, onEvent, onStatus, onError }) {
+  constructor({ apiKey, sourceLanguage, sourceLanguageName, targetLanguageName, glossary, onEvent, onStatus, onError, onStreamAvailable }) {
     this.apiKey = apiKey;
     this.sourceLanguage = normalizeLanguageCode(sourceLanguage);
     this.sourceLanguageName = sourceLanguageName;
@@ -74,6 +76,7 @@ export class RealtimeTranscriptionClient {
     this.onEvent = onEvent;
     this.onStatus = onStatus;
     this.onError = onError;
+    this.onStreamAvailable = onStreamAvailable;
 
     this.peerConnection = null;
     this.dataChannel = null;
@@ -96,6 +99,14 @@ export class RealtimeTranscriptionClient {
           autoGainControl: true,
         },
       });
+
+      if (this.onStreamAvailable) {
+        try {
+          this.onStreamAvailable(this.mediaStream.clone());
+        } catch (error) {
+          console.warn('Failed to provide a cloned stream for background analysis', error);
+        }
+      }
 
       this.peerConnection = new RTCPeerConnection();
       this.dataChannel = this.peerConnection.createDataChannel('oai-events');
@@ -202,7 +213,7 @@ export class RealtimeTranscriptionClient {
     window.clearTimeout(this.rolloverTimer);
     this.rolloverTimer = window.setTimeout(() => {
       if (!this.disposed) {
-        this.onEvent?.({ type: 'transcriptor.rollover.requested' });
+        this.onEvent?.({ type: 'transcripto.rollover.requested' });
       }
     }, 55 * 60 * 1000);
   }
@@ -239,6 +250,37 @@ export class RealtimeTranscriptionClient {
     this.onStatus?.(nextStatus, message);
     await sleep(0);
   }
+}
+
+export async function diarizeAudioChunk({ apiKey, audioBlob, filename, language, signal }) {
+  const formData = new FormData();
+  formData.set('file', audioBlob, filename || 'speaker-chunk.webm');
+  formData.set('model', SPEAKER_DIARIZATION_MODEL);
+  formData.set('response_format', 'diarized_json');
+  formData.set('temperature', '0');
+  if (language) {
+    formData.set('language', normalizeLanguageCode(language));
+  }
+
+  const response = await fetch(AUDIO_TRANSCRIPTIONS_URL, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+    },
+    signal,
+    body: formData,
+  });
+
+  const json = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(extractErrorMessage(json, `Speaker diarization failed (${response.status})`));
+  }
+
+  return {
+    durationSeconds: Number(json?.duration || 0),
+    text: String(json?.text || ''),
+    segments: Array.isArray(json?.segments) ? json.segments : [],
+  };
 }
 
 export async function translateText({

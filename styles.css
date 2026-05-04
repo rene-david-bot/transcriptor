@@ -541,6 +541,42 @@ strong {
   font-size: var(--font-medium);
 }
 
+.speaker-summary {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.speaker-stat {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.2rem 0.75rem;
+  align-items: center;
+  padding: 0.85rem 0.95rem;
+  border-radius: 18px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: rgba(15, 23, 42, 0.52);
+}
+
+.speaker-stat strong {
+  grid-column: 1 / 2;
+}
+
+.speaker-stat span,
+.speaker-stat small {
+  color: var(--muted);
+}
+
+.speaker-stat span {
+  grid-column: 2 / 3;
+  grid-row: 1 / 3;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.speaker-stat small {
+  grid-column: 1 / 2;
+}
+
 .transcript-list {
   flex-direction: column;
   height: min(66vh, 980px);
