@@ -96,8 +96,11 @@ const state = {
   draftByItemId: new Map(),
   commitMetaByItemId: new Map(),
   draftTranslationTimer: null,
-  draftTranslationRequestId: 0,
+  draftTranslationPending: null,
+  draftTranslationInFlight: false,
+  draftTranslationLastStartedAt: 0,
   finalTranslationQueue: Promise.resolve(),
+  finalTranslationInFlight: false,
   sessionPersistTimer: null,
   clockTimer: null,
   installPrompt: null,
@@ -449,10 +452,23 @@ function renderDrafts() {
 
   const sourceDraft = session?.draftSource?.trim();
   const targetDraft = session?.draftTranslation?.trim();
+  const activeDraftPending = Boolean(
+    sourceDraft &&
+      ((state.draftTranslationPending && state.draftTranslationPending.itemId === state.activeDraftItemId) ||
+        state.draftTranslationInFlight)
+  );
+
   elements.sourceDraftText.textContent = sourceDraft || 'No live source-language draft yet.';
-  elements.targetDraftText.textContent = targetDraft || 'No live translation draft yet.';
+  elements.targetDraftText.textContent =
+    targetDraft || (activeDraftPending ? 'Translation is catching up…' : 'No live translation draft yet.');
   elements.sourceDraftState.textContent = sourceDraft ? 'Updating' : 'Waiting';
-  elements.targetDraftState.textContent = targetDraft ? 'Updating' : 'Waiting';
+  elements.targetDraftState.textContent = targetDraft
+    ? activeDraftPending
+      ? 'Refreshing'
+      : 'Live'
+    : activeDraftPending
+      ? 'Translating'
+      : 'Waiting';
 }
 
 function renderTranscript() {
@@ -464,8 +480,14 @@ function renderTranscript() {
   const sourceLabel = getLanguageName(state.currentSession?.sourceLanguage);
   const targetLabel = getLanguageName(state.currentSession?.targetLanguage);
   elements.transcriptList.innerHTML = state.currentSegments
-    .map(
-      (segment) => `
+    .map((segment) => {
+      const translatedDisplay = segment.translatedText?.trim()
+        ? segment.translatedText
+        : segment.translationStatus === 'error'
+          ? 'Translation unavailable.'
+          : 'Translating…';
+
+      return `
         <article class="transcript-entry">
           <div class="transcript-entry__header">
             <strong>${buildTranscriptTimestamp(segment)}</strong>
@@ -478,18 +500,35 @@ function renderTranscript() {
             </div>
             <div>
               <span class="transcript-entry__label">${targetLabel}</span>
-              <p class="transcript-entry__text">${escapeHtml(segment.translatedText)}</p>
+              <p class="transcript-entry__text">${escapeHtml(translatedDisplay)}</p>
             </div>
           </div>
         </article>
-      `
-    )
+      `;
+    })
     .join('');
 
   if (state.settings.autoScroll) {
     requestAnimationFrame(() => {
       elements.transcriptList.scrollTop = elements.transcriptList.scrollHeight;
     });
+  }
+}
+
+function upsertCurrentSegmentInState(segment) {
+  const index = state.currentSegments.findIndex((item) => item.id === segment.id);
+  if (index === -1) {
+    state.currentSegments.push(segment);
+  } else {
+    state.currentSegments[index] = {
+      ...state.currentSegments[index],
+      ...segment,
+    };
+  }
+
+  state.currentSegments.sort((a, b) => (a.sequence || 0) - (b.sequence || 0));
+  if (state.currentSession) {
+    state.currentSession.segmentCount = state.currentSegments.length;
   }
 }
 
@@ -817,10 +856,14 @@ function updateDraft(itemId, delta) {
 
 function clearDraftState(itemId) {
   state.draftByItemId.delete(itemId);
+  if (state.draftTranslationPending?.itemId === itemId) {
+    state.draftTranslationPending = null;
+    window.clearTimeout(state.draftTranslationTimer);
+  }
   if (state.activeDraftItemId === itemId) {
     state.activeDraftItemId = null;
   }
-  if (state.currentSession) {
+  if (state.currentSession && state.activeDraftItemId === null) {
     state.currentSession.draftSource = '';
     state.currentSession.draftTranslation = '';
   }
@@ -828,33 +871,146 @@ function clearDraftState(itemId) {
 }
 
 function scheduleDraftTranslation(itemId, text) {
-  window.clearTimeout(state.draftTranslationTimer);
-  if (!text || text.length < 8 || !state.currentSession) {
-    state.currentSession.draftTranslation = '';
-    renderDrafts();
+  if (!state.currentSession) return;
+
+  const trimmedText = text.trim();
+  if (!trimmedText || trimmedText.length < 8) {
+    state.draftTranslationPending = null;
+    if (state.activeDraftItemId === itemId) {
+      state.currentSession.draftTranslation = '';
+      renderDrafts();
+    }
     return;
   }
 
-  const requestId = ++state.draftTranslationRequestId;
+  state.draftTranslationPending = {
+    itemId,
+    text: trimmedText,
+    sessionId: state.currentSession.id,
+  };
+  processDraftTranslationQueue();
+}
+
+function processDraftTranslationQueue() {
+  if (!state.currentSession || !state.draftTranslationPending) return;
+  if (state.draftTranslationInFlight || state.finalTranslationInFlight) return;
+
+  const waitMs = Math.max(0, 1200 - (Date.now() - state.draftTranslationLastStartedAt));
+  window.clearTimeout(state.draftTranslationTimer);
   state.draftTranslationTimer = window.setTimeout(async () => {
+    const snapshot = state.draftTranslationPending;
+    if (!snapshot || !state.currentSession || state.finalTranslationInFlight) return;
+
+    state.draftTranslationInFlight = true;
+    state.draftTranslationLastStartedAt = Date.now();
+    renderDrafts();
+
     try {
       const translated = await translateText({
         apiKey: state.settings.apiKey,
         sourceLanguageName: getLanguageName(state.currentSession.sourceLanguage),
         targetLanguageName: getLanguageName(state.currentSession.targetLanguage),
         glossary: state.currentSession.glossary || state.settings.glossary,
-        sourceText: text,
+        sourceText: snapshot.text,
         draft: true,
       });
-      if (requestId !== state.draftTranslationRequestId) return;
-      if (state.activeDraftItemId !== itemId) return;
-      state.currentSession.draftTranslation = translated || '';
-      renderDrafts();
-      scheduleSessionPersist(400);
+
+      if (!state.currentSession || state.currentSession.id !== snapshot.sessionId) return;
+
+      const draftState = state.draftByItemId.get(snapshot.itemId);
+      if (draftState) {
+        draftState.translatedDraft = translated || draftState.translatedDraft || '';
+        state.draftByItemId.set(snapshot.itemId, draftState);
+      }
+
+      if (state.activeDraftItemId === snapshot.itemId) {
+        state.currentSession.draftTranslation = translated || state.currentSession.draftTranslation || '';
+        renderDrafts();
+        scheduleSessionPersist(400);
+      }
+
+      const isStillLatest =
+        state.draftTranslationPending &&
+        state.draftTranslationPending.itemId === snapshot.itemId &&
+        state.draftTranslationPending.text === snapshot.text;
+
+      if (isStillLatest) {
+        state.draftTranslationPending = null;
+      }
     } catch (error) {
       console.warn('Draft translation failed', error);
+      const isStillLatest =
+        state.draftTranslationPending &&
+        state.draftTranslationPending.itemId === snapshot.itemId &&
+        state.draftTranslationPending.text === snapshot.text;
+      if (isStillLatest) {
+        state.draftTranslationPending = null;
+      }
+    } finally {
+      state.draftTranslationInFlight = false;
+      renderDrafts();
+
+      const hasNewerPending =
+        state.draftTranslationPending &&
+        (state.draftTranslationPending.itemId !== snapshot.itemId ||
+          state.draftTranslationPending.text !== snapshot.text);
+
+      if (hasNewerPending) {
+        processDraftTranslationQueue();
+      }
     }
-  }, 1100);
+  }, waitMs);
+}
+
+function queueFinalSegmentTranslation(segment) {
+  const translationContext = {
+    apiKey: state.settings.apiKey,
+    sourceLanguageName: getLanguageName(segment.sourceLanguage),
+    targetLanguageName: getLanguageName(segment.targetLanguage),
+    glossary: state.currentSession?.glossary || state.settings.glossary,
+    sourceText: segment.sourceText,
+    draft: false,
+  };
+
+  state.finalTranslationQueue = state.finalTranslationQueue
+    .then(async () => {
+      state.finalTranslationInFlight = true;
+      renderDrafts();
+
+      const translatedText = await translateText(translationContext);
+      const mergedSegment = {
+        ...(state.currentSegments.find((item) => item.id === segment.id) || segment),
+        translatedText: translatedText || segment.translatedText || '',
+        translatedDraft: translatedText || segment.translatedDraft || '',
+        translationStatus: 'done',
+        updatedAt: nowIso(),
+      };
+
+      await upsertSegment(mergedSegment);
+      if (state.currentSession?.id === segment.sessionId) {
+        upsertCurrentSegmentInState(mergedSegment);
+        renderTranscript();
+      }
+    })
+    .catch(async (error) => {
+      console.error('Final translation failed', error);
+      const mergedSegment = {
+        ...(state.currentSegments.find((item) => item.id === segment.id) || segment),
+        translationStatus: 'error',
+        updatedAt: nowIso(),
+      };
+      await upsertSegment(mergedSegment).catch(() => {});
+      if (state.currentSession?.id === segment.sessionId) {
+        upsertCurrentSegmentInState(mergedSegment);
+        renderTranscript();
+      }
+      showToast(error?.message || 'A segment translation failed.', 5000);
+    })
+    .finally(() => {
+      state.finalTranslationInFlight = false;
+      renderDrafts();
+      processDraftTranslationQueue();
+    });
 }
 
 async function finalizeSegmentFromEvent(event) {
@@ -879,14 +1035,9 @@ async function finalizeSegmentFromEvent(event) {
   };
   state.currentSession.lastSequence = Math.max(state.currentSession.lastSequence || 0, commitMeta.sequence || 0);
 
-  const translatedText = await translateText({
-    apiKey: state.settings.apiKey,
-    sourceLanguageName: getLanguageName(state.currentSession.sourceLanguage),
-    targetLanguageName: getLanguageName(state.currentSession.targetLanguage),
-    glossary: state.currentSession.glossary || state.settings.glossary,
-    sourceText,
-    draft: false,
-  });
+  const draftState = state.draftByItemId.get(itemId);
+  const draftTranslation =
+    draftState?.translatedDraft || (state.activeDraftItemId === itemId ? state.currentSession.draftTranslation : '');
 
   const endMs = getEffectiveActiveDuration();
   const previousSegment = state.currentSegments[state.currentSegments.length - 1];
@@ -904,19 +1055,19 @@ async function finalizeSegmentFromEvent(event) {
     sourceLanguage: state.currentSession.sourceLanguage,
     targetLanguage: state.currentSession.targetLanguage,
     sourceText,
-    translatedText: translatedText || '',
+    translatedText: draftTranslation || '',
     sourceDraft: sourceText,
-    translatedDraft: state.currentSession.draftTranslation || translatedText || '',
+    translatedDraft: draftTranslation || '',
+    translationStatus: draftTranslation ? 'draft' : 'pending',
     createdAt: commitMeta.committedAtIso || nowIso(),
   };
 
+  upsertCurrentSegmentInState(segment);
   await upsertSegment(segment);
-  state.currentSegments.push(segment);
-  state.currentSegments.sort((a, b) => (a.sequence || 0) - (b.sequence || 0));
-  state.currentSession.segmentCount = state.currentSegments.length;
   clearDraftState(itemId);
   await persistCurrentSessionNow();
   renderCurrentView();
+  queueFinalSegmentTranslation(segment);
 }
 
 async function handleRealtimeEvent(event) {
@@ -952,12 +1103,10 @@ async function handleRealtimeEvent(event) {
 
   if (event.type === 'conversation.item.input_audio_transcription.completed') {
     flushSpeechClock();
-    state.finalTranslationQueue = state.finalTranslationQueue
-      .then(() => finalizeSegmentFromEvent(event))
-      .catch((error) => {
-        console.error('Final translation failed', error);
-        showToast(error?.message || 'A segment failed to finalize.', 5000);
-      });
+    finalizeSegmentFromEvent(event).catch((error) => {
+      console.error('Segment finalization failed', error);
+      showToast(error?.message || 'A segment failed to finalize.', 5000);
+    });
     return;
   }
 
