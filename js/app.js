@@ -82,6 +82,10 @@ const STATUS_COPY = {
   error: 'error',
 };
 
+const DRAFT_TRANSLATION_MIN_CHARS = 4;
+const DRAFT_TRANSLATION_INTERVAL_MS = 450;
+const DRAFT_TRANSLATION_ABORT_GROWTH_CHARS = 18;
+
 const state = {
   route: 'setup',
   settings: { ...DEFAULT_SETTINGS },
@@ -93,11 +97,14 @@ const state = {
   runtimeMessage: 'Waiting to start.',
   listenStartedAtMs: null,
   speechStartedAtMs: null,
+  speechActive: false,
   draftByItemId: new Map(),
   commitMetaByItemId: new Map(),
   draftTranslationTimer: null,
   draftTranslationPending: null,
   draftTranslationInFlight: false,
+  draftTranslationActive: null,
+  draftTranslationAbortController: null,
   draftTranslationLastStartedAt: 0,
   finalTranslationQueue: Promise.resolve(),
   finalTranslationInFlight: false,
@@ -452,20 +459,23 @@ function renderDrafts() {
 
   const sourceDraft = session?.draftSource?.trim();
   const targetDraft = session?.draftTranslation?.trim();
+  const hasActiveSpeech = Boolean(sourceDraft) && (state.speechActive || Boolean(state.activeDraftItemId));
   const activeDraftPending = Boolean(
     sourceDraft &&
       ((state.draftTranslationPending && state.draftTranslationPending.itemId === state.activeDraftItemId) ||
-        state.draftTranslationInFlight)
+        (state.draftTranslationActive && state.draftTranslationActive.itemId === state.activeDraftItemId))
   );
 
   elements.sourceDraftText.textContent = sourceDraft || 'No live source-language draft yet.';
   elements.targetDraftText.textContent =
     targetDraft || (activeDraftPending ? 'Translation is catching up…' : 'No live translation draft yet.');
-  elements.sourceDraftState.textContent = sourceDraft ? 'Updating' : 'Waiting';
+  elements.sourceDraftState.textContent = sourceDraft ? (hasActiveSpeech ? 'Updating' : 'Held') : 'Waiting';
   elements.targetDraftState.textContent = targetDraft
     ? activeDraftPending
       ? 'Refreshing'
-      : 'Live'
+      : hasActiveSpeech
+        ? 'Live'
+        : 'Held'
     : activeDraftPending
       ? 'Translating'
       : 'Waiting';
@@ -646,6 +656,7 @@ async function loadSession(sessionId) {
   if (!session) return null;
   state.currentSession = session;
   state.currentSegments = await listSegmentsBySession(sessionId);
+  state.speechActive = false;
   state.draftByItemId.clear();
   state.commitMetaByItemId.clear();
   state.activeDraftItemId = null;
@@ -763,6 +774,7 @@ async function pauseListening() {
   if (!state.client) return;
   flushListeningClock();
   flushSpeechClock();
+  state.speechActive = false;
   await state.client.disconnect({ nextStatus: 'paused', message: 'Paused. Microphone sending has stopped.' });
   state.client = null;
   state.currentSession.status = 'paused';
@@ -776,6 +788,7 @@ async function stopListening() {
   if (state.client) {
     flushListeningClock();
     flushSpeechClock();
+    state.speechActive = false;
     await state.client.disconnect({ nextStatus: 'stopped', message: 'Stopped. You can start again in the same session.' });
     state.client = null;
   }
@@ -796,6 +809,7 @@ async function endCurrentSession() {
   if (state.client) {
     flushListeningClock();
     flushSpeechClock();
+    state.speechActive = false;
     await state.client.disconnect({ nextStatus: 'ended', message: 'Session ended.' });
     state.client = null;
   }
@@ -843,10 +857,15 @@ function buildCommitMeta(itemId, previousItemId) {
 
 function updateDraft(itemId, delta) {
   const current = state.draftByItemId.get(itemId) || { sourceDraft: '', translatedDraft: '' };
+  const switchedItems = state.activeDraftItemId !== itemId;
   current.sourceDraft = `${current.sourceDraft || ''}${delta || ''}`;
   state.draftByItemId.set(itemId, current);
   state.activeDraftItemId = itemId;
+  state.speechActive = true;
   if (state.currentSession) {
+    if (switchedItems) {
+      state.currentSession.draftTranslation = '';
+    }
     state.currentSession.draftSource = current.sourceDraft.trim();
   }
   renderDrafts();
@@ -854,18 +873,30 @@ function updateDraft(itemId, delta) {
   scheduleDraftTranslation(itemId, current.sourceDraft.trim());
 }
 
-function clearDraftState(itemId) {
+function clearDraftState(itemId, { preserveVisibleDraft = false } = {}) {
+  const draftState = state.draftByItemId.get(itemId);
+  const preservedSource = draftState?.sourceDraft?.trim() || state.currentSession?.draftSource || '';
+  const preservedTranslation = draftState?.translatedDraft?.trim() || state.currentSession?.draftTranslation || '';
+
   state.draftByItemId.delete(itemId);
   if (state.draftTranslationPending?.itemId === itemId) {
     state.draftTranslationPending = null;
     window.clearTimeout(state.draftTranslationTimer);
   }
+  if (state.draftTranslationActive?.itemId === itemId) {
+    state.draftTranslationAbortController?.abort();
+  }
   if (state.activeDraftItemId === itemId) {
     state.activeDraftItemId = null;
   }
   if (state.currentSession && state.activeDraftItemId === null) {
-    state.currentSession.draftSource = '';
-    state.currentSession.draftTranslation = '';
+    if (preserveVisibleDraft) {
+      state.currentSession.draftSource = preservedSource;
+      state.currentSession.draftTranslation = preservedTranslation;
+    } else {
+      state.currentSession.draftSource = '';
+      state.currentSession.draftTranslation = '';
+    }
   }
   renderDrafts();
 }
@@ -874,7 +905,7 @@ function scheduleDraftTranslation(itemId, text) {
   if (!state.currentSession) return;
 
   const trimmedText = text.trim();
-  if (!trimmedText || trimmedText.length < 8) {
+  if (!trimmedText || trimmedText.length < DRAFT_TRANSLATION_MIN_CHARS) {
     state.draftTranslationPending = null;
     if (state.activeDraftItemId === itemId) {
       state.currentSession.draftTranslation = '';
@@ -888,20 +919,39 @@ function scheduleDraftTranslation(itemId, text) {
     text: trimmedText,
     sessionId: state.currentSession.id,
   };
+
+  const active = state.draftTranslationActive;
+  const shouldAbortInFlight =
+    state.draftTranslationInFlight &&
+    active &&
+    (
+      active.itemId !== itemId ||
+      (trimmedText !== active.text &&
+        (trimmedText.length - (active.text?.length || 0) >= DRAFT_TRANSLATION_ABORT_GROWTH_CHARS ||
+          /[.!?,:;]\s*$/.test(trimmedText)))
+    );
+
+  if (shouldAbortInFlight) {
+    state.draftTranslationAbortController?.abort();
+  }
+
   processDraftTranslationQueue();
 }
 
 function processDraftTranslationQueue() {
   if (!state.currentSession || !state.draftTranslationPending) return;
-  if (state.draftTranslationInFlight || state.finalTranslationInFlight) return;
+  if (state.draftTranslationInFlight) return;
 
-  const waitMs = Math.max(0, 1200 - (Date.now() - state.draftTranslationLastStartedAt));
+  const waitMs = Math.max(0, DRAFT_TRANSLATION_INTERVAL_MS - (Date.now() - state.draftTranslationLastStartedAt));
   window.clearTimeout(state.draftTranslationTimer);
   state.draftTranslationTimer = window.setTimeout(async () => {
     const snapshot = state.draftTranslationPending;
-    if (!snapshot || !state.currentSession || state.finalTranslationInFlight) return;
+    if (!snapshot || !state.currentSession) return;
 
+    const controller = new AbortController();
     state.draftTranslationInFlight = true;
+    state.draftTranslationActive = snapshot;
+    state.draftTranslationAbortController = controller;
     state.draftTranslationLastStartedAt = Date.now();
     renderDrafts();
 
@@ -913,6 +963,7 @@ function processDraftTranslationQueue() {
         glossary: state.currentSession.glossary || state.settings.glossary,
         sourceText: snapshot.text,
         draft: true,
+        signal: controller.signal,
       });
 
       if (!state.currentSession || state.currentSession.id !== snapshot.sessionId) return;
@@ -938,7 +989,9 @@ function processDraftTranslationQueue() {
         state.draftTranslationPending = null;
       }
     } catch (error) {
-      console.warn('Draft translation failed', error);
+      if (error?.name !== 'AbortError') {
+        console.warn('Draft translation failed', error);
+      }
       const isStillLatest =
         state.draftTranslationPending &&
         state.draftTranslationPending.itemId === snapshot.itemId &&
@@ -947,6 +1000,12 @@ function processDraftTranslationQueue() {
         state.draftTranslationPending = null;
       }
     } finally {
+      if (state.draftTranslationAbortController === controller) {
+        state.draftTranslationAbortController = null;
+      }
+      if (state.draftTranslationActive?.itemId === snapshot.itemId && state.draftTranslationActive?.text === snapshot.text) {
+        state.draftTranslationActive = null;
+      }
       state.draftTranslationInFlight = false;
       renderDrafts();
 
@@ -989,6 +1048,10 @@ function queueFinalSegmentTranslation(segment) {
       await upsertSegment(mergedSegment);
       if (state.currentSession?.id === segment.sessionId) {
         upsertCurrentSegmentInState(mergedSegment);
+        if (!state.activeDraftItemId && state.currentSession.draftSource?.trim() === segment.sourceText.trim()) {
+          state.currentSession.draftTranslation = translatedText || state.currentSession.draftTranslation || '';
+          renderDrafts();
+        }
         renderTranscript();
       }
     })
@@ -1025,7 +1088,7 @@ async function finalizeSegmentFromEvent(event) {
   const normalized = normalizeTranscript(sourceText);
   const lastSegment = state.currentSegments[state.currentSegments.length - 1];
   if (lastSegment && (lastSegment.itemId === itemId || normalizeTranscript(lastSegment.sourceText) === normalized)) {
-    clearDraftState(itemId);
+    clearDraftState(itemId, { preserveVisibleDraft: true });
     return;
   }
 
@@ -1064,7 +1127,8 @@ async function finalizeSegmentFromEvent(event) {
 
   upsertCurrentSegmentInState(segment);
   await upsertSegment(segment);
-  clearDraftState(itemId);
+  state.speechActive = false;
+  clearDraftState(itemId, { preserveVisibleDraft: true });
   await persistCurrentSessionNow();
   renderCurrentView();
   queueFinalSegmentTranslation(segment);
@@ -1080,13 +1144,17 @@ async function handleRealtimeEvent(event) {
   }
 
   if (event.type === 'input_audio_buffer.speech_started') {
+    state.speechActive = true;
     markSpeechStart();
+    renderDrafts();
     return;
   }
 
   if (event.type === 'input_audio_buffer.speech_stopped') {
+    state.speechActive = false;
     flushSpeechClock();
     renderSessionSummary();
+    renderDrafts();
     scheduleSessionPersist();
     return;
   }
@@ -1102,6 +1170,7 @@ async function handleRealtimeEvent(event) {
   }
 
   if (event.type === 'conversation.item.input_audio_transcription.completed') {
+    state.speechActive = false;
     flushSpeechClock();
     finalizeSegmentFromEvent(event).catch((error) => {
       console.error('Segment finalization failed', error);

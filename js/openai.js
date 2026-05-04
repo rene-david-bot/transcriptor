@@ -1,5 +1,8 @@
 const REALTIME_URL = 'https://api.openai.com/v1/realtime/calls';
 const RESPONSES_URL = 'https://api.openai.com/v1/responses';
+const REALTIME_TRANSCRIPTION_MODEL = 'gpt-4o-mini-transcribe';
+const DRAFT_TRANSLATION_MODEL = 'gpt-4o-mini';
+const FINAL_TRANSLATION_MODEL = 'gpt-4.1-mini';
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -16,6 +19,13 @@ function extractErrorMessage(payload, fallback = 'OpenAI request failed') {
 function normalizeLanguageCode(code) {
   if (!code) return '';
   return String(code).trim().toLowerCase();
+}
+
+function estimateMaxOutputTokens(text, draft = false) {
+  const roughTokens = Math.ceil(String(text || '').length / 3);
+  const floor = draft ? 48 : 96;
+  const ceiling = draft ? 220 : 420;
+  return Math.max(floor, Math.min(ceiling, roughTokens));
 }
 
 function buildTranscriptionPrompt({ sourceLanguageName, targetLanguageName, glossary }) {
@@ -141,7 +151,7 @@ export class RealtimeTranscriptionClient {
         audio: {
           input: {
             transcription: {
-              model: 'gpt-4o-transcribe',
+              model: REALTIME_TRANSCRIPTION_MODEL,
               language: this.sourceLanguage,
               prompt: buildTranscriptionPrompt({
                 sourceLanguageName: this.sourceLanguageName,
@@ -153,8 +163,8 @@ export class RealtimeTranscriptionClient {
             turn_detection: {
               type: 'server_vad',
               threshold: 0.5,
-              prefix_padding_ms: 250,
-              silence_duration_ms: 650,
+              prefix_padding_ms: 180,
+              silence_duration_ms: 450,
               create_response: false,
             },
           },
@@ -231,7 +241,16 @@ export class RealtimeTranscriptionClient {
   }
 }
 
-export async function translateText({ apiKey, sourceLanguageName, targetLanguageName, glossary, sourceText, draft = false }) {
+export async function translateText({
+  apiKey,
+  sourceLanguageName,
+  targetLanguageName,
+  glossary,
+  sourceText,
+  draft = false,
+  model,
+  signal,
+}) {
   const instructions = [
     `You translate live speech from ${sourceLanguageName} into ${targetLanguageName}.`,
     'Translate faithfully. Do not summarize, explain, add commentary, or clean up beyond what is necessary for readability.',
@@ -243,14 +262,16 @@ export async function translateText({ apiKey, sourceLanguageName, targetLanguage
   ].join(' ');
 
   const payload = {
-    model: 'gpt-4.1-mini',
+    model: model || (draft ? DRAFT_TRANSLATION_MODEL : FINAL_TRANSLATION_MODEL),
     instructions,
+    store: false,
     input: [
       {
         role: 'user',
         content: [{ type: 'input_text', text: sourceText }],
       },
     ],
+    max_output_tokens: estimateMaxOutputTokens(sourceText, draft),
     text: {
       format: { type: 'text' },
     },
@@ -262,6 +283,7 @@ export async function translateText({ apiKey, sourceLanguageName, targetLanguage
       Authorization: `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
     },
+    signal,
     body: JSON.stringify(payload),
   });
 
