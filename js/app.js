@@ -1411,7 +1411,8 @@ async function loadBootstrapData() {
 async function registerServiceWorker() {
   if (!('serviceWorker' in navigator)) return;
   try {
-    await navigator.serviceWorker.register('./sw.js');
+    const registration = await navigator.serviceWorker.register('./sw.js');
+    registration.update().catch(() => {});
   } catch (error) {
     console.warn('Service worker registration failed', error);
   }
