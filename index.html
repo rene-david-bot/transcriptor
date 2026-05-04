@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta
+      name="description"
+      content="Transcriptor is a local-first PWA for live bilingual speech transcription and translation with OpenAI."
+    />
+    <meta name="theme-color" content="#0b1020" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Transcriptor" />
+    <title>Transcriptor</title>
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="icon" type="image/svg+xml" href="./assets/icon.svg" />
+    <link rel="apple-touch-icon" href="./assets/icon-192.png" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" id="sidebar" aria-label="Sidebar">
+        <div class="sidebar__header">
+          <div>
+            <p class="eyebrow">Local-first PWA</p>
+            <h1>Transcriptor</h1>
+          </div>
+          <button class="icon-button sidebar-close" id="sidebarClose" aria-label="Close menu">✕</button>
+        </div>
+
+        <nav class="sidebar__nav" aria-label="Primary">
+          <button class="nav-link" data-route="setup">Start / Setup</button>
+          <button class="nav-link" data-route="live">Current Session</button>
+          <button class="nav-link" data-action="new-session">New Session</button>
+          <button class="nav-link" data-route="history">Previous Sessions / History</button>
+          <button class="nav-link" data-route="settings">Settings</button>
+        </nav>
+
+        <div class="sidebar__footer">
+          <div class="install-card hidden" id="installCard">
+            <p class="install-card__title">Install the app</p>
+            <p class="install-card__body">Add Transcriptor to your home screen for faster access during live events.</p>
+            <button class="button button--secondary button--block" id="installButton">Install</button>
+          </div>
+          <div class="meta-card">
+            <p class="meta-card__title">Privacy</p>
+            <p class="meta-card__body">API key, settings, transcript history, and recovery data stay in this browser only.</p>
+          </div>
+        </div>
+      </aside>
+
+      <div class="backdrop" id="backdrop"></div>
+
+      <div class="app-main">
+        <header class="topbar">
+          <div class="topbar__left">
+            <button class="icon-button" id="menuButton" aria-label="Open menu">☰</button>
+            <div>
+              <p class="eyebrow" id="topbarEyebrow">Ready</p>
+              <h2 class="topbar__title">Transcriptor</h2>
+            </div>
+          </div>
+          <div class="topbar__right">
+            <div class="status-pill status-pill--idle" id="statusPill">idle</div>
+          </div>
+        </header>
+
+        <main class="page-stack">
+          <section class="page page--active" id="page-setup" data-page="setup">
+            <div class="hero-card">
+              <div>
+                <p class="eyebrow">Live bilingual transcript</p>
+                <h2>Listen in one language, read in another.</h2>
+                <p class="hero-copy">
+                  Transcriptor captures live speech from your microphone, transcribes it in the source language,
+                  translates it into your target language, and keeps a readable scrolling transcript you can reopen later.
+                </p>
+              </div>
+              <div class="hero-card__badges">
+                <span class="tag">OpenAI transcription</span>
+                <span class="tag">Faithful translation</span>
+                <span class="tag">Installable PWA</span>
+                <span class="tag">Local session history</span>
+              </div>
+            </div>
+
+            <div class="grid-two">
+              <form class="panel form-panel" id="startForm">
+                <div class="panel__header">
+                  <div>
+                    <p class="eyebrow">Session setup</p>
+                    <h3>Start a session</h3>
+                  </div>
+                </div>
+
+                <label class="field">
+                  <span>OpenAI API key</span>
+                  <div class="input-row">
+                    <input id="apiKeyInput" name="apiKey" type="password" autocomplete="off" placeholder="sk-..." required />
+                    <button type="button" class="button button--ghost" id="toggleApiKey">Show</button>
+                  </div>
+                  <small>Stored locally in this browser only. Use a personal key you control.</small>
+                </label>
+
+                <div class="grid-two compact-grid">
+                  <label class="field">
+                    <span>Source language</span>
+                    <select id="sourceLanguageInput" name="sourceLanguage"></select>
+                  </label>
+
+                  <label class="field">
+                    <span>Target language</span>
+                    <select id="targetLanguageInput" name="targetLanguage"></select>
+                  </label>
+                </div>
+
+                <label class="field">
+                  <span>Glossary / context (optional)</span>
+                  <textarea
+                    id="glossaryInput"
+                    name="glossary"
+                    rows="5"
+                    placeholder="Names, companies, products, acronyms, technical vocabulary, speaker names..."
+                  ></textarea>
+                  <small>Used as context to improve transcription and translation quality.</small>
+                </label>
+
+                <div class="button-row button-row--wrap">
+                  <button type="submit" class="button button--primary">Start listening</button>
+                  <button type="button" class="button button--secondary hidden" id="resumeLastSessionButton">Resume last session</button>
+                </div>
+
+                <div class="button-row button-row--wrap">
+                  <button type="button" class="button button--ghost" id="openHistoryFromSetup">Open history</button>
+                  <button type="button" class="button button--ghost hidden" id="recoverDraftButton">Recover active session</button>
+                </div>
+              </form>
+
+              <section class="panel tips-panel">
+                <div class="panel__header">
+                  <div>
+                    <p class="eyebrow">Recommended setup</p>
+                    <h3>Before a keynote or meeting</h3>
+                  </div>
+                </div>
+                <ul class="checklist">
+                  <li>Use headphones if the room audio is loud or echoey.</li>
+                  <li>Keep the phone close to the speaker or PA source.</li>
+                  <li>Add names, brands, acronyms, and product terms to the glossary.</li>
+                  <li>Pause whenever you do not need capture, to avoid extra API cost.</li>
+                  <li>The last active session can be resumed after refresh or reopening.</li>
+                </ul>
+                <div class="note note--soft">
+                  <strong>Architecture:</strong> this build is static GitHub Pages, so requests go directly from the browser to OpenAI using your own locally stored API key.
+                </div>
+              </section>
+            </div>
+          </section>
+
+          <section class="page" id="page-live" data-page="live">
+            <div class="grid-live">
+              <div class="live-main">
+                <section class="panel session-summary">
+                  <div class="session-summary__top">
+                    <div>
+                      <p class="eyebrow">Current session</p>
+                      <h3 id="sessionTitle">No active session</h3>
+                      <p class="session-meta" id="sessionMeta">Start a session to begin.</p>
+                    </div>
+                    <div class="summary-actions">
+                      <button class="button button--ghost button--small" id="renameSessionButton">Rename</button>
+                      <button class="button button--ghost button--small" id="toggleAutoScrollButton">Auto-scroll: On</button>
+                    </div>
+                  </div>
+
+                  <div class="metrics-row">
+                    <div class="metric-card">
+                      <span class="metric-card__label">Duration</span>
+                      <strong id="durationValue">00:00</strong>
+                    </div>
+                    <div class="metric-card">
+                      <span class="metric-card__label">Speech-only</span>
+                      <strong id="speechOnlyValue">00:00</strong>
+                    </div>
+                    <div class="metric-card">
+                      <span class="metric-card__label">Segments</span>
+                      <strong id="segmentCountValue">0</strong>
+                    </div>
+                  </div>
+                </section>
+
+                <section class="panel controls-panel">
+                  <div class="panel__header">
+                    <div>
+                      <p class="eyebrow">Controls</p>
+                      <h3>Capture controls</h3>
+                    </div>
+                  </div>
+
+                  <div class="button-row button-row--wrap">
+                    <button class="button button--primary" id="startButton">Start</button>
+                    <button class="button button--secondary hidden" id="pauseButton">Pause</button>
+                    <button class="button button--secondary hidden" id="resumeButton">Resume</button>
+                    <button class="button button--ghost hidden" id="stopButton">Stop</button>
+                    <button class="button button--ghost" id="newSessionButton">New Session</button>
+                    <button class="button button--danger" id="endSessionButton">End Session</button>
+                  </div>
+
+                  <div class="status-line" id="statusLine">
+                    Status: idle. Waiting to start.
+                  </div>
+                </section>
+
+                <section class="panel drafts-panel">
+                  <div class="panel__header">
+                    <div>
+                      <p class="eyebrow">Live drafts</p>
+                      <h3>Current speech in progress</h3>
+                    </div>
+                  </div>
+
+                  <div class="draft-grid">
+                    <article class="draft-card">
+                      <div class="draft-card__header">
+                        <span id="sourceDraftLabel">Source draft</span>
+                        <span class="draft-state" id="sourceDraftState">Waiting</span>
+                      </div>
+                      <p class="draft-text" id="sourceDraftText">No live source-language draft yet.</p>
+                    </article>
+
+                    <article class="draft-card">
+                      <div class="draft-card__header">
+                        <span id="targetDraftLabel">Translation draft</span>
+                        <span class="draft-state" id="targetDraftState">Waiting</span>
+                      </div>
+                      <p class="draft-text" id="targetDraftText">No live translation draft yet.</p>
+                    </article>
+                  </div>
+                </section>
+
+                <section class="panel transcript-panel">
+                  <div class="panel__header panel__header--spread">
+                    <div>
+                      <p class="eyebrow">Transcript</p>
+                      <h3>Bilingual scrolling transcript</h3>
+                    </div>
+                    <div class="button-row button-row--wrap">
+                      <button class="button button--ghost button--small" id="exportMarkdownButton">Export Markdown</button>
+                      <button class="button button--ghost button--small" id="exportTxtButton">Export TXT</button>
+                      <button class="button button--ghost button--small" id="exportJsonButton">Export JSON</button>
+                    </div>
+                  </div>
+
+                  <div class="transcript-list text-size-medium" id="transcriptList" aria-live="polite"></div>
+                </section>
+              </div>
+
+              <aside class="live-side">
+                <section class="panel side-panel">
+                  <div class="panel__header">
+                    <div>
+                      <p class="eyebrow">Session actions</p>
+                      <h3>Quick access</h3>
+                    </div>
+                  </div>
+                  <div class="stack-list">
+                    <button class="button button--secondary button--block" data-route="history">Open history</button>
+                    <button class="button button--secondary button--block" data-route="settings">Open settings</button>
+                    <button class="button button--ghost button--block" id="exportCurrentFromSide">Export current session</button>
+                  </div>
+                </section>
+
+                <section class="panel side-panel">
+                  <div class="panel__header">
+                    <div>
+                      <p class="eyebrow">Notes</p>
+                      <h3>Behavior</h3>
+                    </div>
+                  </div>
+                  <ul class="checklist compact-list">
+                    <li>Pause closes the live connection and stops microphone sending.</li>
+                    <li>Final transcript segments are saved locally after each completed turn.</li>
+                    <li>After long listening sessions, the connection rolls over automatically.</li>
+                    <li>Resume continues the same logical session and transcript history.</li>
+                  </ul>
+                </section>
+              </aside>
+            </div>
+          </section>
+
+          <section class="page" id="page-history" data-page="history">
+            <section class="panel">
+              <div class="panel__header panel__header--spread">
+                <div>
+                  <p class="eyebrow">Local history</p>
+                  <h3>Previous sessions</h3>
+                </div>
+                <div class="button-row button-row--wrap">
+                  <button class="button button--ghost button--small" id="refreshHistoryButton">Refresh</button>
+                  <button class="button button--secondary button--small" data-action="new-session">New Session</button>
+                </div>
+              </div>
+              <div class="history-list" id="historyList"></div>
+            </section>
+          </section>
+
+          <section class="page" id="page-settings" data-page="settings">
+            <div class="grid-two">
+              <form class="panel form-panel" id="settingsForm">
+                <div class="panel__header">
+                  <div>
+                    <p class="eyebrow">Preferences</p>
+                    <h3>Settings</h3>
+                  </div>
+                </div>
+
+                <label class="field">
+                  <span>OpenAI API key</span>
+                  <div class="input-row">
+                    <input id="settingsApiKeyInput" type="password" autocomplete="off" placeholder="sk-..." />
+                    <button type="button" class="button button--ghost" id="settingsToggleApiKey">Show</button>
+                  </div>
+                </label>
+
+                <div class="button-row button-row--wrap">
+                  <button type="submit" class="button button--primary">Save settings</button>
+                  <button type="button" class="button button--danger" id="forgetApiKeyButton">Forget API key</button>
+                </div>
+
+                <div class="grid-two compact-grid">
+                  <label class="field">
+                    <span>Default source language</span>
+                    <select id="settingsSourceLanguage"></select>
+                  </label>
+                  <label class="field">
+                    <span>Default target language</span>
+                    <select id="settingsTargetLanguage"></select>
+                  </label>
+                </div>
+
+                <label class="field">
+                  <span>Text size</span>
+                  <select id="textSizeSelect">
+                    <option value="small">Small</option>
+                    <option value="medium">Medium</option>
+                    <option value="large">Large</option>
+                    <option value="xlarge">Extra large</option>
+                  </select>
+                </label>
+
+                <label class="field field--toggle">
+                  <span>Auto-scroll transcript</span>
+                  <input id="autoScrollInput" type="checkbox" />
+                </label>
+
+                <label class="field">
+                  <span>Timestamp style</span>
+                  <select id="timestampStyleSelect">
+                    <option value="elapsed">Elapsed session time</option>
+                    <option value="wall-clock">Wall-clock time</option>
+                    <option value="speech-only">Speech-only time</option>
+                  </select>
+                </label>
+
+                <label class="field">
+                  <span>Glossary / context</span>
+                  <textarea id="settingsGlossaryInput" rows="6"></textarea>
+                </label>
+              </form>
+
+              <section class="panel">
+                <div class="panel__header">
+                  <div>
+                    <p class="eyebrow">Local data</p>
+                    <h3>Manage browser storage</h3>
+                  </div>
+                </div>
+                <div class="storage-stats" id="storageStats"></div>
+                <div class="stack-list">
+                  <button class="button button--secondary button--block" id="clearEndedSessionsButton">Delete ended sessions</button>
+                  <button class="button button--danger button--block" id="clearAllSessionsButton">Delete all local sessions</button>
+                  <button class="button button--ghost button--block" id="clearDraftsButton">Clear recovery / active-session markers</button>
+                </div>
+                <div class="note">
+                  Deleting local session data removes transcript history from this browser only. It does not affect GitHub Pages deployment.
+                </div>
+              </section>
+            </div>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+    <script type="module" src="./js/app.js"></script>
+  </body>
+</html>

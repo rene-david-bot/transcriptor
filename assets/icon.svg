@@ -1,0 +1,16 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="512" height="512" rx="128" fill="#0B1020"/>
+  <rect x="40" y="40" width="432" height="432" rx="112" fill="url(#paint0_linear_1_2)"/>
+  <path d="M158 150C158 138.954 166.954 130 178 130H334C345.046 130 354 138.954 354 150V220C354 231.046 345.046 240 334 240H290L230 300V240H178C166.954 240 158 231.046 158 220V150Z" fill="#0B1020" fill-opacity="0.85"/>
+  <rect x="198" y="164" width="32" height="42" rx="16" fill="#5EEAD4"/>
+  <rect x="240" y="152" width="32" height="66" rx="16" fill="#E2F3FF"/>
+  <rect x="282" y="176" width="32" height="32" rx="16" fill="#5EEAD4"/>
+  <path d="M184 354C184 343.507 192.507 335 203 335H309C319.493 335 328 343.507 328 354V360C328 370.493 319.493 379 309 379H203C192.507 379 184 370.493 184 360V354Z" fill="#E2F3FF" fill-opacity="0.92"/>
+  <path d="M165 323C165 312.507 173.507 304 184 304H328C338.493 304 347 312.507 347 323V329C347 339.493 338.493 348 328 348H184C173.507 348 165 339.493 165 329V323Z" fill="#0B1020" fill-opacity="0.55"/>
+  <defs>
+    <linearGradient id="paint0_linear_1_2" x1="90" y1="70" x2="420" y2="438" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2DD4BF"/>
+      <stop offset="1" stop-color="#60A5FA"/>
+    </linearGradient>
+  </defs>
+</svg>

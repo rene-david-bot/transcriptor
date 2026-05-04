@@ -1,0 +1,9 @@
+{
+  "name": "transcriptor",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "serve": "python3 -m http.server 4173"
+  }
+}

@@ -1,0 +1,11 @@
+# macOS / Windows
+.DS_Store
+Thumbs.db
+
+# local tooling
+.vscode/
+.idea/
+
+# optional local env files if a proxy is ever added later
+.env
+.env.local
