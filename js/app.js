@@ -181,6 +181,7 @@ const elements = {
   newSessionButton: $('#newSessionButton'),
   endSessionButton: $('#endSessionButton'),
   transcriptBoard: $('#transcriptBoard'),
+  transcriptModeNote: $('#transcriptModeNote'),
   transcriptSourceHeading: $('#transcriptSourceHeading'),
   transcriptTargetHeading: $('#transcriptTargetHeading'),
   transcriptLiveState: $('#transcriptLiveState'),
@@ -198,6 +199,7 @@ const elements = {
   speakerStatusLine: $('#speakerStatusLine'),
   speakerSummary: $('#speakerSummary'),
   transcriptList: $('#transcriptList'),
+  transcriptLiveBand: $('#transcriptLiveBand'),
   exportMarkdownButton: $('#exportMarkdownButton'),
   exportTxtButton: $('#exportTxtButton'),
   exportJsonButton: $('#exportJsonButton'),
@@ -349,6 +351,8 @@ function applySettingsToForms() {
   document.body.classList.add(`text-size-${settings.textSize || 'medium'}`);
   elements.transcriptList.classList.remove('text-size-small', 'text-size-medium', 'text-size-large', 'text-size-xlarge');
   elements.transcriptList.classList.add(`text-size-${settings.textSize || 'medium'}`);
+  elements.transcriptLiveBand.classList.remove('text-size-small', 'text-size-medium', 'text-size-large', 'text-size-xlarge');
+  elements.transcriptLiveBand.classList.add(`text-size-${settings.textSize || 'medium'}`);
   if (elements.transcriptSourceHeading) {
     elements.transcriptSourceHeading.textContent = getLanguageName(state.currentSession?.sourceLanguage || settings.sourceLanguage || '');
   }
@@ -362,11 +366,31 @@ function getTranscriptViewButtons() {
   return $$('[data-transcript-view]');
 }
 
+function isCompactTranscriptLayout() {
+  return typeof window !== 'undefined' && window.matchMedia('(max-width: 720px)').matches;
+}
+
+function getTranscriptModeNote(mode = state.liveTranscriptView) {
+  const compact = isCompactTranscriptLayout();
+  if (mode === 'source') {
+    return 'Original mode keeps one rolling teleprompter for the source language only.';
+  }
+  if (mode === 'target') {
+    return 'Translation mode keeps one rolling teleprompter for the translated language only.';
+  }
+  return compact
+    ? 'Both mode stacks paired source and translation paragraphs in one rolling document.'
+    : 'Both mode keeps original and translation side by side in one rolling teleprompter.';
+}
+
 function applyTranscriptView() {
   if (!elements.transcriptBoard) return;
   const mode = TRANSCRIPT_VIEW_MODES.has(state.liveTranscriptView) ? state.liveTranscriptView : 'both';
   elements.transcriptBoard.classList.remove('transcript-board--source', 'transcript-board--both', 'transcript-board--target');
   elements.transcriptBoard.classList.add(`transcript-board--${mode}`);
+  if (elements.transcriptModeNote) {
+    elements.transcriptModeNote.textContent = getTranscriptModeNote(mode);
+  }
   getTranscriptViewButtons().forEach((button) => {
     const active = button.dataset.transcriptView === mode;
     button.classList.toggle('is-active', active);
@@ -377,6 +401,7 @@ function applyTranscriptView() {
 function setTranscriptView(mode) {
   state.liveTranscriptView = TRANSCRIPT_VIEW_MODES.has(mode) ? mode : 'both';
   applyTranscriptView();
+  renderTranscript();
 }
 
 function isTranscriptNearBottom(threshold = 96) {
@@ -940,13 +965,30 @@ function buildLiveTranscriptState() {
       visible: false,
       sourceLabel,
       targetLabel,
-      liveStateLabel: 'Start listening to build the live bilingual timeline.',
+      sourceText: '',
+      targetText: '',
+      liveStateLabel: 'Start listening to fill the teleprompter.',
+      liveBadge: 'Live band',
+      liveMeta: 'Newest words appear here before they lock into the document.',
+      timestamp: 'Live',
+      targetPending: false,
+      hasActiveSpeech: false,
     };
   }
 
   const sourceDraft = String(session.draftSource || '').trim();
   const targetDraft = String(session.draftTranslation || '').trim();
   const hasActiveSpeech = Boolean(sourceDraft) && (state.speechActive || Boolean(state.activeDraftItemId));
+  const lastSegment = state.currentSegments[state.currentSegments.length - 1];
+  const draftEchoesLastFinal = Boolean(
+    !state.activeDraftItemId &&
+      lastSegment &&
+      sourceDraft &&
+      normalizeTranscript(lastSegment.sourceText) === normalizeTranscript(sourceDraft) &&
+      (!targetDraft ||
+        normalizeTranscript(lastSegment.translatedText || lastSegment.translatedDraft || '') === normalizeTranscript(targetDraft))
+  );
+  const hasRenderableLiveDraft = Boolean((sourceDraft || targetDraft) && !draftEchoesLastFinal);
   const targetRefreshing = Boolean(
     sourceDraft &&
       ((state.draftTranslationPending && state.draftTranslationPending.itemId === state.activeDraftItemId) ||
@@ -955,31 +997,33 @@ function buildLiveTranscriptState() {
 
   let liveStateLabel = state.settings.autoScroll
     ? 'Following the newest lines automatically.'
-    : 'Auto-follow is off. Scroll manually or use Jump to live.';
+    : 'Auto-follow is off. Read manually or use Jump to live.';
 
-  if (!state.transcriptPinnedToBottom && (state.currentSegments.length || sourceDraft || targetDraft)) {
-    liveStateLabel = 'Browsing earlier lines. Tap Jump to live to rejoin the current speech.';
+  if (!state.transcriptPinnedToBottom && (state.currentSegments.length || hasRenderableLiveDraft)) {
+    liveStateLabel = 'Browsing earlier paragraphs. Tap Jump to live to rejoin the latest speech.';
+  } else if (!hasRenderableLiveDraft && state.currentSegments.length) {
+    liveStateLabel = 'Waiting for the next utterance.';
   } else if (hasActiveSpeech && targetDraft) {
-    liveStateLabel = 'Original and translation are updating in place.';
+    liveStateLabel = 'New source and translated words are updating in the live band.';
   } else if (hasActiveSpeech) {
-    liveStateLabel = 'Listening live. Translation is catching up.';
+    liveStateLabel = 'Listening live. Translation is catching up in the live band.';
   } else if (sourceDraft && targetDraft) {
-    liveStateLabel = 'Holding the current utterance until the final segment lands.';
+    liveStateLabel = 'Holding the latest utterance in the live band until it finalizes.';
   } else if (sourceDraft) {
-    liveStateLabel = 'Holding the current utterance while translation settles.';
+    liveStateLabel = 'Holding the latest source words while translation settles.';
   } else if (!state.currentSegments.length) {
-    liveStateLabel = 'Waiting for the first utterance.';
+    liveStateLabel = 'Waiting for the first finalized paragraph.';
   }
 
   return {
-    visible: Boolean(sourceDraft || targetDraft),
+    visible: hasRenderableLiveDraft,
     sourceLabel,
     targetLabel,
     sourceText: sourceDraft || (targetDraft ? 'Source text is settling…' : ''),
     targetText: targetDraft || (sourceDraft ? 'Translation is catching up…' : ''),
     liveStateLabel,
-    liveBadge: hasActiveSpeech ? 'Live' : 'Holding',
-    liveMeta: hasActiveSpeech ? 'Updating while the speaker talks' : 'Waiting for final lock-in',
+    liveBadge: hasActiveSpeech ? 'Live band' : 'Holding band',
+    liveMeta: hasActiveSpeech ? 'Newest words stay here until the paragraph locks in' : 'Waiting for the current utterance to finalize',
     timestamp: formatDuration(getEffectiveActiveDuration()),
     targetPending: Boolean(sourceDraft && !targetDraft),
     hasActiveSpeech,
@@ -994,8 +1038,95 @@ function renderDrafts() {
   renderTranscript();
 }
 
+function renderTranscriptParagraph({ kind, label, text, pending = false }) {
+  return `
+    <section class="transcript-paragraph transcript-paragraph--${kind}">
+      <span class="transcript-paragraph__label">${escapeHtml(label)}</span>
+      <p class="transcript-paragraph__text ${pending ? 'transcript-paragraph__text--pending' : ''}">${escapeHtml(text)}</p>
+    </section>
+  `;
+}
+
+function renderLiveBandParagraph({ kind, label, text, pending = false, active = false }) {
+  const toneClass = pending
+    ? 'transcript-live-band__text--pending'
+    : active
+      ? 'transcript-live-band__text--active'
+      : 'transcript-live-band__text--held';
+
+  return `
+    <section class="transcript-live-band__paragraph transcript-live-band__paragraph--${kind}">
+      <span class="transcript-live-band__label">${escapeHtml(label)}</span>
+      <p class="transcript-live-band__text ${toneClass}">${escapeHtml(text)}</p>
+    </section>
+  `;
+}
+
+function renderLiveBand(liveDraft) {
+  const band = elements.transcriptLiveBand;
+  if (!band) return;
+
+  const mode = TRANSCRIPT_VIEW_MODES.has(state.liveTranscriptView) ? state.liveTranscriptView : 'both';
+  const showSource = mode !== 'target';
+  const showTarget = mode !== 'source';
+
+  if (!liveDraft.visible) {
+    band.classList.add('transcript-live-band--idle');
+    band.innerHTML = `
+      <div class="transcript-live-band__meta">
+        <div class="transcript-live-band__meta-group">
+          <span class="transcript-live-band__badge">Live band</span>
+          <span class="transcript-live-band__timestamp">Ready</span>
+        </div>
+        <span class="transcript-live-band__state">${escapeHtml(liveDraft.liveStateLabel)}</span>
+      </div>
+      <p class="transcript-live-band__placeholder">${escapeHtml(
+        state.currentSession
+          ? 'Current speech will appear here first, then move into the teleprompter above once finalized.'
+          : 'Start listening. New words will appear here first, and finalized paragraphs will collect above.'
+      )}</p>
+    `;
+    return;
+  }
+
+  band.classList.remove('transcript-live-band--idle');
+  band.innerHTML = `
+    <div class="transcript-live-band__meta">
+      <div class="transcript-live-band__meta-group">
+        <span class="transcript-live-band__badge">${escapeHtml(liveDraft.liveBadge)}</span>
+        <span class="transcript-live-band__timestamp">${escapeHtml(liveDraft.timestamp || 'Live')}</span>
+      </div>
+      <span class="transcript-live-band__state">${escapeHtml(liveDraft.liveMeta)}</span>
+    </div>
+    <div class="transcript-live-band__body ${mode === 'both' ? 'transcript-live-band__body--both' : 'transcript-live-band__body--single'}">
+      ${
+        showSource
+          ? renderLiveBandParagraph({
+              kind: 'source',
+              label: liveDraft.sourceLabel,
+              text: liveDraft.sourceText || 'Listening…',
+              active: liveDraft.hasActiveSpeech,
+            })
+          : ''
+      }
+      ${
+        showTarget
+          ? renderLiveBandParagraph({
+              kind: 'target',
+              label: liveDraft.targetLabel,
+              text: liveDraft.targetText || 'Translation is catching up…',
+              pending: liveDraft.targetPending,
+              active: !liveDraft.targetPending && liveDraft.hasActiveSpeech,
+            })
+          : ''
+      }
+    </div>
+  `;
+}
+
 function renderTranscript() {
   const list = elements.transcriptList;
+  if (!list) return;
   const liveDraft = buildLiveTranscriptState();
   const sourceLabel = liveDraft.sourceLabel;
   const targetLabel = liveDraft.targetLabel;
@@ -1021,60 +1152,38 @@ function renderTranscript() {
           ? 'Speaker unavailable'
           : 'Speaker';
     const auxParts = [];
-    if (segment.sequence) auxParts.push(`Segment ${segment.sequence}`);
     if (segment.translationStatus === 'draft') auxParts.push('Translation polishing');
     else if (translationPending) auxParts.push('Translation pending');
 
     return `
-      <article class="transcript-row transcript-row--final">
-        <div class="transcript-row__meta">
-          <strong class="transcript-row__time">${escapeHtml(buildTranscriptTimestamp(segment))}</strong>
-          <span class="transcript-row__speaker">${escapeHtml(speakerLabel)}</span>
-          <span class="transcript-row__aux">${escapeHtml(auxParts.join(' • ') || 'Finalized')}</span>
+      <article class="transcript-pair transcript-pair--final">
+        <div class="transcript-pair__meta">
+          <span class="transcript-pair__speaker">${escapeHtml(speakerLabel)}</span>
+          <span class="transcript-pair__divider">•</span>
+          <span class="transcript-pair__time">${escapeHtml(buildTranscriptTimestamp(segment))}</span>
+          ${
+            auxParts.length
+              ? `<span class="transcript-pair__divider">•</span><span class="transcript-pair__aux">${escapeHtml(auxParts.join(' • '))}</span>`
+              : ''
+          }
         </div>
-        <div class="transcript-cell transcript-cell--source">
-          <span class="transcript-cell__label">${escapeHtml(sourceLabel)}</span>
-          <p class="transcript-cell__text">${escapeHtml(segment.sourceText)}</p>
-        </div>
-        <div class="transcript-cell transcript-cell--target">
-          <span class="transcript-cell__label">${escapeHtml(targetLabel)}</span>
-          <p class="transcript-cell__text ${translationPending ? 'transcript-cell__text--pending' : ''}">${escapeHtml(translatedDisplay)}</p>
-        </div>
+        ${renderTranscriptParagraph({ kind: 'source', label: sourceLabel, text: segment.sourceText })}
+        ${renderTranscriptParagraph({ kind: 'target', label: targetLabel, text: translatedDisplay, pending: translationPending })}
       </article>
     `;
   });
 
-  const liveRow = liveDraft.visible
-    ? `
-      <article class="transcript-row transcript-row--live">
-        <div class="transcript-row__meta">
-          <strong class="transcript-row__time">${escapeHtml(liveDraft.timestamp || 'Live')}</strong>
-          <span class="transcript-row__speaker">${escapeHtml(liveDraft.liveBadge)}</span>
-          <span class="transcript-row__state">${escapeHtml(liveDraft.liveMeta)}</span>
-        </div>
-        <div class="transcript-cell transcript-cell--source">
-          <span class="transcript-cell__label">${escapeHtml(sourceLabel)}</span>
-          <p class="transcript-cell__text ${liveDraft.hasActiveSpeech ? 'transcript-cell__text--live' : 'transcript-cell__text--held'}">${escapeHtml(
-            liveDraft.sourceText || 'Listening…'
-          )}</p>
-        </div>
-        <div class="transcript-cell transcript-cell--target">
-          <span class="transcript-cell__label">${escapeHtml(targetLabel)}</span>
-          <p class="transcript-cell__text ${liveDraft.targetPending ? 'transcript-cell__text--pending' : 'transcript-cell__text--live'}">${escapeHtml(
-            liveDraft.targetText || 'Translation is catching up…'
-          )}</p>
-        </div>
-      </article>
-    `
-    : '';
-
-  if (!finalizedRows.length && !liveRow) {
-    list.innerHTML = '<div class="transcript-empty">Start speaking and the live bilingual timeline will grow here.</div>';
-    updateTranscriptAutoFollowState();
-    return;
+  if (!finalizedRows.length) {
+    list.innerHTML = `<div class="transcript-empty">${escapeHtml(
+      state.currentSession
+        ? 'Finalized paragraphs will collect here. The newest words stay in the live band below until they lock in.'
+        : 'Start listening and this teleprompter will grow with finalized paragraphs while the live band handles the newest words.'
+    )}</div>`;
+  } else {
+    list.innerHTML = finalizedRows.join('');
   }
 
-  list.innerHTML = [...finalizedRows, liveRow].join('');
+  renderLiveBand(liveDraft);
 
   requestAnimationFrame(() => {
     if (shouldFollow) {
@@ -2307,6 +2416,7 @@ function bindEvents() {
   });
   elements.jumpToLiveButton?.addEventListener('click', () => scrollTranscriptToLive());
   elements.transcriptList.addEventListener('scroll', updateTranscriptAutoFollowState);
+  window.addEventListener('resize', applyTranscriptView);
 
   elements.startButton.addEventListener('click', () => startListening());
   elements.pauseButton.addEventListener('click', pauseListening);

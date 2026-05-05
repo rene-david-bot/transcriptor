@@ -228,7 +228,7 @@
                   <div class="panel__header panel__header--spread">
                     <div>
                       <p class="eyebrow">Live transcript</p>
-                      <h3>One scrolling bilingual timeline</h3>
+                      <h3>Teleprompter-style bilingual transcript</h3>
                     </div>
                     <div class="button-row button-row--wrap">
                       <button class="button button--ghost button--small" id="exportMarkdownButton">Export Markdown</button>
@@ -251,8 +251,11 @@
                   </div>
 
                   <div class="transcript-board transcript-board--both" id="transcriptBoard">
+                    <div class="transcript-board__mode-note" id="transcriptModeNote">
+                      One rolling reading surface. Final paragraphs stay stable, and the live band holds the newest words.
+                    </div>
+
                     <div class="transcript-board__head">
-                      <span class="transcript-board__meta-label">Speaker · time</span>
                       <span class="transcript-board__column-label transcript-board__column-label--source" id="transcriptSourceHeading"
                         >Original</span
                       >
@@ -262,6 +265,7 @@
                     </div>
 
                     <div class="transcript-list text-size-medium" id="transcriptList" aria-live="polite"></div>
+                    <div class="transcript-live-band text-size-medium" id="transcriptLiveBand" aria-live="polite"></div>
                   </div>
                 </section>
               </div>
