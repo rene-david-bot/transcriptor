@@ -24,6 +24,47 @@ function download(content, filename, mimeType) {
   setTimeout(() => URL.revokeObjectURL(url), 1_500);
 }
 
+function formatDuration(ms = 0) {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  }
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+}
+
+function buildSpeakerSummary(segments) {
+  const summaryMap = new Map();
+
+  for (const segment of segments) {
+    if (!segment.speakerLabel) continue;
+    const current = summaryMap.get(segment.speakerLabel) || {
+      label: segment.speakerLabel,
+      durationMs: 0,
+      segments: 0,
+    };
+    current.durationMs += Math.max(1000, segment.speakerDurationMs || segment.endMs - segment.startMs || 0);
+    current.segments += 1;
+    summaryMap.set(segment.speakerLabel, current);
+  }
+
+  return Array.from(summaryMap.values()).sort((a, b) => b.durationMs - a.durationMs || a.label.localeCompare(b.label));
+}
+
+function buildSpeakerSummaryLines(summary, prefix = '- ') {
+  if (!summary.length) return [];
+
+  const totalDurationMs = summary.reduce((total, speaker) => total + speaker.durationMs, 0);
+  return [
+    `${prefix}Total speaker time: ${formatDuration(totalDurationMs)}`,
+    ...summary.map(
+      (speaker) => `${prefix}${speaker.label}: ${formatDuration(speaker.durationMs)} (${speaker.segments} segment${speaker.segments === 1 ? '' : 's'})`
+    ),
+  ];
+}
+
 function formatSegmentForMarkdown(segment, timestamp) {
   const speakerLine = segment.speakerLabel
     ? `- Speaker: ${segment.speakerLabel}`
@@ -71,6 +112,7 @@ function formatSegmentForText(segment, timestamp) {
 
 export function exportSessionMarkdown(session, segments, formatTimestamp) {
   const base = buildExportBaseName(session);
+  const speakerSummary = buildSpeakerSummary(segments);
   const content = [
     `# ${session.title}`,
     '',
@@ -81,6 +123,7 @@ export function exportSessionMarkdown(session, segments, formatTimestamp) {
     `- Active duration ms: ${session.activeDurationMs || 0}`,
     `- Segment count: ${segments.length}`,
     session.glossary ? `- Glossary: ${session.glossary}` : null,
+    ...buildSpeakerSummaryLines(speakerSummary),
     '',
     '---',
     '',
@@ -94,6 +137,7 @@ export function exportSessionMarkdown(session, segments, formatTimestamp) {
 
 export function exportSessionTxt(session, segments, formatTimestamp) {
   const base = buildExportBaseName(session);
+  const speakerSummary = buildSpeakerSummary(segments);
   const content = [
     `${session.title}`,
     `Created: ${session.createdAt}`,
@@ -103,6 +147,7 @@ export function exportSessionTxt(session, segments, formatTimestamp) {
     `Duration(ms): ${session.activeDurationMs || 0}`,
     `Segments: ${segments.length}`,
     session.glossary ? `Glossary: ${session.glossary}` : null,
+    ...buildSpeakerSummaryLines(speakerSummary, ''),
     '',
     ...segments.flatMap((segment) => [formatSegmentForText(segment, formatTimestamp(segment)), '']),
   ]
@@ -114,9 +159,12 @@ export function exportSessionTxt(session, segments, formatTimestamp) {
 
 export function exportSessionJson(session, segments) {
   const base = buildExportBaseName(session);
+  const speakerSummary = buildSpeakerSummary(segments);
   const payload = {
     session,
     segments,
+    speakerSummary,
+    speakerTotalDurationMs: speakerSummary.reduce((total, speaker) => total + speaker.durationMs, 0),
     exportedAt: new Date().toISOString(),
   };
   download(JSON.stringify(payload, null, 2), `${base}.json`, 'application/json;charset=utf-8');

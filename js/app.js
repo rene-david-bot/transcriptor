@@ -66,6 +66,7 @@ const DEFAULT_SETTINGS = {
   sourceLanguage: 'it',
   targetLanguage: 'en',
   glossary: '',
+  speakerNames: '',
   autoScroll: true,
   textSize: 'medium',
   timestampStyle: 'elapsed',
@@ -146,6 +147,7 @@ const elements = {
   sourceLanguageInput: $('#sourceLanguageInput'),
   targetLanguageInput: $('#targetLanguageInput'),
   glossaryInput: $('#glossaryInput'),
+  speakerNamesInput: $('#speakerNamesInput'),
   resumeLastSessionButton: $('#resumeLastSessionButton'),
   recoverDraftButton: $('#recoverDraftButton'),
   openHistoryFromSetup: $('#openHistoryFromSetup'),
@@ -184,6 +186,7 @@ const elements = {
   autoScrollInput: $('#autoScrollInput'),
   timestampStyleSelect: $('#timestampStyleSelect'),
   settingsGlossaryInput: $('#settingsGlossaryInput'),
+  settingsSpeakerNamesInput: $('#settingsSpeakerNamesInput'),
   forgetApiKeyButton: $('#forgetApiKeyButton'),
   clearEndedSessionsButton: $('#clearEndedSessionsButton'),
   clearAllSessionsButton: $('#clearAllSessionsButton'),
@@ -306,7 +309,9 @@ function applySettingsToForms() {
   elements.settingsSourceLanguage.value = settings.sourceLanguage;
   elements.settingsTargetLanguage.value = settings.targetLanguage;
   elements.glossaryInput.value = settings.glossary || '';
+  elements.speakerNamesInput.value = settings.speakerNames || '';
   elements.settingsGlossaryInput.value = settings.glossary || '';
+  elements.settingsSpeakerNamesInput.value = settings.speakerNames || '';
   elements.textSizeSelect.value = settings.textSize || 'medium';
   elements.autoScrollInput.checked = Boolean(settings.autoScroll);
   elements.timestampStyleSelect.value = settings.timestampStyle || 'elapsed';
@@ -410,6 +415,7 @@ function collectSettingsFromSetupForm() {
     sourceLanguage: elements.sourceLanguageInput.value,
     targetLanguage: elements.targetLanguageInput.value,
     glossary: elements.glossaryInput.value.trim(),
+    speakerNames: normalizeSpeakerNamesInput(elements.speakerNamesInput.value),
   };
 }
 
@@ -419,6 +425,7 @@ function collectSettingsFromSettingsForm() {
     sourceLanguage: elements.settingsSourceLanguage.value,
     targetLanguage: elements.settingsTargetLanguage.value,
     glossary: elements.settingsGlossaryInput.value.trim(),
+    speakerNames: normalizeSpeakerNamesInput(elements.settingsSpeakerNamesInput.value),
     textSize: elements.textSizeSelect.value,
     autoScroll: elements.autoScrollInput.checked,
     timestampStyle: elements.timestampStyleSelect.value,
@@ -462,6 +469,86 @@ function formatSpeakerLabel(label) {
   return String(label).startsWith('Speaker ') ? String(label) : `Speaker ${label}`;
 }
 
+function parseSpeakerNames(value) {
+  return Array.from(
+    new Set(
+      String(value || '')
+        .split(/[\n,]/)
+        .map((name) => name.trim())
+        .filter(Boolean)
+    )
+  ).slice(0, 8);
+}
+
+function normalizeSpeakerNamesInput(value) {
+  return parseSpeakerNames(value).join(', ');
+}
+
+function getDefaultSpeakerLabel(rawLabel) {
+  return rawLabel ? formatSpeakerLabel(rawLabel) : '';
+}
+
+function getSegmentRawSpeakerLabel(segment) {
+  if (segment?.speakerRawLabel) return String(segment.speakerRawLabel).trim();
+  const match = String(segment?.speakerLabel || '')
+    .trim()
+    .match(/^Speaker\s+(.+)$/i);
+  return match ? match[1].trim() : '';
+}
+
+function buildSpeakerAliasesFromNames(speakerNames) {
+  return parseSpeakerNames(speakerNames).reduce((aliases, name, index) => {
+    const rawLabel = String.fromCharCode(65 + index);
+    aliases[rawLabel] = name;
+    return aliases;
+  }, {});
+}
+
+function resolveSpeakerLabel(rawLabel, session, fallbackLabel = '') {
+  const normalizedRawLabel = String(rawLabel || '').trim();
+  if (!normalizedRawLabel) return fallbackLabel || '';
+  const alias = session?.speakerAliases?.[normalizedRawLabel];
+  const seededLabel = buildSpeakerAliasesFromNames(session?.speakerNames || '')[normalizedRawLabel];
+  return alias?.trim() || seededLabel?.trim() || fallbackLabel || getDefaultSpeakerLabel(normalizedRawLabel);
+}
+
+function getSpeakerNamesForContext(session = state.currentSession) {
+  const seededNames = parseSpeakerNames(session?.speakerNames || state.settings.speakerNames || '');
+  const aliasEntries = Object.entries(session?.speakerAliases || {})
+    .map(([rawLabel, label]) => [String(rawLabel || '').trim(), String(label || '').trim()])
+    .filter(([rawLabel, label]) => rawLabel && label)
+    .sort(([left], [right]) => left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' }));
+
+  const aliasMap = new Map(aliasEntries);
+  const merged = [];
+
+  seededNames.forEach((name, index) => {
+    const rawLabel = String.fromCharCode(65 + index);
+    merged.push(aliasMap.get(rawLabel) || name);
+    aliasMap.delete(rawLabel);
+  });
+
+  aliasEntries.forEach(([rawLabel, label]) => {
+    if (aliasMap.has(rawLabel)) {
+      merged.push(label);
+      aliasMap.delete(rawLabel);
+    }
+  });
+
+  return Array.from(new Set(merged.map((name) => name.trim()).filter(Boolean)));
+}
+
+function buildSessionGlossary(session = state.currentSession) {
+  const glossary = String(session?.glossary || state.settings.glossary || '').trim();
+  const speakerNames = getSpeakerNamesForContext(session);
+  if (!speakerNames.length) return glossary;
+
+  const speakerLine = `Speaker names: ${speakerNames.join(', ')}`;
+  if (!glossary) return speakerLine;
+  if (glossary.includes(speakerLine)) return glossary;
+  return `${glossary}\n${speakerLine}`;
+}
+
 function overlapMs(startA, endA, startB, endB) {
   return Math.max(0, Math.min(endA, endB) - Math.max(startA, startB));
 }
@@ -490,10 +577,14 @@ function buildSpeakerSummary(segments) {
   const summaryMap = new Map();
 
   for (const segment of segments) {
-    if (!segment.speakerLabel) continue;
-    const key = segment.speakerLabel;
+    const rawLabel = getSegmentRawSpeakerLabel(segment);
+    const label = segment.speakerLabel || getDefaultSpeakerLabel(rawLabel);
+    if (!label) continue;
+    const key = rawLabel || label;
     const current = summaryMap.get(key) || {
-      label: key,
+      label,
+      rawLabel,
+      defaultLabel: getDefaultSpeakerLabel(rawLabel),
       durationMs: 0,
       segments: 0,
     };
@@ -505,12 +596,57 @@ function buildSpeakerSummary(segments) {
   return Array.from(summaryMap.values()).sort((a, b) => b.durationMs - a.durationMs || a.label.localeCompare(b.label));
 }
 
+function renderSpeakerSummaryCards(summary) {
+  if (!summary.length) return '';
+
+  const totalDurationMs = summary.reduce((total, speaker) => total + speaker.durationMs, 0);
+
+  return [
+    `
+      <div class="speaker-total">
+        <strong>Total speaker time</strong>
+        <span>${formatDuration(totalDurationMs)}</span>
+        <small>Best effort, based on diarized segments only.</small>
+      </div>
+    `,
+    ...summary.map(
+      (speaker) => `
+        <div class="speaker-stat">
+          <div class="speaker-stat__content">
+            <div class="speaker-stat__header-row">
+              <strong>${escapeHtml(speaker.label)}</strong>
+              ${
+                speaker.rawLabel
+                  ? `<button class="button button--ghost button--small" data-speaker-action="rename" data-speaker-raw-label="${escapeHtml(
+                      speaker.rawLabel
+                    )}">Rename</button>`
+                  : ''
+              }
+            </div>
+            <small>${escapeHtml(
+              [
+                speaker.defaultLabel && speaker.defaultLabel !== speaker.label ? speaker.defaultLabel : null,
+                `${speaker.segments} segment${speaker.segments === 1 ? '' : 's'}`,
+              ]
+                .filter(Boolean)
+                .join(' • ')
+            )}</small>
+          </div>
+          <span>${formatDuration(speaker.durationMs)}</span>
+        </div>
+      `
+    ),
+  ].join('');
+}
+
 function renderSpeakerInsights() {
   if (!elements.speakerStatusLine || !elements.speakerSummary) return;
 
   const session = state.currentSession;
   const pendingSegments = state.currentSegments.filter((segment) => segment.speakerStatus === 'pending').length;
   const summary = buildSpeakerSummary(state.currentSegments);
+  const sessionEnded = session?.status === 'ended';
+  const stoppedSession = session && ['paused', 'ended'].includes(session.status);
 
   if (!session) {
     elements.speakerStatusLine.textContent = 'Speaker detection will appear here when a session is active.';
@@ -521,24 +657,24 @@ function renderSpeakerInsights() {
   if (!state.speakerTrackingSupported) {
     elements.speakerStatusLine.textContent = 'This browser does not support background speaker detection.';
     elements.speakerSummary.innerHTML = summary.length
-      ? summary
-          .map(
-            (speaker) => `
-              <div class="speaker-stat">
-                <strong>${escapeHtml(speaker.label)}</strong>
-                <span>${formatDuration(speaker.durationMs)}</span>
-                <small>${speaker.segments} segment${speaker.segments === 1 ? '' : 's'}</small>
-              </div>
-            `
-          )
-          .join('')
+      ? renderSpeakerSummaryCards(summary)
       : '<div class="note">Speaker timing is unavailable in this browser.</div>';
     return;
   }
 
-  elements.speakerStatusLine.textContent = pendingSegments
-    ? `${state.speakerTrackingStatus} ${pendingSegments} segment${pendingSegments === 1 ? '' : 's'} still waiting.`
-    : state.speakerTrackingStatus;
+  if (pendingSegments) {
+    elements.speakerStatusLine.textContent = `${state.speakerTrackingStatus} ${pendingSegments} segment${pendingSegments === 1 ? '' : 's'} still waiting.`;
+  } else if (sessionEnded && summary.length) {
+    elements.speakerStatusLine.textContent = 'Session ended. Final speaker totals stay available below and in exports.';
+  } else if (sessionEnded) {
+    elements.speakerStatusLine.textContent = 'Session ended. No finalized speaker timing is available for this session.';
+  } else if (stoppedSession && summary.length) {
+    elements.speakerStatusLine.textContent = 'Capture stopped. Final speaker totals stay available below and in exports.';
+  } else if (stoppedSession) {
+    elements.speakerStatusLine.textContent = 'Capture stopped. No finalized speaker timing is available for this session.';
+  } else {
+    elements.speakerStatusLine.textContent = state.speakerTrackingStatus;
+  }
 
   if (!summary.length) {
     elements.speakerSummary.innerHTML =
@@ -546,17 +682,7 @@ function renderSpeakerInsights() {
     return;
   }
 
-  elements.speakerSummary.innerHTML = summary
-    .map(
-      (speaker) => `
-        <div class="speaker-stat">
-          <strong>${escapeHtml(speaker.label)}</strong>
-          <span>${formatDuration(speaker.durationMs)}</span>
-          <small>${speaker.segments} segment${speaker.segments === 1 ? '' : 's'}</small>
-        </div>
-      `
-    )
-    .join('');
+  elements.speakerSummary.innerHTML = renderSpeakerSummaryCards(summary);
 }
 
 function buildTranscriptTimestamp(segment) {
@@ -769,8 +895,9 @@ async function syncLastActiveSession() {
   }
 }
 
-async function createSession({ sourceLanguage, targetLanguage, glossary }) {
+async function createSession({ sourceLanguage, targetLanguage, glossary, speakerNames }) {
   const createdAt = nowIso();
+  const normalizedSpeakerNames = normalizeSpeakerNamesInput(speakerNames);
   const session = {
     id: crypto.randomUUID(),
     title: buildSessionTitle(createdAt, sourceLanguage, targetLanguage),
@@ -779,6 +906,8 @@ async function createSession({ sourceLanguage, targetLanguage, glossary }) {
     sourceLanguage,
     targetLanguage,
     glossary: glossary || '',
+    speakerNames: normalizedSpeakerNames,
+    speakerAliases: {},
     createdAt,
     updatedAt: createdAt,
     activeDurationMs: 0,
@@ -856,6 +985,7 @@ async function stopSpeakerTracking({ statusMessage } = {}) {
 }
 
 async function applySpeakerLabelsFromDiarizedChunk({ sessionId, chunkStartMs, chunkEndMs, diarizedSegments }) {
+  const session = state.currentSession?.id === sessionId ? state.currentSession : await getSession(sessionId);
   const sessionSegments = state.currentSession?.id === sessionId ? [...state.currentSegments] : await listSegmentsBySession(sessionId);
   const relevantSegments = sessionSegments.filter(
     (segment) => (segment.endMs || 0) >= chunkStartMs - SPEAKER_MATCH_MARGIN_MS && (segment.startMs || 0) <= chunkEndMs + SPEAKER_MATCH_MARGIN_MS
@@ -908,7 +1038,8 @@ async function applySpeakerLabelsFromDiarizedChunk({ sessionId, chunkStartMs, ch
 
     const updatedSegment = {
       ...transcriptSegment,
-      speakerLabel: bestMatch.label,
+      speakerRawLabel: bestMatch.rawSpeaker,
+      speakerLabel: resolveSpeakerLabel(bestMatch.rawSpeaker, session, bestMatch.label),
       speakerScore: Number(bestMatch.score.toFixed(3)),
       speakerConfidence: Math.min(1, Number((bestMatch.timeScore + bestMatch.textScore * 0.25).toFixed(3))),
       speakerDurationMs: Math.max(transcriptSegment.speakerDurationMs || 0, Math.round(bestMatch.sharedMs || 0)),
@@ -1105,7 +1236,7 @@ async function startListening({ silent = false } = {}) {
     sourceLanguage: state.currentSession.sourceLanguage,
     sourceLanguageName: getLanguageName(state.currentSession.sourceLanguage),
     targetLanguageName: getLanguageName(state.currentSession.targetLanguage),
-    glossary: state.currentSession.glossary || state.settings.glossary,
+    glossary: buildSessionGlossary(state.currentSession),
     onEvent: handleRealtimeEvent,
     onStreamAvailable: (stream) => {
       startSpeakerTracking(stream).catch((error) => {
@@ -1219,6 +1350,7 @@ async function createFreshSessionFromLive() {
   elements.sourceLanguageInput.value = state.settings.sourceLanguage;
   elements.targetLanguageInput.value = state.settings.targetLanguage;
   elements.glossaryInput.value = state.currentSession?.glossary || state.settings.glossary || '';
+  elements.speakerNamesInput.value = state.currentSession?.speakerNames || state.settings.speakerNames || '';
   setRoute('setup');
 }
 
@@ -1340,7 +1472,7 @@ function processDraftTranslationQueue() {
         apiKey: state.settings.apiKey,
         sourceLanguageName: getLanguageName(state.currentSession.sourceLanguage),
         targetLanguageName: getLanguageName(state.currentSession.targetLanguage),
-        glossary: state.currentSession.glossary || state.settings.glossary,
+        glossary: buildSessionGlossary(state.currentSession),
         sourceText: snapshot.text,
         draft: true,
         signal: controller.signal,
@@ -1406,7 +1538,7 @@ function queueFinalSegmentTranslation(segment) {
     apiKey: state.settings.apiKey,
     sourceLanguageName: getLanguageName(segment.sourceLanguage),
     targetLanguageName: getLanguageName(segment.targetLanguage),
-    glossary: state.currentSession?.glossary || state.settings.glossary,
+    glossary: buildSessionGlossary(state.currentSession),
     sourceText: segment.sourceText,
     draft: false,
   };
@@ -1607,6 +1739,46 @@ async function exportHistoricalSession(sessionId, kind) {
   }
 }
 
+async function applySpeakerAliasesToCurrentSession(nextAliases) {
+  if (!state.currentSession) return;
+
+  const cleanedAliases = Object.fromEntries(
+    Object.entries(nextAliases || {})
+      .map(([rawLabel, label]) => [String(rawLabel || '').trim(), String(label || '').trim()])
+      .filter(([rawLabel, label]) => rawLabel && label)
+  );
+
+  state.currentSession.speakerAliases = cleanedAliases;
+  state.currentSession.updatedAt = nowIso();
+
+  const updatedSegments = [];
+  state.currentSegments = state.currentSegments.map((segment) => {
+    const rawLabel = getSegmentRawSpeakerLabel(segment);
+    if (!rawLabel) return segment;
+
+    const nextLabel = resolveSpeakerLabel(rawLabel, state.currentSession, segment.speakerLabel || getDefaultSpeakerLabel(rawLabel));
+    if (segment.speakerRawLabel === rawLabel && segment.speakerLabel === nextLabel) {
+      return segment;
+    }
+
+    const updatedSegment = {
+      ...segment,
+      speakerRawLabel: rawLabel,
+      speakerLabel: nextLabel,
+      speakerUpdatedAt: nowIso(),
+    };
+    updatedSegments.push(updatedSegment);
+    return updatedSegment;
+  });
+
+  for (const segment of updatedSegments) {
+    await upsertSegment(segment);
+  }
+
+  await persistCurrentSessionNow();
+  renderCurrentView();
+}
+
 async function renameCurrentSession() {
   if (!state.currentSession) return;
   const nextTitle = window.prompt('Rename session', state.currentSession.title);
@@ -1615,6 +1787,31 @@ async function renameCurrentSession() {
   await persistCurrentSessionNow();
   await refreshSessions();
   renderCurrentView();
+}
+
+async function renameSpeakerForCurrentSession(rawLabel) {
+  if (!state.currentSession || !rawLabel) return;
+
+  const defaultLabel = getDefaultSpeakerLabel(rawLabel);
+  const sessionDefaultLabel = resolveSpeakerLabel(rawLabel, { speakerNames: state.currentSession.speakerNames }, defaultLabel);
+  const currentLabel = resolveSpeakerLabel(rawLabel, state.currentSession, sessionDefaultLabel);
+  const nextLabel = window.prompt(
+    `Rename ${defaultLabel}. Leave blank to reset it back to the session default label.`,
+    currentLabel === sessionDefaultLabel ? '' : currentLabel
+  );
+
+  if (nextLabel === null) return;
+
+  const aliases = { ...(state.currentSession.speakerAliases || {}) };
+  const trimmedLabel = nextLabel.trim();
+  if (trimmedLabel) {
+    aliases[rawLabel] = trimmedLabel;
+  } else {
+    delete aliases[rawLabel];
+  }
+
+  await applySpeakerAliasesToCurrentSession(aliases);
+  showToast(trimmedLabel ? `${defaultLabel} renamed.` : `${defaultLabel} reset.`);
 }
 
 async function renameHistoricalSession(sessionId) {
@@ -1684,14 +1881,27 @@ async function saveSettingsFromSettingsForm(event) {
   event.preventDefault();
   const values = collectSettingsFromSettingsForm();
   await persistSettings(values);
+
+  let speakerNamesChanged = false;
   if (state.currentSession) {
+    const previousSpeakerNames = normalizeSpeakerNamesInput(state.currentSession.speakerNames || '');
     state.currentSession.sourceLanguage = values.sourceLanguage;
     state.currentSession.targetLanguage = values.targetLanguage;
     state.currentSession.glossary = values.glossary;
+    state.currentSession.speakerNames = values.speakerNames;
     state.currentSession.updatedAt = nowIso();
-    await persistCurrentSessionNow();
+    speakerNamesChanged = previousSpeakerNames !== values.speakerNames;
+
+    if (speakerNamesChanged) {
+      await applySpeakerAliasesToCurrentSession(state.currentSession.speakerAliases || {});
+    } else {
+      await persistCurrentSessionNow();
+    }
   }
-  renderCurrentView();
+
+  if (!speakerNamesChanged) {
+    renderCurrentView();
+  }
   showToast('Settings saved locally.');
 }
 
@@ -1749,6 +1959,11 @@ function bindEvents() {
   elements.endSessionButton.addEventListener('click', endCurrentSession);
   elements.newSessionButton.addEventListener('click', createFreshSessionFromLive);
   elements.renameSessionButton.addEventListener('click', renameCurrentSession);
+  elements.speakerSummary.addEventListener('click', async (event) => {
+    const renameButton = event.target.closest('[data-speaker-action="rename"]');
+    if (!renameButton) return;
+    await renameSpeakerForCurrentSession(renameButton.dataset.speakerRawLabel);
+  });
 
   elements.exportMarkdownButton.addEventListener('click', () => exportCurrentSession('md'));
   elements.exportTxtButton.addEventListener('click', () => exportCurrentSession('txt'));

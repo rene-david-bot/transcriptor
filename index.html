@@ -125,6 +125,18 @@
                   <small>Used as context to improve transcription and translation quality.</small>
                 </label>
 
+                <label class="field">
+                  <span>Speaker names (optional)</span>
+                  <input
+                    id="speakerNamesInput"
+                    name="speakerNames"
+                    type="text"
+                    autocomplete="off"
+                    placeholder="Rene, Moderator, Guest"
+                  />
+                  <small>Applied to detected speakers in order (A, B, C) and can be renamed later from the speaker timing panel.</small>
+                </label>
+
                 <div class="button-row button-row--wrap">
                   <button type="submit" class="button button--primary">Start listening</button>
                   <button type="button" class="button button--secondary hidden" id="resumeLastSessionButton">Resume last session</button>
@@ -147,6 +159,7 @@
                   <li>Use headphones if the room audio is loud or echoey.</li>
                   <li>Keep the phone close to the speaker or PA source.</li>
                   <li>Add names, brands, acronyms, and product terms to the glossary.</li>
+                  <li>Add speaker names up front if you already know who will talk.</li>
                   <li>Pause whenever you do not need capture, to avoid extra API cost.</li>
                   <li>The last active session can be resumed after refresh or reopening.</li>
                 </ul>
@@ -381,6 +394,17 @@
                 <label class="field">
                   <span>Glossary / context</span>
                   <textarea id="settingsGlossaryInput" rows="6"></textarea>
+                </label>
+
+                <label class="field">
+                  <span>Default speaker names</span>
+                  <input
+                    id="settingsSpeakerNamesInput"
+                    type="text"
+                    autocomplete="off"
+                    placeholder="Rene, Moderator, Guest"
+                  />
+                  <small>Used as the default speaker-name order for new sessions and can also refresh labels in the current session.</small>
                 </label>
               </form>
 

@@ -15,6 +15,7 @@ GitHub Pages: https://rene-david-bot.github.io/transcriptor/
 - source language default: **Italian**
 - target language default: **English**
 - optional glossary/context for names, products, companies, acronyms, and technical terms
+- optional speaker-name seeding for cleaner live labels
 - live session page with:
   - start / pause / resume / stop
   - end session
@@ -22,6 +23,8 @@ GitHub Pages: https://rene-david-bot.github.io/transcriptor/
 - current live source draft
 - current live translation draft
 - best-effort background speaker attribution + timing
+- total speaker time summary that remains visible after stop / end
+- per-speaker rename controls for cleaner labels in the session and exports
 - scrolling bilingual transcript
 - local session history with reopen, rename, export, and delete
 - export as **Markdown**, **TXT**, and **JSON**
@@ -120,6 +123,10 @@ Core session objects are stored locally in IndexedDB.
   "sourceLanguage": "it",
   "targetLanguage": "en",
   "glossary": "optional string",
+  "speakerNames": "Rene, Moderator",
+  "speakerAliases": {
+    "A": "Rene"
+  },
   "createdAt": "ISO timestamp",
   "updatedAt": "ISO timestamp",
   "endedAt": "ISO timestamp",
@@ -143,7 +150,9 @@ Core session objects are stored locally in IndexedDB.
   "targetLanguage": "en",
   "sourceText": "string",
   "translatedText": "string",
-  "speakerLabel": "Speaker A",
+  "speakerRawLabel": "A",
+  "speakerLabel": "Rene",
+  "speakerDurationMs": 15000,
   "speakerStatus": "pending | done | unsupported",
   "createdAt": "ISO timestamp"
 }
@@ -156,6 +165,7 @@ Core session objects are stored locally in IndexedDB.
 - Browser microphone + WebRTC behavior can vary slightly across browsers, especially on iOS.
 - Live draft translation is optimized for speed, but still best-effort rather than word-by-word streaming.
 - Speaker attribution/timing is lower-priority background analysis and may lag by roughly 20 to 40 seconds.
+- Speaker names are a UI mapping layer unless you later add separate voice-reference support.
 - If OpenAI or the browser interrupts a long live session, the app keeps the saved transcript and lets the user resume.
 
 ## Next obvious upgrade path
