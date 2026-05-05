@@ -67,6 +67,7 @@ const DEFAULT_SETTINGS = {
   targetLanguage: 'en',
   glossary: '',
   speakerNames: '',
+  theme: 'dark',
   autoScroll: true,
   textSize: 'medium',
   timestampStyle: 'elapsed',
@@ -221,6 +222,7 @@ const elements = {
   settingsSourceLanguage: $('#settingsSourceLanguage'),
   settingsTargetLanguage: $('#settingsTargetLanguage'),
   textSizeSelect: $('#textSizeSelect'),
+  themeSelect: $('#themeSelect'),
   autoScrollInput: $('#autoScrollInput'),
   timestampStyleSelect: $('#timestampStyleSelect'),
   settingsGlossaryInput: $('#settingsGlossaryInput'),
@@ -358,9 +360,11 @@ function applySettingsToForms() {
   elements.settingsGlossaryInput.value = settings.glossary || '';
   elements.settingsSpeakerNamesInput.value = settings.speakerNames || '';
   elements.textSizeSelect.value = settings.textSize || 'medium';
+  elements.themeSelect.value = normalizeTheme(settings.theme);
   elements.autoScrollInput.checked = Boolean(settings.autoScroll);
   elements.timestampStyleSelect.value = settings.timestampStyle || 'elapsed';
   elements.toggleAutoScrollButton.textContent = `Auto-follow: ${settings.autoScroll ? 'On' : 'Off'}`;
+  applyTheme(settings.theme);
   document.body.classList.remove('text-size-small', 'text-size-medium', 'text-size-large', 'text-size-xlarge');
   document.body.classList.add(`text-size-${settings.textSize || 'medium'}`);
   elements.transcriptList.classList.remove('text-size-small', 'text-size-medium', 'text-size-large', 'text-size-xlarge');
@@ -385,6 +389,19 @@ function applySettingsToForms() {
 
 function getTranscriptViewButtons() {
   return $$('[data-transcript-view]');
+}
+
+function normalizeTheme(theme) {
+  return theme === 'light' ? 'light' : 'dark';
+}
+
+function applyTheme(theme = state.settings?.theme) {
+  const normalizedTheme = normalizeTheme(theme);
+  document.body.dataset.theme = normalizedTheme;
+  const metaThemeColor = document.getElementById('metaThemeColor');
+  if (metaThemeColor) {
+    metaThemeColor.setAttribute('content', normalizedTheme === 'light' ? '#f8fafc' : '#0b1020');
+  }
 }
 
 function isCompactTranscriptLayout() {
@@ -724,6 +741,7 @@ function collectSettingsFromSettingsForm() {
     glossary: elements.settingsGlossaryInput.value.trim(),
     speakerNames: normalizeSpeakerNamesInput(elements.settingsSpeakerNamesInput.value),
     textSize: elements.textSizeSelect.value,
+    theme: normalizeTheme(elements.themeSelect.value),
     autoScroll: elements.autoScrollInput.checked,
     timestampStyle: elements.timestampStyleSelect.value,
   };
@@ -2896,6 +2914,13 @@ function bindEvents() {
   bindNavigation();
   elements.startForm.addEventListener('submit', handleStartFromSetup);
   elements.settingsForm.addEventListener('submit', saveSettingsFromSettingsForm);
+  elements.themeSelect.addEventListener('change', async () => {
+    const nextTheme = normalizeTheme(elements.themeSelect.value);
+    if (nextTheme === normalizeTheme(state.settings.theme)) return;
+    await persistSettings({ theme: nextTheme });
+    renderCurrentView();
+    showToast(`Theme set to ${nextTheme}.`);
+  });
 
   elements.toggleApiKey.addEventListener('click', () => togglePasswordVisibility(elements.apiKeyInput, elements.toggleApiKey));
   elements.settingsToggleApiKey.addEventListener('click', () => togglePasswordVisibility(elements.settingsApiKeyInput, elements.settingsToggleApiKey));

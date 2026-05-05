@@ -1,7 +1,52 @@
 const DB_NAME = 'transcriptor-db';
 const DB_VERSION = 1;
+const LOCAL_SETTINGS_KEY = 'transcripto-ui-settings';
+
+const LOCAL_SETTINGS_FIELDS = [
+  'sourceLanguage',
+  'targetLanguage',
+  'glossary',
+  'speakerNames',
+  'autoScroll',
+  'textSize',
+  'timestampStyle',
+  'theme',
+];
 
 let dbPromise;
+
+function canUseLocalStorage() {
+  return typeof localStorage !== 'undefined';
+}
+
+function pickLocalSettings(settings = {}) {
+  return LOCAL_SETTINGS_FIELDS.reduce((picked, key) => {
+    if (settings[key] === undefined) return picked;
+    picked[key] = settings[key];
+    return picked;
+  }, {});
+}
+
+function readLocalSettings() {
+  if (!canUseLocalStorage()) return null;
+  try {
+    const raw = localStorage.getItem(LOCAL_SETTINGS_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeLocalSettings(settings = {}) {
+  if (!canUseLocalStorage()) return;
+  try {
+    localStorage.setItem(LOCAL_SETTINGS_KEY, JSON.stringify(pickLocalSettings(settings)));
+  } catch {
+    // Ignore quota / availability issues. IndexedDB remains the primary durable store.
+  }
+}
 
 function requestToPromise(request) {
   return new Promise((resolve, reject) => {
@@ -56,18 +101,28 @@ function txComplete(transaction) {
 }
 
 export async function getSettings() {
+  const localSettings = readLocalSettings();
   const db = await openDatabase();
   const tx = db.transaction('settings', 'readonly');
   const record = await requestToPromise(tx.objectStore('settings').get('app'));
   await txComplete(tx);
-  return record?.value || null;
+  return {
+    ...(record?.value || {}),
+    ...(localSettings || {}),
+  };
 }
 
 export async function saveSettings(settings) {
-  const db = await openDatabase();
-  const tx = db.transaction('settings', 'readwrite');
-  tx.objectStore('settings').put({ id: 'app', value: settings, updatedAt: new Date().toISOString() });
-  await txComplete(tx);
+  writeLocalSettings(settings);
+  openDatabase()
+    .then((db) => {
+      const tx = db.transaction('settings', 'readwrite');
+      tx.objectStore('settings').put({ id: 'app', value: settings, updatedAt: new Date().toISOString() });
+      return txComplete(tx);
+    })
+    .catch((error) => {
+      console.warn('IndexedDB settings save failed, using local settings mirror.', error);
+    });
   return settings;
 }
 
