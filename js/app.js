@@ -86,9 +86,9 @@ const STATUS_COPY = {
 const DRAFT_TRANSLATION_MIN_CHARS = 4;
 const DRAFT_TRANSLATION_INTERVAL_MS = 450;
 const DRAFT_TRANSLATION_ABORT_GROWTH_CHARS = 18;
-const LIVE_COMMIT_WARMUP_MS = 900;
-const LIVE_COMMIT_INTERVAL_MS = 1400;
-const LIVE_COMMIT_RETRY_MS = 400;
+const LIVE_COMMIT_WARMUP_MS = 1500;
+const LIVE_COMMIT_INTERVAL_MS = 2400;
+const LIVE_COMMIT_RETRY_MS = 500;
 const SPEAKER_CHUNK_MS = 20000;
 const SPEAKER_MIN_CHUNK_BYTES = 4000;
 const SPEAKER_MATCH_MARGIN_MS = 3200;
@@ -118,6 +118,8 @@ const state = {
   liveCommitTimer: null,
   liveCommitInFlight: false,
   lastLiveCommitAtMs: 0,
+  liveDraftCarrySource: '',
+  liveDraftCarryTranslation: '',
   speakerTrackingSupported: typeof window !== 'undefined' && typeof MediaRecorder !== 'undefined',
   speakerRecorder: null,
   speakerStream: null,
@@ -395,6 +397,29 @@ function resetLiveCommitState() {
   state.lastLiveCommitAtMs = 0;
 }
 
+function clearLiveDraftCarry() {
+  state.liveDraftCarrySource = '';
+  state.liveDraftCarryTranslation = '';
+}
+
+function setLiveDraftCarry({ source = '', translation = '' } = {}) {
+  state.liveDraftCarrySource = String(source || '').trim();
+  state.liveDraftCarryTranslation = String(translation || '').trim();
+}
+
+function captureVisibleDraftCarry(previousItemId = state.activeDraftItemId) {
+  const previousDraft = previousItemId ? state.draftByItemId.get(previousItemId) : null;
+  const source = previousDraft?.sourceDraft?.trim() || state.currentSession?.draftSource?.trim() || '';
+  const translation = previousDraft?.translatedDraft?.trim() || state.currentSession?.draftTranslation?.trim() || '';
+
+  if (!source && !translation) {
+    clearLiveDraftCarry();
+    return;
+  }
+
+  setLiveDraftCarry({ source, translation });
+}
+
 function requestLiveCommit() {
   clearLiveCommitTimer();
   if (!state.client || !state.speechActive || state.liveCommitInFlight) return;
@@ -420,9 +445,10 @@ function scheduleLiveCommit() {
 
   const now = Date.now();
   const warmupRemaining = Math.max(0, LIVE_COMMIT_WARMUP_MS - (state.speechStartedAtMs ? now - state.speechStartedAtMs : 0));
-  const intervalRemaining = state.activeDraftItemId
-    ? Math.max(0, LIVE_COMMIT_INTERVAL_MS - (state.lastLiveCommitAtMs ? now - state.lastLiveCommitAtMs : LIVE_COMMIT_INTERVAL_MS))
-    : 0;
+  const intervalRemaining = Math.max(
+    0,
+    LIVE_COMMIT_INTERVAL_MS - (state.lastLiveCommitAtMs ? now - state.lastLiveCommitAtMs : LIVE_COMMIT_INTERVAL_MS)
+  );
   const delay = Math.max(warmupRemaining, intervalRemaining);
 
   state.liveCommitTimer = window.setTimeout(() => {
@@ -782,29 +808,31 @@ function renderDrafts() {
       ((state.draftTranslationPending && state.draftTranslationPending.itemId === state.activeDraftItemId) ||
         (state.draftTranslationActive && state.draftTranslationActive.itemId === state.activeDraftItemId))
   );
-  const showCarryForward = Boolean(
+  const fallbackCarryVisible = Boolean(
     sourceDraft &&
       state.activeDraftItemId &&
       lastSegment?.sourceText &&
       normalizeTranscript(lastSegment.sourceText) !== normalizeTranscript(sourceDraft)
   );
-  const carrySource = showCarryForward ? String(lastSegment?.sourceText || '').trim() : '';
-  const carryTargetRaw = showCarryForward
-    ? String(lastSegment?.translatedText || lastSegment?.translatedDraft || '').trim()
-    : '';
-  const carryTarget = carryTargetRaw || (showCarryForward ? 'Previous translation is catching up…' : '');
+  const carrySource = state.liveDraftCarrySource || (fallbackCarryVisible ? String(lastSegment?.sourceText || '').trim() : '');
+  const carryTargetRaw =
+    state.liveDraftCarryTranslation ||
+    (fallbackCarryVisible ? String(lastSegment?.translatedText || lastSegment?.translatedDraft || '').trim() : '');
+  const carryTarget = carryTargetRaw || (carrySource && activeDraftPending ? 'Previous translation is catching up…' : '');
+  const carryVisible = Boolean(carrySource || carryTarget);
+  const targetRefreshing = activeDraftPending || (!targetDraft && hasActiveSpeech && carryVisible);
 
   elements.sourceDraftText.textContent = sourceDraft || 'No live source-language draft yet.';
   elements.targetDraftText.textContent =
-    targetDraft || (activeDraftPending ? 'Translation is catching up…' : 'No live translation draft yet.');
+    targetDraft || (targetRefreshing ? 'Translation is catching up…' : 'No live translation draft yet.');
   elements.sourceDraftState.textContent = sourceDraft ? (hasActiveSpeech ? 'Updating' : 'Held') : 'Waiting';
   elements.targetDraftState.textContent = targetDraft
-    ? activeDraftPending
+    ? targetRefreshing
       ? 'Refreshing'
       : hasActiveSpeech
         ? 'Live'
         : 'Held'
-    : activeDraftPending
+    : targetRefreshing
       ? 'Translating'
       : 'Waiting';
 
@@ -1001,6 +1029,7 @@ async function loadSession(sessionId) {
   state.currentSession = session;
   state.currentSegments = await listSegmentsBySession(sessionId);
   state.speechActive = false;
+  clearLiveDraftCarry();
   state.speakerTrackingStatus = state.speakerTrackingSupported
     ? 'Speaker timing is a best-effort background feature and may lag slightly.'
     : 'This browser does not support background speaker detection.';
@@ -1270,6 +1299,7 @@ async function handleStartFromSetup(event) {
   const session = await createSession(formValues);
   state.currentSession = session;
   state.currentSegments = [];
+  clearLiveDraftCarry();
   await syncLastActiveSession();
   await refreshSessions();
   renderCurrentView();
@@ -1451,14 +1481,16 @@ function buildCommitMeta(itemId, previousItemId) {
 }
 
 function updateDraft(itemId, delta) {
+  const previousItemId = state.activeDraftItemId;
   const current = state.draftByItemId.get(itemId) || { sourceDraft: '', translatedDraft: '' };
-  const switchedItems = state.activeDraftItemId !== itemId;
+  const switchedItems = previousItemId !== itemId;
   current.sourceDraft = `${current.sourceDraft || ''}${delta || ''}`;
   state.draftByItemId.set(itemId, current);
   state.activeDraftItemId = itemId;
   state.speechActive = true;
   if (state.currentSession) {
     if (switchedItems) {
+      captureVisibleDraftCarry(previousItemId);
       state.currentSession.draftTranslation = '';
     }
     state.currentSession.draftSource = current.sourceDraft.trim();
@@ -1491,9 +1523,11 @@ function clearDraftState(itemId, { preserveVisibleDraft = false } = {}) {
     if (preserveVisibleDraft) {
       state.currentSession.draftSource = preservedSource;
       state.currentSession.draftTranslation = preservedTranslation;
+      setLiveDraftCarry({ source: preservedSource, translation: preservedTranslation });
     } else {
       state.currentSession.draftSource = '';
       state.currentSession.draftTranslation = '';
+      clearLiveDraftCarry();
     }
   }
   renderDrafts();
@@ -2178,6 +2212,75 @@ async function loadBootstrapData() {
   }
 }
 
+function buildDebugSnapshot() {
+  return {
+    sourceDraft: elements.sourceDraftText?.textContent || '',
+    sourceState: elements.sourceDraftState?.textContent || '',
+    sourceCarry: elements.sourceDraftCarryText?.textContent || '',
+    targetDraft: elements.targetDraftText?.textContent || '',
+    targetState: elements.targetDraftState?.textContent || '',
+    targetCarry: elements.targetDraftCarryText?.textContent || '',
+    status: elements.statusLine?.textContent || '',
+  };
+}
+
+async function ensureDebugSession({ sourceLanguage = 'en', targetLanguage = 'de' } = {}) {
+  if (!state.currentSession || state.currentSession.status === 'ended') {
+    const session = await createSession({
+      sourceLanguage,
+      targetLanguage,
+      glossary: '',
+      speakerNames: '',
+    });
+    state.currentSession = session;
+    state.currentSegments = [];
+    clearLiveDraftCarry();
+  }
+
+  state.currentSession.status = 'active';
+  state.currentSession.runtimeStatus = 'listening';
+  setStatus('listening', 'Debug replay active.');
+  setRoute('live');
+  renderCurrentView();
+  return buildDebugSnapshot();
+}
+
+function setDebugDraftTranslation(itemId, translatedText = '') {
+  const draftState = state.draftByItemId.get(itemId) || { sourceDraft: '', translatedDraft: '' };
+  draftState.translatedDraft = String(translatedText || '').trim();
+  state.draftByItemId.set(itemId, draftState);
+  if (state.activeDraftItemId === itemId && state.currentSession) {
+    state.currentSession.draftTranslation = draftState.translatedDraft;
+  }
+  renderDrafts();
+  return buildDebugSnapshot();
+}
+
+function installDebugHooks() {
+  if (typeof window === 'undefined') return;
+  const debugAllowed =
+    ['127.0.0.1', 'localhost'].includes(window.location.hostname) || window.location.search.includes('debug-live=1');
+  if (!debugAllowed) return;
+
+  window.__transcriptoDebug = {
+    ensureSession: ensureDebugSession,
+    snapshot: buildDebugSnapshot,
+    setDraftTranslation: setDebugDraftTranslation,
+    clearCarry: () => {
+      clearLiveDraftCarry();
+      renderDrafts();
+      return buildDebugSnapshot();
+    },
+    replay: async (events = []) => {
+      for (const event of events) {
+        await handleRealtimeEvent(event);
+      }
+      renderCurrentView();
+      return buildDebugSnapshot();
+    },
+  };
+}
+
 async function registerServiceWorker() {
   if (!('serviceWorker' in navigator)) return;
   try {
@@ -2197,6 +2300,7 @@ async function init() {
   await loadBootstrapData();
   renderCurrentView();
   startClockTimer();
+  installDebugHooks();
   await registerServiceWorker();
 }
 
