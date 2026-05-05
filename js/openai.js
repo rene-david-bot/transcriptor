@@ -258,14 +258,13 @@ export class RealtimeTranscriptionClient {
   shouldIgnoreRealtimeError(payload, message = '') {
     const errorMessage = String(message || '').toLowerCase();
     const errorParam = String(payload?.error?.param || '').toLowerCase();
-    const justCommitted = this.lastManualCommitAt && Date.now() - this.lastManualCommitAt < 3000;
     const audioBufferError = errorParam.includes('input_audio_buffer') || errorMessage.includes('audio buffer');
     const benignBufferRejection =
       errorMessage.includes('empty') ||
       errorMessage.includes('too small') ||
       errorMessage.includes('expected at least 100ms');
 
-    return Boolean(justCommitted && audioBufferError && benignBufferRejection);
+    return Boolean(audioBufferError && benignBufferRejection);
   }
 
   async disconnect({ nextStatus = 'stopped', message = 'Stopped.' } = {}) {

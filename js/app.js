@@ -379,12 +379,12 @@ function isCompactTranscriptLayout() {
 
 function getTranscriptModeNote(mode = state.liveTranscriptView) {
   if (mode === 'source') {
-    return 'A fixed 3-card live reader keeps the current source sentence centered. Full session history stays collapsed below.';
+    return 'A rolling reading window keeps the current source chunk steady while older history stays collapsed below.';
   }
   if (mode === 'target') {
-    return 'A fixed 3-card live reader keeps the current translated sentence centered. Full session history stays collapsed below.';
+    return 'A rolling reading window keeps the current translated chunk steady while older history stays collapsed below.';
   }
-  return 'A fixed 3-card bilingual live reader keeps the active sentence steady, while the full session history lives below.';
+  return 'A rolling bilingual reading window keeps the active chunk steady while incoming text gathers below.';
 }
 
 function applyTranscriptView() {
@@ -1035,32 +1035,32 @@ function buildLiveTranscriptState() {
   const historyBrowsing = !state.transcriptPinnedToBottom && Boolean(elements.transcriptHistoryDetails?.open);
 
   let liveStateLabel = state.settings.autoScroll
-    ? 'The live reader stays centered while the preview updates below.'
-    : 'Auto-follow is off. Use Jump to live when you want the newest sentence window.';
+    ? 'The reading window stays put while new text gathers below.'
+    : 'Auto-follow is off. Use Jump to live when you want the newest reading window.';
   let liveMeta = historyBrowsing
     ? 'History is open below. Jump to live to recenter the reading window.'
-    : 'The middle card only advances when a sentence commits.';
+    : 'The reading window turns only when the next chunk is ready.';
 
   if (historyBrowsing && (state.currentSegments.length || hasRenderableLiveDraft)) {
     liveStateLabel = 'Reading earlier history. Tap Jump to live to recenter the reader.';
   } else if (!hasRenderableLiveDraft && state.currentSegments.length) {
-    liveStateLabel = 'Waiting for the next sentence. The current anchor stays steady.';
-    liveMeta = 'The next sentence will appear in preview first, then step into the center card.';
+    liveStateLabel = 'Waiting for the next chunk. The reading window stays steady.';
+    liveMeta = 'Incoming text gathers below first, then the window rolls forward.';
   } else if (hasActiveSpeech && targetDraft) {
-    liveStateLabel = 'Live preview is updating below while the center card stays stable.';
-    liveMeta = 'Read the center card. Fresh speech lands in preview first.';
+    liveStateLabel = 'Incoming text is filling below while the reading window stays steady.';
+    liveMeta = 'Read the center window. New speech gathers below before the turn.';
   } else if (hasActiveSpeech) {
-    liveStateLabel = 'Listening now. Source preview is filling while translation catches up.';
-    liveMeta = 'The preview card updates live. The center card stays locked until commit.';
+    liveStateLabel = 'Listening now. Source text is building while translation catches up.';
+    liveMeta = 'Incoming text gathers below before the window rolls forward.';
   } else if (sourceDraft && targetDraft) {
-    liveStateLabel = 'Holding the newest sentence in preview until it commits.';
-    liveMeta = 'The preview is stabilizing before it moves into the center card.';
+    liveStateLabel = 'Holding the newest text below until the next window is ready.';
+    liveMeta = 'The window turns only after the incoming text is stable enough to read.';
   } else if (sourceDraft) {
-    liveStateLabel = 'Holding the newest source words in preview while translation settles.';
-    liveMeta = 'The preview is stabilizing before it moves into the center card.';
+    liveStateLabel = 'Holding the newest source words below while translation settles.';
+    liveMeta = 'The window turns only after the incoming text is stable enough to read.';
   } else if (!state.currentSegments.length) {
-    liveStateLabel = 'Waiting for the first sentence.';
-    liveMeta = 'Start listening and the rolling 3-card reader will fill here.';
+    liveStateLabel = 'Waiting for the first chunk.';
+    liveMeta = 'Start listening and the rolling reading window will fill here.';
   }
 
   return {
@@ -1148,6 +1148,84 @@ function buildTranscriptDisplayItemFromLiveDraft(liveDraft) {
   };
 }
 
+function mergeReaderWindowText(parts) {
+  return parts
+    .map((part) => String(part || '').trim())
+    .filter(Boolean)
+    .join(' ')
+    .replace(/\s+([,.;!?])/g, '$1')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function buildReaderWindowFromItems(items, { sourceLabel, targetLabel, key, title } = {}) {
+  const sourceText = mergeReaderWindowText(items.map((item) => item.sourceText));
+  const targetPending = items.some((item) => item.targetPending);
+  const stableTargetText = mergeReaderWindowText(items.map((item) => (!item.targetPending ? item.targetText : '')));
+  const fallbackTargetText = String(items[items.length - 1]?.targetText || '').trim();
+
+  return {
+    key: key || items.map((item) => item.key).filter(Boolean).join(':'),
+    title: title || items[items.length - 1]?.title || '',
+    timestamp: items[items.length - 1]?.timestamp || '',
+    auxText: targetPending ? 'Translation pending' : '',
+    sourceLabel,
+    targetLabel,
+    sourceText: sourceText || 'Listening…',
+    targetText: stableTargetText || (targetPending ? fallbackTargetText || 'Translation is catching up…' : ''),
+    targetPending,
+    sourceChars: sourceText.length,
+    targetChars: stableTargetText.length,
+    segmentCount: items.length,
+  };
+}
+
+function isReaderWindowStable(windowItem) {
+  if (!windowItem) return false;
+  return windowItem.segmentCount >= 3 || windowItem.sourceChars >= 84 || windowItem.targetChars >= 84;
+}
+
+function isReaderWindowFull(windowItem) {
+  if (!windowItem) return false;
+  return windowItem.segmentCount >= 3 || windowItem.sourceChars >= 156 || windowItem.targetChars >= 156;
+}
+
+function buildCommittedReaderWindows(segments, { sourceLabel, targetLabel }) {
+  const windows = [];
+  let currentItems = [];
+
+  for (const segment of segments) {
+    currentItems.push(buildTranscriptDisplayItemFromSegment(segment, { sourceLabel, targetLabel }));
+    const currentWindow = buildReaderWindowFromItems(currentItems, { sourceLabel, targetLabel });
+
+    if (isReaderWindowFull(currentWindow)) {
+      windows.push(currentWindow);
+      currentItems = [];
+    }
+  }
+
+  if (currentItems.length) {
+    windows.push(buildReaderWindowFromItems(currentItems, { sourceLabel, targetLabel }));
+  }
+
+  return windows;
+}
+
+function buildPreviewReaderWindow({ previewWindow, livePreview, sourceLabel, targetLabel }) {
+  if (previewWindow && livePreview) {
+    return buildReaderWindowFromItems([previewWindow, livePreview], {
+      sourceLabel,
+      targetLabel,
+      key: `${previewWindow.key}:live-preview`,
+      title: livePreview.title || previewWindow.title || '',
+    });
+  }
+
+  if (previewWindow) return previewWindow;
+  if (livePreview) return buildReaderWindowFromItems([livePreview], { sourceLabel, targetLabel, key: livePreview.key, title: livePreview.title });
+  return null;
+}
+
 function buildEmptyReaderSlot(role, { sourceLabel, targetLabel }) {
   if (role === 'previous') {
     return {
@@ -1174,8 +1252,8 @@ function buildEmptyReaderSlot(role, { sourceLabel, targetLabel }) {
   return {
     role,
     empty: true,
-    eyebrow: 'Preview',
-    title: 'No live preview yet',
+    eyebrow: 'Incoming',
+    title: 'No incoming text yet',
     sourceLabel,
     targetLabel,
   };
@@ -1195,10 +1273,14 @@ function renderTranscriptWindowSlot(slot) {
   const mode = TRANSCRIPT_VIEW_MODES.has(state.liveTranscriptView) ? state.liveTranscriptView : 'both';
   const showSource = mode !== 'target';
   const showTarget = mode !== 'source';
-  const bodyClass = showSource && showTarget ? 'transcript-window__body--both' : 'transcript-window__body--single';
+  const collapsePendingTarget = slot.role === 'current' && slot.targetPending;
+  const effectiveShowSource = showSource && (!collapsePendingTarget || mode !== 'target');
+  const effectiveShowTarget = showTarget && !collapsePendingTarget;
+  const showPendingTargetNote = collapsePendingTarget && showTarget;
+  const bodyClass = effectiveShowSource && effectiveShowTarget ? 'transcript-window__body--both' : 'transcript-window__body--single';
   const hasMeta = Boolean(slot.timestamp);
   const showParagraphLabels = slot.role === 'current';
-  const showTitle = slot.role === 'current' || slot.empty;
+  const showTitle = slot.empty;
   const useCompactBody = slot.role !== 'current' && !slot.empty;
   const compactText = useCompactBody ? buildCompactReaderSlotText(slot, mode) : '';
 
@@ -1223,7 +1305,7 @@ function renderTranscriptWindowSlot(slot) {
             ? `<p class="transcript-window__compact-line">${escapeHtml(compactText)}</p>`
             : `<div class="transcript-window__body ${bodyClass}">
                 ${
-                  showSource
+                  effectiveShowSource
                     ? renderTranscriptParagraph({
                         kind: 'source',
                         label: showParagraphLabels ? slot.sourceLabel : '',
@@ -1232,13 +1314,18 @@ function renderTranscriptWindowSlot(slot) {
                     : ''
                 }
                 ${
-                  showTarget
+                  effectiveShowTarget
                     ? renderTranscriptParagraph({
                         kind: 'target',
                         label: showParagraphLabels ? slot.targetLabel : '',
                         text: slot.targetText || 'Translation is catching up…',
                         pending: slot.targetPending,
                       })
+                    : ''
+                }
+                ${
+                  showPendingTargetNote
+                    ? `<p class="transcript-window__pending-note">${escapeHtml(slot.targetLabel ? `${slot.targetLabel} catching up…` : 'Translation catching up…')}</p>`
                     : ''
                 }
               </div>`
@@ -1253,15 +1340,20 @@ function renderTranscriptLiveBand(liveDraft) {
 
   const sourceLabel = liveDraft.sourceLabel;
   const targetLabel = liveDraft.targetLabel;
-  const finalizedSegments = state.currentSegments;
-  const previousCommitted =
-    finalizedSegments.length >= 2
-      ? buildTranscriptDisplayItemFromSegment(finalizedSegments[finalizedSegments.length - 2], { sourceLabel, targetLabel })
-      : null;
-  const currentCommitted = finalizedSegments.length
-    ? buildTranscriptDisplayItemFromSegment(finalizedSegments[finalizedSegments.length - 1], { sourceLabel, targetLabel })
-    : null;
+  const committedWindows = buildCommittedReaderWindows(state.currentSegments, { sourceLabel, targetLabel });
   const livePreview = buildTranscriptDisplayItemFromLiveDraft(liveDraft);
+
+  let currentCommitted = committedWindows[committedWindows.length - 1] || null;
+  let previewCommitted = null;
+
+  if (committedWindows.length > 1 && currentCommitted && !isReaderWindowStable(currentCommitted)) {
+    previewCommitted = currentCommitted;
+    currentCommitted = committedWindows[committedWindows.length - 2] || null;
+  }
+
+  const currentIndex = currentCommitted ? committedWindows.findIndex((item) => item.key === currentCommitted.key) : -1;
+  const previousCommitted = currentIndex > 0 ? committedWindows[currentIndex - 1] : null;
+  const previewWindow = buildPreviewReaderWindow({ previewWindow: previewCommitted, livePreview, sourceLabel, targetLabel });
 
   const previousSlot = previousCommitted
     ? {
@@ -1285,11 +1377,11 @@ function renderTranscriptLiveBand(liveDraft) {
         }
       : buildEmptyReaderSlot('current', { sourceLabel, targetLabel });
 
-  const previewSlot = livePreview && currentCommitted
+  const previewSlot = previewWindow
     ? {
-        ...livePreview,
+        ...previewWindow,
         role: 'preview',
-        eyebrow: 'Preview',
+        eyebrow: 'Incoming',
       }
     : buildEmptyReaderSlot('preview', { sourceLabel, targetLabel });
 
