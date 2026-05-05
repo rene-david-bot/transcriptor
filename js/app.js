@@ -86,6 +86,9 @@ const STATUS_COPY = {
 const DRAFT_TRANSLATION_MIN_CHARS = 4;
 const DRAFT_TRANSLATION_INTERVAL_MS = 450;
 const DRAFT_TRANSLATION_ABORT_GROWTH_CHARS = 18;
+const LIVE_COMMIT_WARMUP_MS = 900;
+const LIVE_COMMIT_INTERVAL_MS = 1400;
+const LIVE_COMMIT_RETRY_MS = 400;
 const SPEAKER_CHUNK_MS = 20000;
 const SPEAKER_MIN_CHUNK_BYTES = 4000;
 const SPEAKER_MATCH_MARGIN_MS = 3200;
@@ -112,6 +115,8 @@ const state = {
   draftTranslationLastStartedAt: 0,
   finalTranslationQueue: Promise.resolve(),
   finalTranslationInFlight: false,
+  liveCommitTimer: null,
+  lastLiveCommitAtMs: 0,
   speakerTrackingSupported: typeof window !== 'undefined' && typeof MediaRecorder !== 'undefined',
   speakerRecorder: null,
   speakerStream: null,
@@ -165,9 +170,13 @@ const elements = {
   sourceDraftLabel: $('#sourceDraftLabel'),
   sourceDraftText: $('#sourceDraftText'),
   sourceDraftState: $('#sourceDraftState'),
+  sourceDraftCarry: $('#sourceDraftCarry'),
+  sourceDraftCarryText: $('#sourceDraftCarryText'),
   targetDraftLabel: $('#targetDraftLabel'),
   targetDraftText: $('#targetDraftText'),
   targetDraftState: $('#targetDraftState'),
+  targetDraftCarry: $('#targetDraftCarry'),
+  targetDraftCarryText: $('#targetDraftCarryText'),
   speakerStatusLine: $('#speakerStatusLine'),
   speakerSummary: $('#speakerSummary'),
   transcriptList: $('#transcriptList'),
@@ -372,6 +381,50 @@ function flushSpeechClock() {
     state.currentSession.speechOnlyMs = (state.currentSession.speechOnlyMs || 0) + (Date.now() - state.speechStartedAtMs);
     state.speechStartedAtMs = null;
   }
+}
+
+function clearLiveCommitTimer() {
+  window.clearTimeout(state.liveCommitTimer);
+  state.liveCommitTimer = null;
+}
+
+function resetLiveCommitState() {
+  clearLiveCommitTimer();
+  state.lastLiveCommitAtMs = 0;
+}
+
+function requestLiveCommit() {
+  clearLiveCommitTimer();
+  if (!state.client || !state.speechActive) return;
+
+  const sent = state.client.commitInputAudioBuffer?.();
+  if (sent) {
+    state.lastLiveCommitAtMs = Date.now();
+    scheduleLiveCommit();
+    return;
+  }
+
+  state.liveCommitTimer = window.setTimeout(() => {
+    requestLiveCommit();
+  }, LIVE_COMMIT_RETRY_MS);
+}
+
+function scheduleLiveCommit() {
+  clearLiveCommitTimer();
+  if (!state.client || !state.currentSession || !state.speechActive || state.currentSession.status === 'ended') {
+    return;
+  }
+
+  const now = Date.now();
+  const warmupRemaining = Math.max(0, LIVE_COMMIT_WARMUP_MS - (state.speechStartedAtMs ? now - state.speechStartedAtMs : 0));
+  const intervalRemaining = state.activeDraftItemId
+    ? Math.max(0, LIVE_COMMIT_INTERVAL_MS - (state.lastLiveCommitAtMs ? now - state.lastLiveCommitAtMs : LIVE_COMMIT_INTERVAL_MS))
+    : 0;
+  const delay = Math.max(warmupRemaining, intervalRemaining);
+
+  state.liveCommitTimer = window.setTimeout(() => {
+    requestLiveCommit();
+  }, delay);
 }
 
 function getEffectiveActiveDuration() {
@@ -714,6 +767,7 @@ function renderDrafts() {
   const session = state.currentSession;
   const sourceLanguage = session ? getLanguageName(session.sourceLanguage) : 'Source';
   const targetLanguage = session ? getLanguageName(session.targetLanguage) : 'Target';
+  const lastSegment = state.currentSegments[state.currentSegments.length - 1];
   elements.sourceDraftLabel.textContent = `${sourceLanguage} draft`;
   elements.targetDraftLabel.textContent = `${targetLanguage} draft`;
 
@@ -725,6 +779,17 @@ function renderDrafts() {
       ((state.draftTranslationPending && state.draftTranslationPending.itemId === state.activeDraftItemId) ||
         (state.draftTranslationActive && state.draftTranslationActive.itemId === state.activeDraftItemId))
   );
+  const showCarryForward = Boolean(
+    sourceDraft &&
+      state.activeDraftItemId &&
+      lastSegment?.sourceText &&
+      normalizeTranscript(lastSegment.sourceText) !== normalizeTranscript(sourceDraft)
+  );
+  const carrySource = showCarryForward ? String(lastSegment?.sourceText || '').trim() : '';
+  const carryTargetRaw = showCarryForward
+    ? String(lastSegment?.translatedText || lastSegment?.translatedDraft || '').trim()
+    : '';
+  const carryTarget = carryTargetRaw || (showCarryForward ? 'Previous translation is catching up…' : '');
 
   elements.sourceDraftText.textContent = sourceDraft || 'No live source-language draft yet.';
   elements.targetDraftText.textContent =
@@ -739,6 +804,11 @@ function renderDrafts() {
     : activeDraftPending
       ? 'Translating'
       : 'Waiting';
+
+  elements.sourceDraftCarry.classList.toggle('hidden', !carrySource);
+  elements.sourceDraftCarryText.textContent = carrySource;
+  elements.targetDraftCarry.classList.toggle('hidden', !carryTarget);
+  elements.targetDraftCarryText.textContent = carryTarget;
 }
 
 function renderTranscript() {
@@ -1219,11 +1289,14 @@ async function startListening({ silent = false } = {}) {
     return;
   }
   if (state.client) {
+    resetLiveCommitState();
     await stopSpeakerTracking({ statusMessage: 'Refreshing background speaker timing...' });
     await state.client.disconnect({ nextStatus: 'stopped', message: 'Resetting the live connection...' });
     state.client = null;
   }
 
+  resetLiveCommitState();
+  state.speechActive = false;
   setStatus('connecting', 'Requesting microphone access and opening a live transcription connection...');
   state.currentSession.status = 'active';
   state.currentSession.runtimeStatus = 'connecting';
@@ -1251,6 +1324,8 @@ async function startListening({ silent = false } = {}) {
       renderSessionSummary();
     },
     onError: async (message) => {
+      resetLiveCommitState();
+      state.speechActive = false;
       await stopSpeakerTracking({ statusMessage: 'Speaker timing paused because live capture stopped.' });
       flushListeningClock();
       flushSpeechClock();
@@ -1270,6 +1345,8 @@ async function startListening({ silent = false } = {}) {
       showToast('Live transcription started.');
     }
   } catch (error) {
+    resetLiveCommitState();
+    state.speechActive = false;
     await stopSpeakerTracking({ statusMessage: 'Speaker timing is idle.' });
     state.client = null;
     const message = error?.message || 'Unable to start live transcription.';
@@ -1280,6 +1357,7 @@ async function startListening({ silent = false } = {}) {
 
 async function pauseListening() {
   if (!state.client) return;
+  resetLiveCommitState();
   flushListeningClock();
   flushSpeechClock();
   state.speechActive = false;
@@ -1295,6 +1373,7 @@ async function pauseListening() {
 
 async function stopListening() {
   if (state.client) {
+    resetLiveCommitState();
     flushListeningClock();
     flushSpeechClock();
     state.speechActive = false;
@@ -1317,6 +1396,7 @@ async function endCurrentSession() {
   if (!confirmed) return;
 
   if (state.client) {
+    resetLiveCommitState();
     flushListeningClock();
     flushSpeechClock();
     state.speechActive = false;
@@ -1383,6 +1463,9 @@ function updateDraft(itemId, delta) {
   renderDrafts();
   scheduleSessionPersist(400);
   scheduleDraftTranslation(itemId, current.sourceDraft.trim());
+  if (state.speechActive) {
+    scheduleLiveCommit();
+  }
 }
 
 function clearDraftState(itemId, { preserveVisibleDraft = false } = {}) {
@@ -1640,7 +1723,6 @@ async function finalizeSegmentFromEvent(event) {
 
   upsertCurrentSegmentInState(segment);
   await upsertSegment(segment);
-  state.speechActive = false;
   clearDraftState(itemId, { preserveVisibleDraft: true });
   await persistCurrentSessionNow();
   renderCurrentView();
@@ -1659,12 +1741,14 @@ async function handleRealtimeEvent(event) {
   if (event.type === 'input_audio_buffer.speech_started') {
     state.speechActive = true;
     markSpeechStart();
+    scheduleLiveCommit();
     renderDrafts();
     return;
   }
 
   if (event.type === 'input_audio_buffer.speech_stopped') {
     state.speechActive = false;
+    clearLiveCommitTimer();
     flushSpeechClock();
     renderSessionSummary();
     renderDrafts();
@@ -1673,7 +1757,11 @@ async function handleRealtimeEvent(event) {
   }
 
   if (event.type === 'input_audio_buffer.committed') {
+    state.lastLiveCommitAtMs = Date.now();
     buildCommitMeta(event.item_id, event.previous_item_id);
+    if (state.speechActive) {
+      scheduleLiveCommit();
+    }
     return;
   }
 
@@ -1683,8 +1771,6 @@ async function handleRealtimeEvent(event) {
   }
 
   if (event.type === 'conversation.item.input_audio_transcription.completed') {
-    state.speechActive = false;
-    flushSpeechClock();
     finalizeSegmentFromEvent(event).catch((error) => {
       console.error('Segment finalization failed', error);
       showToast(error?.message || 'A segment failed to finalize.', 5000);
@@ -1700,6 +1786,7 @@ async function handleRealtimeEvent(event) {
 async function rolloverConnection() {
   if (!state.currentSession || !state.client) return;
   showToast('Refreshing the live connection to keep the session healthy...');
+  resetLiveCommitState();
   flushListeningClock();
   flushSpeechClock();
   await stopSpeakerTracking({ statusMessage: 'Refreshing speaker timing with the live connection...' });

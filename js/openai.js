@@ -85,6 +85,7 @@ export class RealtimeTranscriptionClient {
     this.rolloverTimer = null;
     this.disposed = false;
     this.reconnectAttempt = 0;
+    this.lastManualCommitAt = 0;
   }
 
   async connect() {
@@ -122,8 +123,16 @@ export class RealtimeTranscriptionClient {
           if (payload.type === 'session.created') {
             this.connectionId = payload.session?.id || payload.session_id || crypto.randomUUID();
           }
+          if (payload.type === 'input_audio_buffer.committed') {
+            this.lastManualCommitAt = 0;
+          }
           if (payload.type === 'error') {
-            this.onError?.(extractErrorMessage(payload, 'Realtime session error'));
+            const errorMessage = extractErrorMessage(payload, 'Realtime session error');
+            if (this.shouldIgnoreRealtimeError(payload, errorMessage)) {
+              console.debug('Ignoring expected realtime buffer error after manual commit', payload);
+              return;
+            }
+            this.onError?.(errorMessage);
             return;
           }
           this.onEvent?.(payload);
@@ -175,7 +184,7 @@ export class RealtimeTranscriptionClient {
               type: 'server_vad',
               threshold: 0.5,
               prefix_padding_ms: 180,
-              silence_duration_ms: 450,
+              silence_duration_ms: 320,
               create_response: false,
             },
           },
@@ -218,8 +227,43 @@ export class RealtimeTranscriptionClient {
     }, 55 * 60 * 1000);
   }
 
+  sendEvent(payload) {
+    if (!payload || !this.dataChannel || this.dataChannel.readyState !== 'open') {
+      return false;
+    }
+
+    try {
+      this.dataChannel.send(JSON.stringify(payload));
+      return true;
+    } catch (error) {
+      console.warn('Failed to send realtime event', error);
+      return false;
+    }
+  }
+
+  commitInputAudioBuffer() {
+    this.lastManualCommitAt = Date.now();
+    return this.sendEvent({
+      type: 'input_audio_buffer.commit',
+      event_id: crypto.randomUUID(),
+    });
+  }
+
+  shouldIgnoreRealtimeError(payload, message = '') {
+    const errorMessage = String(message || '').toLowerCase();
+    const errorParam = String(payload?.error?.param || '').toLowerCase();
+    const justCommitted = this.lastManualCommitAt && Date.now() - this.lastManualCommitAt < 3000;
+
+    return Boolean(
+      justCommitted &&
+        (errorParam.includes('input_audio_buffer') || errorMessage.includes('audio buffer')) &&
+        errorMessage.includes('empty')
+    );
+  }
+
   async disconnect({ nextStatus = 'stopped', message = 'Stopped.' } = {}) {
     this.disposed = true;
+    this.lastManualCommitAt = 0;
     window.clearTimeout(this.rolloverTimer);
     this.rolloverTimer = null;
 
