@@ -1500,10 +1500,23 @@ strong {
 }
 
 .transcript-pair__meta--feed {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.3rem;
   grid-column: auto;
   font-size: 0.72rem;
   line-height: 1.3;
   color: #94a3b8;
+}
+
+.transcript-pair__speaker-name {
+  font-weight: 600;
+  color: #64748b;
+}
+
+.transcript-pair__meta-sep {
+  color: #cbd5e1;
 }
 
 .transcript-pair__meta--feed .transcript-pair__time {
@@ -1711,6 +1724,10 @@ body[data-route='live'] .transcript-pair--live {
 body[data-route='live'] .transcript-pair__meta--feed {
   margin-bottom: 0.08rem;
   font-size: 0.68rem;
+}
+
+body[data-route='live'] .transcript-pair__speaker-name {
+  color: #475569;
 }
 
 body[data-route='live'] .transcript-pair__pending-note {

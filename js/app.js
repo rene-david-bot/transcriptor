@@ -96,6 +96,10 @@ const LIVE_COMMIT_SENTENCE_MIN_WORDS = 5;
 const LIVE_COMMIT_MAX_HOLD_MS = 6500;
 const LIVE_COMMIT_FALLBACK_MIN_CHARS = 18;
 const LIVE_COMMIT_FALLBACK_MIN_WORDS = 4;
+const DISPLAY_ROW_TARGET_MS = 7000;
+const DISPLAY_ROW_MAX_MS = 10000;
+const DISPLAY_ROW_MAX_GAP_MS = 1800;
+const DISPLAY_ROW_MAX_SENTENCE_COUNT = 2;
 const TRANSCRIPT_FOLLOW_TRIGGER_RATIO = 0.72;
 const TRANSCRIPT_FOLLOW_SLACK_PX = 72;
 const SPEAKER_CHUNK_MS = 20000;
@@ -1099,9 +1103,14 @@ function renderTranscriptParagraph({ kind, label, text, pending = false }) {
 }
 
 function getTranscriptSpeakerLabel(segment) {
-  if (segment.speakerLabel) return segment.speakerLabel;
-  if (segment.speakerStatus === 'pending') return 'Speaker analyzing…';
-  if (segment.speakerStatus === 'error') return 'Speaker unavailable';
+  if (segment.speakerLabel) return String(segment.speakerLabel || '').trim();
+  if (segment.speakerRawLabel) {
+    return resolveSpeakerLabel(segment.speakerRawLabel, state.currentSession, getDefaultSpeakerLabel(segment.speakerRawLabel));
+  }
+  const seededNames = parseSpeakerNames(state.currentSession?.speakerNames || state.settings.speakerNames || '');
+  if (seededNames.length === 1) {
+    return seededNames[0];
+  }
   return 'Speaker';
 }
 
@@ -1120,6 +1129,7 @@ function buildTranscriptDisplayItemFromSegment(segment, { sourceLabel, targetLab
   return {
     key: segment.id,
     title: getTranscriptSpeakerLabel(segment),
+    speakerKey: normalizeTranscriptSpeakerKey(segment.speakerLabel || segment.speakerRawLabel || ''),
     timestamp: buildTranscriptTimestamp(segment),
     auxText: getTranscriptAuxParts(segment).join(' • '),
     sourceLabel,
@@ -1135,7 +1145,8 @@ function buildTranscriptDisplayItemFromLiveDraft(liveDraft) {
 
   return {
     key: 'live-preview',
-    title: liveDraft.liveBadge || 'Live preview',
+    title: '',
+    speakerKey: '',
     timestamp: liveDraft.timestamp || 'Live',
     auxText: '',
     sourceLabel: liveDraft.sourceLabel,
@@ -1409,10 +1420,14 @@ function renderTranscriptFeedPair(row, { live = false, showPendingNote = false }
   const showTarget = mode !== 'source';
   const showTargetParagraph = showTarget && !row.targetPending && row.targetText;
   const pendingNote = showTarget && row.targetPending && showPendingNote ? `${row.targetLabel || 'Translation'} catching up…` : '';
+  const speakerMeta = row.title
+    ? `<span class="transcript-pair__speaker-name">${escapeHtml(row.title)}</span><span class="transcript-pair__meta-sep">·</span>`
+    : '';
 
   return `
     <article class="transcript-pair ${live ? 'transcript-pair--live' : 'transcript-pair--final'}">
       <div class="transcript-pair__meta transcript-pair__meta--feed">
+        ${speakerMeta}
         <span class="transcript-pair__time">${escapeHtml(row.timestamp || 'Live')}</span>
       </div>
       ${
@@ -1445,10 +1460,61 @@ function mergeTranscriptFeedText(existingText = '', incomingText = '') {
   if (!left) return right;
   if (!right) return left;
 
+  const normalizedLeft = normalizeTranscript(left);
+  const normalizedRight = normalizeTranscript(right);
+  if (normalizedLeft && normalizedRight) {
+    if (normalizedLeft === normalizedRight) {
+      return right.length >= left.length ? right : left;
+    }
+    if (normalizedLeft.includes(normalizedRight)) {
+      return left;
+    }
+    if (normalizedRight.includes(normalizedLeft)) {
+      return right;
+    }
+  }
+
+  const leftWords = left.split(/\s+/).filter(Boolean);
+  const rightWords = right.split(/\s+/).filter(Boolean);
+  const maxOverlap = Math.min(leftWords.length, rightWords.length, 12);
+  for (let size = maxOverlap; size >= 3; size -= 1) {
+    const leftTail = normalizeTranscript(leftWords.slice(-size).join(' '));
+    const rightHead = normalizeTranscript(rightWords.slice(0, size).join(' '));
+    if (leftTail && leftTail === rightHead) {
+      const rightRemainder = rightWords.slice(size).join(' ').trim();
+      if (!rightRemainder) return left;
+      return `${left}${/[\s([{“"']$/.test(left) ? '' : ' '}${rightRemainder}`.trim();
+    }
+  }
+
   const lastChar = left.slice(-1);
   const firstChar = right.charAt(0);
   const needsSpace = !/\s/.test(lastChar) && !/[([{“"'/-]/.test(lastChar) && !/[,.!?;:)}\]]/.test(firstChar);
   return `${left}${needsSpace ? ' ' : ''}${right}`.replace(/\s+/g, ' ').trim();
+}
+
+function transcriptRowsOverlap(previousText = '', nextText = '') {
+  const previousNormalized = normalizeTranscript(previousText);
+  const nextNormalized = normalizeTranscript(nextText);
+  if (!previousNormalized || !nextNormalized) return false;
+  return (
+    previousNormalized === nextNormalized ||
+    previousNormalized.includes(nextNormalized) ||
+    nextNormalized.includes(previousNormalized)
+  );
+}
+
+function transcriptTextEndsSentence(text = '') {
+  return /[.!?…]["')\]]*\s*$/.test(String(text || '').trim());
+}
+
+function countTranscriptSentences(text = '') {
+  const matches = String(text || '').trim().match(/[.!?…](?:["')\]]+)?(?=\s|$)/g);
+  return matches ? matches.length : 0;
+}
+
+function normalizeTranscriptSpeakerKey(label = '') {
+  return String(label || '').trim().toLowerCase();
 }
 
 function shouldMergeTranscriptFeedRows(previousRow, nextRow, previousSegment, nextSegment) {
@@ -1458,16 +1524,60 @@ function shouldMergeTranscriptFeedRows(previousRow, nextRow, previousSegment, ne
   const nextSource = String(nextRow.sourceText || '').trim();
   if (!previousSource || !nextSource) return false;
 
+  const previousSpeakerKey = previousRow.speakerKey || normalizeTranscriptSpeakerKey(previousSegment.speakerLabel || previousSegment.speakerRawLabel || '');
+  const nextSpeakerKey = nextRow.speakerKey || normalizeTranscriptSpeakerKey(nextSegment.speakerLabel || nextSegment.speakerRawLabel || '');
+  if (previousSpeakerKey && nextSpeakerKey && previousSpeakerKey !== nextSpeakerKey) {
+    return false;
+  }
+
   const gapMs = Math.max(0, (nextSegment.startMs ?? previousSegment.endMs ?? 0) - (previousSegment.endMs ?? 0));
+  const rowStartMs =
+    previousRow.firstSegment?.startMs ??
+    previousRow.firstSegment?.endMs ??
+    previousSegment.startMs ??
+    previousSegment.endMs ??
+    0;
+  const nextEndMs = nextSegment.endMs ?? nextSegment.startMs ?? rowStartMs;
+  const nextTotalDurationMs = Math.max(0, nextEndMs - rowStartMs);
+  if (nextTotalDurationMs > DISPLAY_ROW_MAX_MS) {
+    return false;
+  }
+
   const previousWordCount = previousSource.split(/\s+/).filter(Boolean).length;
   const nextWordCount = nextSource.split(/\s+/).filter(Boolean).length;
-  const shortEdge = previousWordCount <= 3 || nextWordCount <= 2 || previousSource.length < 24 || nextSource.length < 18;
-  const unfinishedLead = !/[.!?…]["')\]]?$/.test(previousSource);
+  const nextIsShortFragment = nextWordCount <= 4 || nextSource.length < 20;
+  const previousIsShort = previousWordCount <= 6 || previousSource.length < 36;
+  const previousEndsSentence = transcriptTextEndsSentence(previousSource);
+  const mergedSource = mergeTranscriptFeedText(previousSource, nextSource);
+  const mergedSentenceCount = countTranscriptSentences(mergedSource);
   const bothPending = previousRow.targetPending && nextRow.targetPending;
-  const previousLarge = previousSource.length >= 72 || previousWordCount >= 14;
+  const overlappingText = transcriptRowsOverlap(previousSource, nextSource);
 
-  if (previousLarge) return false;
-  return gapMs <= 1600 && (shortEdge || bothPending || (unfinishedLead && previousSource.length < 42));
+  if (overlappingText) {
+    return true;
+  }
+
+  if (gapMs > DISPLAY_ROW_MAX_GAP_MS && previousEndsSentence) {
+    return false;
+  }
+
+  if (!previousEndsSentence) {
+    return true;
+  }
+
+  if (nextIsShortFragment) {
+    return true;
+  }
+
+  if (bothPending && nextTotalDurationMs <= DISPLAY_ROW_TARGET_MS) {
+    return true;
+  }
+
+  if (previousIsShort && mergedSentenceCount <= DISPLAY_ROW_MAX_SENTENCE_COUNT && nextTotalDurationMs <= DISPLAY_ROW_TARGET_MS) {
+    return true;
+  }
+
+  return mergedSentenceCount <= 1 && nextTotalDurationMs <= DISPLAY_ROW_TARGET_MS;
 }
 
 function buildTranscriptFeedRows(sourceLabel, targetLabel) {
@@ -1479,6 +1589,10 @@ function buildTranscriptFeedRows(sourceLabel, targetLabel) {
 
     if (lastRow && shouldMergeTranscriptFeedRows(lastRow, nextRow, lastRow.lastSegment, segment)) {
       lastRow.key = `${lastRow.key}|${nextRow.key}`;
+      if ((!lastRow.speakerKey || lastRow.title === 'Speaker') && nextRow.speakerKey && nextRow.title) {
+        lastRow.title = nextRow.title;
+        lastRow.speakerKey = nextRow.speakerKey;
+      }
       lastRow.sourceText = mergeTranscriptFeedText(lastRow.sourceText, nextRow.sourceText);
       lastRow.targetText = mergeTranscriptFeedText(lastRow.targetText, nextRow.targetText);
       lastRow.targetPending = !lastRow.targetText && (lastRow.targetPending || nextRow.targetPending);
@@ -1488,6 +1602,7 @@ function buildTranscriptFeedRows(sourceLabel, targetLabel) {
 
     rows.push({
       ...nextRow,
+      firstSegment: segment,
       lastSegment: segment,
     });
   });
@@ -1508,9 +1623,10 @@ function mergeLiveRowIntoFeedRows(rows, liveRow) {
     !lastSource ||
     liveSource === lastSource ||
     liveSource.startsWith(lastSource) ||
-    lastSource.startsWith(liveSource);
+    lastSource.startsWith(liveSource) ||
+    transcriptRowsOverlap(lastRow.sourceText || '', liveRow.sourceText || '');
 
-  if (!lastRow.targetPending || !sameSource) {
+  if (!sameSource) {
     return { rows, liveRow, mergedIntoLastRow: false };
   }
 
