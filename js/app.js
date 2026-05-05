@@ -86,9 +86,16 @@ const STATUS_COPY = {
 const DRAFT_TRANSLATION_MIN_CHARS = 4;
 const DRAFT_TRANSLATION_INTERVAL_MS = 450;
 const DRAFT_TRANSLATION_ABORT_GROWTH_CHARS = 18;
-const LIVE_COMMIT_WARMUP_MS = 1500;
-const LIVE_COMMIT_INTERVAL_MS = 2400;
-const LIVE_COMMIT_RETRY_MS = 500;
+const LIVE_COMMIT_WARMUP_MS = 2200;
+const LIVE_COMMIT_INTERVAL_MS = 3800;
+const LIVE_COMMIT_RETRY_MS = 650;
+const LIVE_COMMIT_MIN_CHARS = 48;
+const LIVE_COMMIT_MIN_WORDS = 8;
+const LIVE_COMMIT_SENTENCE_MIN_CHARS = 24;
+const LIVE_COMMIT_SENTENCE_MIN_WORDS = 5;
+const LIVE_COMMIT_MAX_HOLD_MS = 6500;
+const LIVE_COMMIT_FALLBACK_MIN_CHARS = 18;
+const LIVE_COMMIT_FALLBACK_MIN_WORDS = 4;
 const SPEAKER_CHUNK_MS = 20000;
 const SPEAKER_MIN_CHUNK_BYTES = 4000;
 const SPEAKER_MATCH_MARGIN_MS = 3200;
@@ -118,6 +125,7 @@ const state = {
   liveCommitTimer: null,
   liveCommitInFlight: false,
   lastLiveCommitAtMs: 0,
+  liveDraftCarryItemId: null,
   liveDraftCarrySource: '',
   liveDraftCarryTranslation: '',
   speakerTrackingSupported: typeof window !== 'undefined' && typeof MediaRecorder !== 'undefined',
@@ -398,31 +406,93 @@ function resetLiveCommitState() {
 }
 
 function clearLiveDraftCarry() {
+  state.liveDraftCarryItemId = null;
   state.liveDraftCarrySource = '';
   state.liveDraftCarryTranslation = '';
 }
 
-function setLiveDraftCarry({ source = '', translation = '' } = {}) {
+function setLiveDraftCarry({ itemId = null, source = '', translation = '' } = {}) {
+  state.liveDraftCarryItemId = itemId || null;
   state.liveDraftCarrySource = String(source || '').trim();
   state.liveDraftCarryTranslation = String(translation || '').trim();
 }
 
 function captureVisibleDraftCarry(previousItemId = state.activeDraftItemId) {
   const previousDraft = previousItemId ? state.draftByItemId.get(previousItemId) : null;
+  const lastSegment = state.currentSegments[state.currentSegments.length - 1];
   const source = previousDraft?.sourceDraft?.trim() || state.currentSession?.draftSource?.trim() || '';
-  const translation = previousDraft?.translatedDraft?.trim() || state.currentSession?.draftTranslation?.trim() || '';
+  const lastSegmentMatchesPrevious = Boolean(
+    source &&
+      lastSegment?.sourceText &&
+      (lastSegment.itemId === previousItemId || normalizeTranscript(lastSegment.sourceText) === normalizeTranscript(source))
+  );
+  const translation =
+    previousDraft?.translatedDraft?.trim() ||
+    state.currentSession?.draftTranslation?.trim() ||
+    (lastSegmentMatchesPrevious ? String(lastSegment?.translatedText || lastSegment?.translatedDraft || '').trim() : '');
 
   if (!source && !translation) {
     clearLiveDraftCarry();
     return;
   }
 
-  setLiveDraftCarry({ source, translation });
+  setLiveDraftCarry({ itemId: previousItemId || lastSegment?.itemId || null, source, translation });
+}
+
+function getLiveCommitDraftText() {
+  const activeDraft = state.activeDraftItemId ? state.draftByItemId.get(state.activeDraftItemId)?.sourceDraft : '';
+  return String(activeDraft || state.currentSession?.draftSource || '').trim();
+}
+
+function countDraftWords(text) {
+  return normalizeTranscript(text)
+    .split(' ')
+    .filter(Boolean).length;
+}
+
+function shouldCommitLiveDraftText(text = '', sinceLastCommitMs = 0) {
+  const trimmed = String(text || '').trim();
+  if (!trimmed) return false;
+
+  const chars = trimmed.length;
+  const words = countDraftWords(trimmed);
+  const sentenceLike = /[.!?…:;]\s*$/.test(trimmed);
+
+  if (sentenceLike && (chars >= LIVE_COMMIT_SENTENCE_MIN_CHARS || words >= LIVE_COMMIT_SENTENCE_MIN_WORDS)) {
+    return true;
+  }
+
+  if (chars >= LIVE_COMMIT_MIN_CHARS || words >= LIVE_COMMIT_MIN_WORDS) {
+    return true;
+  }
+
+  return Boolean(
+    sinceLastCommitMs >= LIVE_COMMIT_MAX_HOLD_MS &&
+      (chars >= LIVE_COMMIT_FALLBACK_MIN_CHARS || words >= LIVE_COMMIT_FALLBACK_MIN_WORDS)
+  );
+}
+
+function canSendLiveCommit(text = getLiveCommitDraftText()) {
+  const sinceLastCommitMs = state.lastLiveCommitAtMs
+    ? Date.now() - state.lastLiveCommitAtMs
+    : state.speechStartedAtMs
+      ? Date.now() - state.speechStartedAtMs
+      : 0;
+  return shouldCommitLiveDraftText(text, sinceLastCommitMs);
 }
 
 function requestLiveCommit() {
   clearLiveCommitTimer();
   if (!state.client || !state.speechActive || state.liveCommitInFlight) return;
+
+  if (!canSendLiveCommit()) {
+    if (state.client && state.speechActive) {
+      state.liveCommitTimer = window.setTimeout(() => {
+        requestLiveCommit();
+      }, LIVE_COMMIT_RETRY_MS);
+    }
+    return;
+  }
 
   state.liveCommitInFlight = true;
   const sent = state.client.commitInputAudioBuffer?.();
@@ -802,6 +872,7 @@ function renderDrafts() {
 
   const sourceDraft = session?.draftSource?.trim();
   const targetDraft = session?.draftTranslation?.trim();
+  const normalizedSourceDraft = normalizeTranscript(sourceDraft || '');
   const hasActiveSpeech = Boolean(sourceDraft) && (state.speechActive || Boolean(state.activeDraftItemId));
   const activeDraftPending = Boolean(
     sourceDraft &&
@@ -812,13 +883,28 @@ function renderDrafts() {
     sourceDraft &&
       state.activeDraftItemId &&
       lastSegment?.sourceText &&
-      normalizeTranscript(lastSegment.sourceText) !== normalizeTranscript(sourceDraft)
+      normalizeTranscript(lastSegment.sourceText) !== normalizedSourceDraft
   );
-  const carrySource = state.liveDraftCarrySource || (fallbackCarryVisible ? String(lastSegment?.sourceText || '').trim() : '');
-  const carryTargetRaw =
+  let carrySource = state.liveDraftCarrySource || (fallbackCarryVisible ? String(lastSegment?.sourceText || '').trim() : '');
+  const carryMatchesLastSegment = Boolean(
+    carrySource &&
+      lastSegment?.sourceText &&
+      normalizeTranscript(lastSegment.sourceText) === normalizeTranscript(carrySource)
+  );
+  let carryTargetRaw =
     state.liveDraftCarryTranslation ||
+    (carryMatchesLastSegment ? String(lastSegment?.translatedText || lastSegment?.translatedDraft || '').trim() : '') ||
     (fallbackCarryVisible ? String(lastSegment?.translatedText || lastSegment?.translatedDraft || '').trim() : '');
-  const carryTarget = carryTargetRaw || (carrySource && activeDraftPending ? 'Previous translation is catching up…' : '');
+  const carryDuplicatesCurrent = Boolean(
+    carrySource && normalizedSourceDraft && normalizeTranscript(carrySource) === normalizedSourceDraft
+  );
+
+  if (carryDuplicatesCurrent) {
+    carrySource = '';
+    carryTargetRaw = '';
+  }
+
+  const carryTarget = carryTargetRaw || (carrySource ? 'Previous translation is catching up…' : '');
   const carryVisible = Boolean(carrySource || carryTarget);
   const targetRefreshing = activeDraftPending || (!targetDraft && hasActiveSpeech && carryVisible);
 
@@ -1523,7 +1609,7 @@ function clearDraftState(itemId, { preserveVisibleDraft = false } = {}) {
     if (preserveVisibleDraft) {
       state.currentSession.draftSource = preservedSource;
       state.currentSession.draftTranslation = preservedTranslation;
-      setLiveDraftCarry({ source: preservedSource, translation: preservedTranslation });
+      setLiveDraftCarry({ itemId, source: preservedSource, translation: preservedTranslation });
     } else {
       state.currentSession.draftSource = '';
       state.currentSession.draftTranslation = '';
@@ -1680,6 +1766,19 @@ function queueFinalSegmentTranslation(segment) {
       await upsertSegment(mergedSegment);
       if (state.currentSession?.id === segment.sessionId) {
         upsertCurrentSegmentInState(mergedSegment);
+        const carryMatchesSegment = Boolean(
+          translatedText &&
+            (state.liveDraftCarryItemId === segment.itemId ||
+              (state.liveDraftCarrySource &&
+                normalizeTranscript(state.liveDraftCarrySource) === normalizeTranscript(segment.sourceText)))
+        );
+        if (carryMatchesSegment && !state.liveDraftCarryTranslation) {
+          setLiveDraftCarry({
+            itemId: segment.itemId,
+            source: state.liveDraftCarrySource || segment.sourceText,
+            translation: translatedText,
+          });
+        }
         if (!state.activeDraftItemId && state.currentSession.draftSource?.trim() === segment.sourceText.trim()) {
           state.currentSession.draftTranslation = translatedText || state.currentSession.draftTranslation || '';
           renderDrafts();
@@ -2352,6 +2451,7 @@ function installDebugHooks() {
       await ensureDebugSession({ sourceLanguage: 'en', targetLanguage: 'de' });
       return runDebugReplaySteps(buildMay05DemoReplaySteps());
     },
+    shouldCommitLiveDraftText,
   };
 }
 
