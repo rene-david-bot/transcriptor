@@ -2256,6 +2256,82 @@ function setDebugDraftTranslation(itemId, translatedText = '') {
   return buildDebugSnapshot();
 }
 
+async function runDebugReplaySteps(steps = []) {
+  for (const step of steps) {
+    if (!step) continue;
+    if (step.kind === 'translation') {
+      setDebugDraftTranslation(step.itemId, step.text);
+      continue;
+    }
+    if (step.kind === 'snapshot') {
+      renderCurrentView();
+      continue;
+    }
+    if (step.kind === 'event' && step.event) {
+      await handleRealtimeEvent(step.event);
+    }
+  }
+  renderCurrentView();
+  return buildDebugSnapshot();
+}
+
+function buildMay05DemoReplaySteps() {
+  return [
+    { kind: 'event', event: { type: 'input_audio_buffer.speech_started' } },
+    { kind: 'event', event: { type: 'input_audio_buffer.committed', item_id: 'may05-1', previous_item_id: null } },
+    {
+      kind: 'event',
+      event: {
+        type: 'conversation.item.input_audio_transcription.delta',
+        item_id: 'may05-1',
+        delta: 'So it is listening now, and let us see if it can capture.',
+      },
+    },
+    {
+      kind: 'translation',
+      itemId: 'may05-1',
+      text: 'Es hört jetzt zu, und schauen wir mal, ob es das erfassen kann.',
+    },
+    { kind: 'event', event: { type: 'input_audio_buffer.committed', item_id: 'may05-2', previous_item_id: 'may05-1' } },
+    {
+      kind: 'event',
+      event: {
+        type: 'conversation.item.input_audio_transcription.delta',
+        item_id: 'may05-2',
+        delta: 'And you look at this, it does not really work. It goes too fast.',
+      },
+    },
+    {
+      kind: 'translation',
+      itemId: 'may05-2',
+      text: 'Und wenn du dir das anschaust, es funktioniert nicht wirklich. Es geht zu schnell.',
+    },
+    { kind: 'event', event: { type: 'input_audio_buffer.committed', item_id: 'may05-3', previous_item_id: 'may05-2' } },
+    {
+      kind: 'event',
+      event: {
+        type: 'conversation.item.input_audio_transcription.delta',
+        item_id: 'may05-3',
+        delta: 'I cannot even see the German translation. It is constantly changing.',
+      },
+    },
+    {
+      kind: 'translation',
+      itemId: 'may05-3',
+      text: 'Ich kann nicht einmal die deutsche Übersetzung sehen. Sie ändert sich ständig.',
+    },
+    { kind: 'event', event: { type: 'input_audio_buffer.committed', item_id: 'may05-4', previous_item_id: 'may05-3' } },
+    {
+      kind: 'event',
+      event: {
+        type: 'conversation.item.input_audio_transcription.delta',
+        item_id: 'may05-4',
+        delta: 'And even the audio buffer issue is coming up again.',
+      },
+    },
+  ];
+}
+
 function installDebugHooks() {
   if (typeof window === 'undefined') return;
   const debugAllowed =
@@ -2271,12 +2347,10 @@ function installDebugHooks() {
       renderDrafts();
       return buildDebugSnapshot();
     },
-    replay: async (events = []) => {
-      for (const event of events) {
-        await handleRealtimeEvent(event);
-      }
-      renderCurrentView();
-      return buildDebugSnapshot();
+    replay: runDebugReplaySteps,
+    replayMay05Demo: async () => {
+      await ensureDebugSession({ sourceLanguage: 'en', targetLanguage: 'de' });
+      return runDebugReplaySteps(buildMay05DemoReplaySteps());
     },
   };
 }
