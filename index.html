@@ -228,7 +228,7 @@
                   <div class="panel__header panel__header--spread">
                     <div>
                       <p class="eyebrow">Live transcript</p>
-                      <h3>Teleprompter-style bilingual transcript</h3>
+                      <h3>Live bilingual transcript</h3>
                     </div>
                     <div class="button-row button-row--wrap">
                       <button class="button button--ghost button--small" id="exportMarkdownButton">Export Markdown</button>
@@ -237,43 +237,17 @@
                     </div>
                   </div>
 
-                  <div class="transcript-toolbar">
-                    <div class="transcript-view-switch" aria-label="Transcript view">
-                      <button type="button" class="transcript-view-button" data-transcript-view="source">Original</button>
-                      <button type="button" class="transcript-view-button is-active" data-transcript-view="both">Both</button>
-                      <button type="button" class="transcript-view-button" data-transcript-view="target">Translation</button>
-                    </div>
-
-                    <div class="transcript-toolbar__meta">
-                      <span class="transcript-live-state" id="transcriptLiveState">Waiting for speech</span>
-                      <button type="button" class="button button--ghost button--small hidden" id="jumpToLiveButton">Jump to live</button>
-                    </div>
-                  </div>
-
                   <div class="transcript-board transcript-board--both" id="transcriptBoard">
-                    <div class="transcript-board__mode-note" id="transcriptModeNote">
-                      A fixed 3-card live reader keeps the active sentence steady, while full session history stays separate below.
+                    <div class="transcript-toolbar">
+                      <div class="transcript-language-chip" id="transcriptLanguageChip">en ↔ de</div>
+
+                      <div class="transcript-toolbar__meta">
+                        <span class="transcript-live-state" id="transcriptLiveState">Waiting for speech</span>
+                        <button type="button" class="button button--ghost button--small hidden" id="jumpToLiveButton">Jump to live</button>
+                      </div>
                     </div>
 
-                    <div class="transcript-board__head">
-                      <span class="transcript-board__column-label transcript-board__column-label--source" id="transcriptSourceHeading"
-                        >Original</span
-                      >
-                      <span class="transcript-board__column-label transcript-board__column-label--target" id="transcriptTargetHeading"
-                        >Translation</span
-                      >
-                    </div>
-
-                    <div class="transcript-live-band text-size-medium transcript-live-band--idle" id="transcriptLiveBand" aria-live="polite"></div>
-
-                    <details class="transcript-history-sheet" id="transcriptHistoryDetails">
-                      <summary class="transcript-history-sheet__summary">
-                        <span>Session history</span>
-                        <span class="transcript-history-sheet__meta" id="transcriptHistoryMeta">Committed segments stay here</span>
-                      </summary>
-
-                      <div class="transcript-list text-size-medium" id="transcriptList"></div>
-                    </details>
+                    <div class="transcript-list text-size-medium" id="transcriptList"></div>
                   </div>
                 </section>
               </div>
@@ -297,11 +271,11 @@
                   <div class="panel__header">
                     <div>
                       <p class="eyebrow">Speaker timing</p>
-                      <h3>Best-effort diarization</h3>
+                      <h3>Background summary</h3>
                     </div>
                   </div>
                   <div class="status-line" id="speakerStatusLine">
-                    Speaker detection runs in the background and may lag slightly.
+                    Running quietly in the background.
                   </div>
                   <div class="speaker-summary" id="speakerSummary">
                     <div class="note">No speaker timing data yet.</div>

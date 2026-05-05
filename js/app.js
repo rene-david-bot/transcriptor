@@ -183,6 +183,7 @@ const elements = {
   newSessionButton: $('#newSessionButton'),
   endSessionButton: $('#endSessionButton'),
   transcriptBoard: $('#transcriptBoard'),
+  transcriptLanguageChip: $('#transcriptLanguageChip'),
   transcriptModeNote: $('#transcriptModeNote'),
   transcriptSourceHeading: $('#transcriptSourceHeading'),
   transcriptTargetHeading: $('#transcriptTargetHeading'),
@@ -240,6 +241,10 @@ function nowIso() {
 
 function getLanguageName(code) {
   return LANGUAGE_MAP.get(code) || String(code || '').toUpperCase();
+}
+
+function formatLanguageCode(code) {
+  return String(code || '').trim().toLowerCase();
 }
 
 function slugDate(dateString) {
@@ -366,6 +371,11 @@ function applySettingsToForms() {
   if (elements.transcriptTargetHeading) {
     elements.transcriptTargetHeading.textContent = getLanguageName(state.currentSession?.targetLanguage || settings.targetLanguage || '');
   }
+  if (elements.transcriptLanguageChip) {
+    const sourceCode = formatLanguageCode(state.currentSession?.sourceLanguage || settings.sourceLanguage || '');
+    const targetCode = formatLanguageCode(state.currentSession?.targetLanguage || settings.targetLanguage || '');
+    elements.transcriptLanguageChip.textContent = `${sourceCode || 'source'} ↔ ${targetCode || 'target'}`;
+  }
   applyTranscriptView();
 }
 
@@ -389,13 +399,15 @@ function getTranscriptModeNote(mode = state.liveTranscriptView) {
 
 function applyTranscriptView() {
   if (!elements.transcriptBoard) return;
-  const mode = TRANSCRIPT_VIEW_MODES.has(state.liveTranscriptView) ? state.liveTranscriptView : 'both';
+  const buttons = getTranscriptViewButtons();
+  const mode = buttons.length && TRANSCRIPT_VIEW_MODES.has(state.liveTranscriptView) ? state.liveTranscriptView : 'both';
+  state.liveTranscriptView = mode;
   elements.transcriptBoard.classList.remove('transcript-board--source', 'transcript-board--both', 'transcript-board--target');
   elements.transcriptBoard.classList.add(`transcript-board--${mode}`);
   if (elements.transcriptModeNote) {
     elements.transcriptModeNote.textContent = getTranscriptModeNote(mode);
   }
-  getTranscriptViewButtons().forEach((button) => {
+  buttons.forEach((button) => {
     const active = button.dataset.transcriptView === mode;
     button.classList.toggle('is-active', active);
     button.setAttribute('aria-pressed', active ? 'true' : 'false');
@@ -440,29 +452,21 @@ function isTranscriptNearFollowPosition(slack = TRANSCRIPT_FOLLOW_SLACK_PX) {
 }
 
 function updateTranscriptAutoFollowState() {
-  const historyOpen = Boolean(elements.transcriptHistoryDetails?.open);
-  state.transcriptPinnedToBottom = !historyOpen || isTranscriptNearFollowPosition();
+  state.transcriptPinnedToBottom = isTranscriptNearFollowPosition();
   if (elements.jumpToLiveButton) {
-    elements.jumpToLiveButton.classList.toggle('hidden', state.transcriptPinnedToBottom || !state.currentSession || !historyOpen);
-  }
-  if (elements.transcriptHistoryMeta) {
-    const segmentCount = state.currentSegments.length;
-    elements.transcriptHistoryMeta.textContent = segmentCount
-      ? `${segmentCount} committed segment${segmentCount === 1 ? '' : 's'}`
-      : 'Committed segments stay here';
+    elements.jumpToLiveButton.classList.toggle('hidden', state.transcriptPinnedToBottom || !state.currentSession);
   }
   if (elements.transcriptLiveState) {
-    elements.transcriptLiveState.textContent = buildLiveTranscriptState().liveStateLabel;
+    const liveState = buildLiveTranscriptState();
+    elements.transcriptLiveState.textContent = liveState.liveStateLabel;
+    elements.transcriptLiveState.title = liveState.liveMeta || liveState.liveStateLabel;
   }
 }
 
 function scrollTranscriptToLive(behavior = 'smooth') {
   const list = elements.transcriptList;
   if (!list) return;
-  if (elements.transcriptHistoryDetails?.open) {
-    elements.transcriptHistoryDetails.open = false;
-  }
-  const targetTop = Math.max(0, list.scrollHeight - list.clientHeight);
+  const targetTop = getTranscriptFollowTargetTop(list);
   if (behavior === 'smooth') {
     list.scrollTo({ top: targetTop, behavior: 'smooth' });
   } else {
@@ -691,6 +695,7 @@ function openSidebar() {
 
 function setRoute(route) {
   state.route = route;
+  document.body.dataset.route = route;
   $$('.page').forEach((page) => {
     page.classList.toggle('page--active', page.dataset.page === route);
   });
@@ -937,7 +942,7 @@ function renderSpeakerInsights() {
   const stoppedSession = session && ['paused', 'ended'].includes(session.status);
 
   if (!session) {
-    elements.speakerStatusLine.textContent = 'Speaker detection will appear here when a session is active.';
+    elements.speakerStatusLine.textContent = 'Speaker timing will appear here during a live session.';
     elements.speakerSummary.innerHTML = '<div class="note">No speaker timing data yet.</div>';
     return;
   }
@@ -951,13 +956,13 @@ function renderSpeakerInsights() {
   }
 
   if (pendingSegments) {
-    elements.speakerStatusLine.textContent = `${state.speakerTrackingStatus} ${pendingSegments} segment${pendingSegments === 1 ? '' : 's'} still waiting.`;
+    elements.speakerStatusLine.textContent = `${state.speakerTrackingStatus} ${pendingSegments} segment${pendingSegments === 1 ? '' : 's'} still processing.`;
   } else if (sessionEnded && summary.length) {
-    elements.speakerStatusLine.textContent = 'Session ended. Final speaker totals stay available below and in exports.';
+    elements.speakerStatusLine.textContent = 'Session ended. Speaker totals stay available below and in exports.';
   } else if (sessionEnded) {
     elements.speakerStatusLine.textContent = 'Session ended. No finalized speaker timing is available for this session.';
   } else if (stoppedSession && summary.length) {
-    elements.speakerStatusLine.textContent = 'Capture stopped. Final speaker totals stay available below and in exports.';
+    elements.speakerStatusLine.textContent = 'Capture stopped. Speaker totals stay available below and in exports.';
   } else if (stoppedSession) {
     elements.speakerStatusLine.textContent = 'Capture stopped. No finalized speaker timing is available for this session.';
   } else {
@@ -966,7 +971,7 @@ function renderSpeakerInsights() {
 
   if (!summary.length) {
     elements.speakerSummary.innerHTML =
-      '<div class="note">Best-effort speaker timing runs in the background and may lag by roughly 20 to 40 seconds.</div>';
+      '<div class="note">Speaker timing runs quietly in the background and can lag a little behind the live text.</div>';
     return;
   }
 
@@ -1010,9 +1015,9 @@ function buildLiveTranscriptState() {
       targetLabel,
       sourceText: '',
       targetText: '',
-      liveStateLabel: 'Start listening to fill the live reader.',
-      liveBadge: 'Live preview',
-      liveMeta: 'The center card stays steady, and incoming speech appears in preview below.',
+      liveStateLabel: 'Ready',
+      liveBadge: 'Live transcript',
+      liveMeta: 'New text will append to the transcript below as speech arrives.',
       timestamp: 'Live',
       targetPending: false,
       hasActiveSpeech: false,
@@ -1032,35 +1037,33 @@ function buildLiveTranscriptState() {
         normalizeTranscript(lastSegment.translatedText || lastSegment.translatedDraft || '') === normalizeTranscript(targetDraft))
   );
   const hasRenderableLiveDraft = Boolean((sourceDraft || targetDraft) && !draftEchoesLastFinal);
-  const historyBrowsing = !state.transcriptPinnedToBottom && Boolean(elements.transcriptHistoryDetails?.open);
+  const browsingEarlier = !state.transcriptPinnedToBottom;
 
-  let liveStateLabel = state.settings.autoScroll
-    ? 'The reading window stays put while new text gathers below.'
-    : 'Auto-follow is off. Use Jump to live when you want the newest reading window.';
-  let liveMeta = historyBrowsing
-    ? 'History is open below. Jump to live to recenter the reading window.'
-    : 'The reading window turns only when the next chunk is ready.';
+  let liveStateLabel = state.settings.autoScroll ? 'Following live' : 'Auto-follow off';
+  let liveMeta = browsingEarlier
+    ? 'You are reading earlier transcript text. Jump to live to catch up.'
+    : 'New text appends at the bottom as speech continues.';
 
-  if (historyBrowsing && (state.currentSegments.length || hasRenderableLiveDraft)) {
-    liveStateLabel = 'Reading earlier history. Tap Jump to live to recenter the reader.';
+  if (browsingEarlier && (state.currentSegments.length || hasRenderableLiveDraft)) {
+    liveStateLabel = 'Reading earlier text';
   } else if (!hasRenderableLiveDraft && state.currentSegments.length) {
-    liveStateLabel = 'Waiting for the next chunk. The reading window stays steady.';
-    liveMeta = 'Incoming text gathers below first, then the window rolls forward.';
+    liveStateLabel = 'Waiting';
+    liveMeta = 'The transcript stays ready and will append the next segment below.';
   } else if (hasActiveSpeech && targetDraft) {
-    liveStateLabel = 'Incoming text is filling below while the reading window stays steady.';
-    liveMeta = 'Read the center window. New speech gathers below before the turn.';
+    liveStateLabel = 'Updating live';
+    liveMeta = 'The newest source and translation text continue to append below.';
   } else if (hasActiveSpeech) {
-    liveStateLabel = 'Listening now. Source text is building while translation catches up.';
-    liveMeta = 'Incoming text gathers below before the window rolls forward.';
+    liveStateLabel = 'Listening';
+    liveMeta = 'The latest source text is visible now and translation will follow.';
   } else if (sourceDraft && targetDraft) {
-    liveStateLabel = 'Holding the newest text below until the next window is ready.';
-    liveMeta = 'The window turns only after the incoming text is stable enough to read.';
+    liveStateLabel = 'Settling';
+    liveMeta = 'It will stay in the live transcript and finalize shortly.';
   } else if (sourceDraft) {
-    liveStateLabel = 'Holding the newest source words below while translation settles.';
-    liveMeta = 'The window turns only after the incoming text is stable enough to read.';
+    liveStateLabel = 'Translating';
+    liveMeta = 'Translation will appear beneath it as soon as it is ready.';
   } else if (!state.currentSegments.length) {
-    liveStateLabel = 'Waiting for the first chunk.';
-    liveMeta = 'Start listening and the rolling reading window will fill here.';
+    liveStateLabel = 'Waiting';
+    liveMeta = 'Start listening and text will begin appending here.';
   }
 
   return {
@@ -1122,7 +1125,7 @@ function buildTranscriptDisplayItemFromSegment(segment, { sourceLabel, targetLab
     sourceLabel,
     targetLabel,
     sourceText: String(segment.sourceText || '').trim(),
-    targetText: translatedText || (segment.translationStatus === 'error' ? 'Translation unavailable.' : 'Translating…'),
+    targetText: translatedText || (segment.translationStatus === 'error' ? 'Translation unavailable.' : ''),
     targetPending: translationPending,
   };
 }
@@ -1130,20 +1133,15 @@ function buildTranscriptDisplayItemFromSegment(segment, { sourceLabel, targetLab
 function buildTranscriptDisplayItemFromLiveDraft(liveDraft) {
   if (!liveDraft.visible) return null;
 
-  const auxParts = [];
-  if (liveDraft.targetPending) auxParts.push('Translation catching up');
-  else if (liveDraft.hasActiveSpeech) auxParts.push('Updating now');
-  else auxParts.push('Holding before commit');
-
   return {
     key: 'live-preview',
     title: liveDraft.liveBadge || 'Live preview',
     timestamp: liveDraft.timestamp || 'Live',
-    auxText: auxParts.join(' • '),
+    auxText: '',
     sourceLabel: liveDraft.sourceLabel,
     targetLabel: liveDraft.targetLabel,
     sourceText: liveDraft.sourceText || 'Listening…',
-    targetText: liveDraft.targetText || 'Translation is catching up…',
+    targetText: liveDraft.targetText || '',
     targetPending: liveDraft.targetPending,
   };
 }
@@ -1405,6 +1403,129 @@ function renderTranscriptLiveBand(liveDraft) {
   `;
 }
 
+function renderTranscriptFeedPair(row, { live = false, showPendingNote = false } = {}) {
+  const mode = TRANSCRIPT_VIEW_MODES.has(state.liveTranscriptView) ? state.liveTranscriptView : 'both';
+  const showSource = mode !== 'target';
+  const showTarget = mode !== 'source';
+  const showTargetParagraph = showTarget && !row.targetPending && row.targetText;
+  const pendingNote = showTarget && row.targetPending && showPendingNote ? `${row.targetLabel || 'Translation'} catching up…` : '';
+
+  return `
+    <article class="transcript-pair ${live ? 'transcript-pair--live' : 'transcript-pair--final'}">
+      <div class="transcript-pair__meta transcript-pair__meta--feed">
+        <span class="transcript-pair__time">${escapeHtml(row.timestamp || 'Live')}</span>
+      </div>
+      ${
+        showSource
+          ? renderTranscriptParagraph({
+              kind: 'source',
+              label: '',
+              text: row.sourceText || 'Listening…',
+            })
+          : ''
+      }
+      ${
+        showTargetParagraph
+          ? renderTranscriptParagraph({
+              kind: 'target',
+              label: '',
+              text: row.targetText,
+              pending: false,
+            })
+          : ''
+      }
+      ${pendingNote ? `<p class="transcript-pair__pending-note">${escapeHtml(pendingNote)}</p>` : ''}
+    </article>
+  `;
+}
+
+function mergeTranscriptFeedText(existingText = '', incomingText = '') {
+  const left = String(existingText || '').trim();
+  const right = String(incomingText || '').trim();
+  if (!left) return right;
+  if (!right) return left;
+
+  const lastChar = left.slice(-1);
+  const firstChar = right.charAt(0);
+  const needsSpace = !/\s/.test(lastChar) && !/[([{“"'/-]/.test(lastChar) && !/[,.!?;:)}\]]/.test(firstChar);
+  return `${left}${needsSpace ? ' ' : ''}${right}`.replace(/\s+/g, ' ').trim();
+}
+
+function shouldMergeTranscriptFeedRows(previousRow, nextRow, previousSegment, nextSegment) {
+  if (!previousRow || !nextRow || !previousSegment || !nextSegment) return false;
+
+  const previousSource = String(previousRow.sourceText || '').trim();
+  const nextSource = String(nextRow.sourceText || '').trim();
+  if (!previousSource || !nextSource) return false;
+
+  const gapMs = Math.max(0, (nextSegment.startMs ?? previousSegment.endMs ?? 0) - (previousSegment.endMs ?? 0));
+  const previousWordCount = previousSource.split(/\s+/).filter(Boolean).length;
+  const nextWordCount = nextSource.split(/\s+/).filter(Boolean).length;
+  const shortEdge = previousWordCount <= 3 || nextWordCount <= 2 || previousSource.length < 24 || nextSource.length < 18;
+  const unfinishedLead = !/[.!?…]["')\]]?$/.test(previousSource);
+  const bothPending = previousRow.targetPending && nextRow.targetPending;
+  const previousLarge = previousSource.length >= 72 || previousWordCount >= 14;
+
+  if (previousLarge) return false;
+  return gapMs <= 1600 && (shortEdge || bothPending || (unfinishedLead && previousSource.length < 42));
+}
+
+function buildTranscriptFeedRows(sourceLabel, targetLabel) {
+  const rows = [];
+
+  state.currentSegments.forEach((segment) => {
+    const nextRow = buildTranscriptDisplayItemFromSegment(segment, { sourceLabel, targetLabel });
+    const lastRow = rows[rows.length - 1];
+
+    if (lastRow && shouldMergeTranscriptFeedRows(lastRow, nextRow, lastRow.lastSegment, segment)) {
+      lastRow.key = `${lastRow.key}|${nextRow.key}`;
+      lastRow.sourceText = mergeTranscriptFeedText(lastRow.sourceText, nextRow.sourceText);
+      lastRow.targetText = mergeTranscriptFeedText(lastRow.targetText, nextRow.targetText);
+      lastRow.targetPending = !lastRow.targetText && (lastRow.targetPending || nextRow.targetPending);
+      lastRow.lastSegment = segment;
+      return;
+    }
+
+    rows.push({
+      ...nextRow,
+      lastSegment: segment,
+    });
+  });
+
+  return rows;
+}
+
+function mergeLiveRowIntoFeedRows(rows, liveRow) {
+  if (!liveRow || !rows.length) {
+    return { rows, liveRow, mergedIntoLastRow: false };
+  }
+
+  const lastRow = rows[rows.length - 1];
+  const liveSource = normalizeTranscript(liveRow.sourceText || '');
+  const lastSource = normalizeTranscript(lastRow.sourceText || '');
+  const sameSource =
+    !liveSource ||
+    !lastSource ||
+    liveSource === lastSource ||
+    liveSource.startsWith(lastSource) ||
+    lastSource.startsWith(liveSource);
+
+  if (!lastRow.targetPending || !sameSource) {
+    return { rows, liveRow, mergedIntoLastRow: false };
+  }
+
+  const nextRows = [...rows];
+  nextRows[nextRows.length - 1] = {
+    ...lastRow,
+    sourceText: liveRow.sourceText || lastRow.sourceText,
+    targetText: liveRow.targetText || lastRow.targetText,
+    targetPending: liveRow.targetPending,
+    timestamp: liveRow.timestamp || lastRow.timestamp,
+  };
+
+  return { rows: nextRows, liveRow: null, mergedIntoLastRow: true };
+}
+
 function renderTranscriptHistory() {
   const list = elements.transcriptList;
   if (!list) return;
@@ -1415,36 +1536,34 @@ function renderTranscriptHistory() {
   const shouldFollow = Boolean(state.settings.autoScroll && state.transcriptPinnedToBottom);
   const previousScrollTop = list.scrollTop;
 
-  const finalizedRows = state.currentSegments.map((segment) => {
-    const row = buildTranscriptDisplayItemFromSegment(segment, { sourceLabel, targetLabel });
+  const feedRows = buildTranscriptFeedRows(sourceLabel, targetLabel);
+  const liveRow = buildTranscriptDisplayItemFromLiveDraft(liveDraft);
+  const { rows: mergedRows, liveRow: appendedLiveRow, mergedIntoLastRow } = mergeLiveRowIntoFeedRows(feedRows, liveRow);
 
-    return `
-      <article class="transcript-pair transcript-pair--final">
-        <div class="transcript-pair__meta">
-          <span class="transcript-pair__speaker">${escapeHtml(row.title)}</span>
-          <span class="transcript-pair__divider">•</span>
-          <span class="transcript-pair__time">${escapeHtml(row.timestamp)}</span>
-          ${row.auxText ? `<span class="transcript-pair__divider">•</span><span class="transcript-pair__aux">${escapeHtml(row.auxText)}</span>` : ''}
-        </div>
-        ${renderTranscriptParagraph({ kind: 'source', label: sourceLabel, text: row.sourceText })}
-        ${renderTranscriptParagraph({ kind: 'target', label: targetLabel, text: row.targetText, pending: row.targetPending })}
-      </article>
-    `;
-  });
-
-  if (!finalizedRows.length) {
+  if (!mergedRows.length && !appendedLiveRow) {
     list.innerHTML = `<div class="transcript-empty">${escapeHtml(
       state.currentSession
-        ? 'Committed segments will collect here. The live reader stays above so the center card does not jump around.'
-        : 'Start listening to unlock the current-session history below.'
+        ? 'Transcript lines will appear here as speech is captured and translated.'
+        : 'Listen in one language and read in another. Start a session to begin.'
     )}</div>`;
   } else {
-    list.innerHTML = finalizedRows.join('');
+    const rowMarkup = mergedRows
+      .map((row, index) => {
+        const isNewestMergedRow = mergedIntoLastRow && index === mergedRows.length - 1;
+        return renderTranscriptFeedPair(row, {
+          live: isNewestMergedRow,
+          showPendingNote: false,
+        });
+      })
+      .join('');
+
+    list.innerHTML = `${rowMarkup}${appendedLiveRow ? renderTranscriptFeedPair(appendedLiveRow, { live: true, showPendingNote: false }) : ''}`;
   }
 
   requestAnimationFrame(() => {
     if (shouldFollow) {
-      list.scrollTop = Math.max(0, list.scrollHeight - list.clientHeight);
+      const targetTop = getTranscriptFollowTargetTop(list);
+      list.scrollTop = targetTop;
     } else {
       list.scrollTop = previousScrollTop;
     }
@@ -1453,8 +1572,6 @@ function renderTranscriptHistory() {
 }
 
 function renderTranscript() {
-  const liveDraft = buildLiveTranscriptState();
-  renderTranscriptLiveBand(liveDraft);
   renderTranscriptHistory();
 }
 
@@ -1733,7 +1850,7 @@ async function applySpeakerLabelsFromDiarizedChunk({ sessionId, chunkStartMs, ch
 function queueSpeakerAttribution(chunk) {
   state.speakerTrackingPendingChunks += 1;
   if (state.currentSession?.id === chunk.sessionId) {
-    state.speakerTrackingStatus = 'Analyzing recent speaker turns in the background...';
+    state.speakerTrackingStatus = 'Updating speaker timing...';
     renderSpeakerInsights();
   }
 
@@ -1756,13 +1873,13 @@ function queueSpeakerAttribution(chunk) {
       });
 
       if (state.currentSession?.id === chunk.sessionId) {
-        state.speakerTrackingStatus = 'Speaker timing updated. Best effort and intentionally slightly delayed.';
+        state.speakerTrackingStatus = 'Speaker timing updated.';
       }
     })
     .catch((error) => {
       console.warn('Speaker diarization failed', error);
       if (state.currentSession?.id === chunk.sessionId) {
-        state.speakerTrackingStatus = 'Speaker timing is catching up. The live transcript remains prioritized.';
+        state.speakerTrackingStatus = 'Speaker timing is catching up.';
       }
     })
     .finally(() => {
@@ -1785,7 +1902,7 @@ async function startSpeakerTracking(stream) {
 
   if (typeof MediaRecorder === 'undefined') {
     state.speakerTrackingSupported = false;
-    state.speakerTrackingStatus = 'This browser does not support background speaker detection.';
+    state.speakerTrackingStatus = 'Speaker timing is not supported in this browser.';
     stopSpeakerTracks(stream);
     renderSpeakerInsights();
     return;
@@ -1830,7 +1947,7 @@ async function startSpeakerTracking(stream) {
     });
 
     recorder.addEventListener('error', () => {
-      state.speakerTrackingStatus = 'Speaker timing is unavailable in this browser session.';
+      state.speakerTrackingStatus = 'Speaker timing is unavailable in this session.';
       renderSpeakerInsights();
     });
 
@@ -1890,7 +2007,7 @@ async function startListening({ silent = false } = {}) {
   }
   if (state.client) {
     resetLiveCommitState();
-    await stopSpeakerTracking({ statusMessage: 'Refreshing background speaker timing...' });
+    await stopSpeakerTracking({ statusMessage: 'Refreshing speaker timing...' });
     await state.client.disconnect({ nextStatus: 'stopped', message: 'Resetting the live connection...' });
     state.client = null;
   }
@@ -1929,7 +2046,7 @@ async function startListening({ silent = false } = {}) {
     onError: async (message) => {
       resetLiveCommitState();
       state.speechActive = false;
-      await stopSpeakerTracking({ statusMessage: 'Speaker timing paused because live capture stopped.' });
+      await stopSpeakerTracking({ statusMessage: 'Speaker timing paused.' });
       flushListeningClock();
       flushSpeechClock();
       setStatus('error', message);
@@ -1950,7 +2067,7 @@ async function startListening({ silent = false } = {}) {
   } catch (error) {
     resetLiveCommitState();
     state.speechActive = false;
-    await stopSpeakerTracking({ statusMessage: 'Speaker timing is idle.' });
+    await stopSpeakerTracking({ statusMessage: 'Speaker timing idle.' });
     state.client = null;
     const message = error?.message || 'Unable to start live transcription.';
     setStatus('error', message);
@@ -1964,7 +2081,7 @@ async function pauseListening() {
   flushListeningClock();
   flushSpeechClock();
   state.speechActive = false;
-  await stopSpeakerTracking({ statusMessage: 'Paused. Speaker timing may keep catching up for the last buffered audio.' });
+  await stopSpeakerTracking({ statusMessage: 'Paused. Speaker timing may keep catching up briefly.' });
   await state.client.disconnect({ nextStatus: 'paused', message: 'Paused. Microphone sending has stopped.' });
   state.client = null;
   state.currentSession.status = 'paused';
@@ -1980,7 +2097,7 @@ async function stopListening() {
     flushListeningClock();
     flushSpeechClock();
     state.speechActive = false;
-    await stopSpeakerTracking({ statusMessage: 'Stopped. Speaker timing may finish the last buffered chunk.' });
+    await stopSpeakerTracking({ statusMessage: 'Stopped. Speaker timing may finish the last buffered audio.' });
     await state.client.disconnect({ nextStatus: 'stopped', message: 'Stopped. You can start again in the same session.' });
     state.client = null;
   }
@@ -2003,7 +2120,7 @@ async function endCurrentSession() {
     flushListeningClock();
     flushSpeechClock();
     state.speechActive = false;
-    await stopSpeakerTracking({ statusMessage: 'Ending session. Speaker timing may finish the last buffered chunk.' });
+    await stopSpeakerTracking({ statusMessage: 'Ending session. Speaker timing may finish the last buffered audio.' });
     await state.client.disconnect({ nextStatus: 'ended', message: 'Session ended.' });
     state.client = null;
   }
@@ -2777,7 +2894,7 @@ function bindEvents() {
   window.addEventListener('pagehide', () => {
     flushListeningClock();
     flushSpeechClock();
-    stopSpeakerTracking({ statusMessage: 'Leaving the page. Speaker timing is paused.' }).catch(() => {});
+    stopSpeakerTracking({ statusMessage: 'Leaving the page. Speaker timing paused.' }).catch(() => {});
     if (state.currentSession && state.currentSession.status !== 'ended' && ['listening', 'connecting', 'reconnecting'].includes(state.runtimeStatus)) {
       state.currentSession.runtimeStatus = 'stopped';
       state.currentSession.status = 'paused';
