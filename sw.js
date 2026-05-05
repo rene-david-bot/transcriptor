@@ -1,4 +1,4 @@
-const CACHE_NAME = 'transcripto-shell-v13';
+const CACHE_NAME = 'transcripto-shell-v14';
 const APP_SHELL = [
   './',
   './index.html',

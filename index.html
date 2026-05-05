@@ -182,7 +182,7 @@
                     </div>
                     <div class="summary-actions">
                       <button class="button button--ghost button--small" id="renameSessionButton">Rename</button>
-                      <button class="button button--ghost button--small" id="toggleAutoScrollButton">Auto-scroll: On</button>
+                      <button class="button button--ghost button--small" id="toggleAutoScrollButton">Auto-follow: On</button>
                     </div>
                   </div>
 
@@ -252,7 +252,7 @@
 
                   <div class="transcript-board transcript-board--both" id="transcriptBoard">
                     <div class="transcript-board__mode-note" id="transcriptModeNote">
-                      One continuous bilingual transcript. New text appends at the end, and auto-follow only nudges when it drops into the lower reading zone.
+                      A fixed 3-card live reader keeps the active sentence steady, while full session history stays separate below.
                     </div>
 
                     <div class="transcript-board__head">
@@ -264,7 +264,16 @@
                       >
                     </div>
 
-                    <div class="transcript-list text-size-medium" id="transcriptList" aria-live="polite"></div>
+                    <div class="transcript-live-band text-size-medium transcript-live-band--idle" id="transcriptLiveBand" aria-live="polite"></div>
+
+                    <details class="transcript-history-sheet" id="transcriptHistoryDetails">
+                      <summary class="transcript-history-sheet__summary">
+                        <span>Session history</span>
+                        <span class="transcript-history-sheet__meta" id="transcriptHistoryMeta">Committed segments stay here</span>
+                      </summary>
+
+                      <div class="transcript-list text-size-medium" id="transcriptList"></div>
+                    </details>
                   </div>
                 </section>
               </div>
@@ -379,7 +388,7 @@
                 </label>
 
                 <label class="field field--toggle">
-                  <span>Auto-scroll transcript</span>
+                  <span>Auto-follow live reader</span>
                   <input id="autoScrollInput" type="checkbox" />
                 </label>
 
