@@ -116,6 +116,7 @@ const state = {
   finalTranslationQueue: Promise.resolve(),
   finalTranslationInFlight: false,
   liveCommitTimer: null,
+  liveCommitInFlight: false,
   lastLiveCommitAtMs: 0,
   speakerTrackingSupported: typeof window !== 'undefined' && typeof MediaRecorder !== 'undefined',
   speakerRecorder: null,
@@ -390,26 +391,28 @@ function clearLiveCommitTimer() {
 
 function resetLiveCommitState() {
   clearLiveCommitTimer();
+  state.liveCommitInFlight = false;
   state.lastLiveCommitAtMs = 0;
 }
 
 function requestLiveCommit() {
   clearLiveCommitTimer();
-  if (!state.client || !state.speechActive) return;
+  if (!state.client || !state.speechActive || state.liveCommitInFlight) return;
 
+  state.liveCommitInFlight = true;
   const sent = state.client.commitInputAudioBuffer?.();
   if (sent) {
-    state.lastLiveCommitAtMs = Date.now();
-    scheduleLiveCommit();
     return;
   }
 
+  state.liveCommitInFlight = false;
   state.liveCommitTimer = window.setTimeout(() => {
     requestLiveCommit();
   }, LIVE_COMMIT_RETRY_MS);
 }
 
 function scheduleLiveCommit() {
+  if (state.liveCommitInFlight) return;
   clearLiveCommitTimer();
   if (!state.client || !state.currentSession || !state.speechActive || state.currentSession.status === 'ended') {
     return;
@@ -1463,7 +1466,7 @@ function updateDraft(itemId, delta) {
   renderDrafts();
   scheduleSessionPersist(400);
   scheduleDraftTranslation(itemId, current.sourceDraft.trim());
-  if (state.speechActive) {
+  if (state.speechActive && !state.liveCommitTimer && !state.liveCommitInFlight) {
     scheduleLiveCommit();
   }
 }
@@ -1740,6 +1743,8 @@ async function handleRealtimeEvent(event) {
 
   if (event.type === 'input_audio_buffer.speech_started') {
     state.speechActive = true;
+    state.liveCommitInFlight = false;
+    state.lastLiveCommitAtMs = 0;
     markSpeechStart();
     scheduleLiveCommit();
     renderDrafts();
@@ -1748,6 +1753,7 @@ async function handleRealtimeEvent(event) {
 
   if (event.type === 'input_audio_buffer.speech_stopped') {
     state.speechActive = false;
+    state.liveCommitInFlight = false;
     clearLiveCommitTimer();
     flushSpeechClock();
     renderSessionSummary();
@@ -1757,8 +1763,18 @@ async function handleRealtimeEvent(event) {
   }
 
   if (event.type === 'input_audio_buffer.committed') {
+    state.liveCommitInFlight = false;
     state.lastLiveCommitAtMs = Date.now();
     buildCommitMeta(event.item_id, event.previous_item_id);
+    if (state.speechActive) {
+      scheduleLiveCommit();
+    }
+    return;
+  }
+
+  if (event.type === 'transcripto.manual_commit.rejected') {
+    state.liveCommitInFlight = false;
+    state.lastLiveCommitAtMs = Date.now();
     if (state.speechActive) {
       scheduleLiveCommit();
     }

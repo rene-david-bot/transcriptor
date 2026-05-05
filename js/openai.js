@@ -130,6 +130,12 @@ export class RealtimeTranscriptionClient {
             const errorMessage = extractErrorMessage(payload, 'Realtime session error');
             if (this.shouldIgnoreRealtimeError(payload, errorMessage)) {
               console.debug('Ignoring expected realtime buffer error after manual commit', payload);
+              this.lastManualCommitAt = 0;
+              this.onEvent?.({
+                type: 'transcripto.manual_commit.rejected',
+                reason: 'buffer_too_small',
+                message: errorMessage,
+              });
               return;
             }
             this.onError?.(errorMessage);
@@ -253,12 +259,13 @@ export class RealtimeTranscriptionClient {
     const errorMessage = String(message || '').toLowerCase();
     const errorParam = String(payload?.error?.param || '').toLowerCase();
     const justCommitted = this.lastManualCommitAt && Date.now() - this.lastManualCommitAt < 3000;
+    const audioBufferError = errorParam.includes('input_audio_buffer') || errorMessage.includes('audio buffer');
+    const benignBufferRejection =
+      errorMessage.includes('empty') ||
+      errorMessage.includes('too small') ||
+      errorMessage.includes('expected at least 100ms');
 
-    return Boolean(
-      justCommitted &&
-        (errorParam.includes('input_audio_buffer') || errorMessage.includes('audio buffer')) &&
-        errorMessage.includes('empty')
-    );
+    return Boolean(justCommitted && audioBufferError && benignBufferRejection);
   }
 
   async disconnect({ nextStatus = 'stopped', message = 'Stopped.' } = {}) {
