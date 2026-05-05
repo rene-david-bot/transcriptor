@@ -395,9 +395,19 @@ function updateTranscriptAutoFollowState() {
 function scrollTranscriptToLive(behavior = 'smooth') {
   const list = elements.transcriptList;
   if (!list) return;
-  list.scrollTo({ top: list.scrollHeight, behavior });
-  state.transcriptPinnedToBottom = true;
-  updateTranscriptAutoFollowState();
+  const jumpToBottom = () => {
+    if (behavior === 'smooth') {
+      list.scrollTo({ top: list.scrollHeight, behavior: 'smooth' });
+    } else {
+      list.scrollTop = list.scrollHeight;
+    }
+  };
+  jumpToBottom();
+  requestAnimationFrame(() => {
+    jumpToBottom();
+    state.transcriptPinnedToBottom = true;
+    updateTranscriptAutoFollowState();
+  });
 }
 
 async function persistSettings(partial = {}) {
@@ -989,8 +999,13 @@ function renderTranscript() {
   const liveDraft = buildLiveTranscriptState();
   const sourceLabel = liveDraft.sourceLabel;
   const targetLabel = liveDraft.targetLabel;
+  const keepPinnedDuringCapture = Boolean(
+    state.settings.autoScroll &&
+      state.currentSession &&
+      ['connecting', 'listening', 'reconnecting'].includes(state.runtimeStatus)
+  );
   const shouldFollow = Boolean(
-    state.settings.autoScroll && (state.transcriptPinnedToBottom || list.scrollHeight <= list.clientHeight + 32)
+    state.settings.autoScroll && (keepPinnedDuringCapture || state.transcriptPinnedToBottom || list.scrollHeight <= list.clientHeight + 32)
   );
   const previousScrollTop = list.scrollTop;
 
@@ -1011,7 +1026,7 @@ function renderTranscript() {
     else if (translationPending) auxParts.push('Translation pending');
 
     return `
-      <article class="transcript-row">
+      <article class="transcript-row transcript-row--final">
         <div class="transcript-row__meta">
           <strong class="transcript-row__time">${escapeHtml(buildTranscriptTimestamp(segment))}</strong>
           <span class="transcript-row__speaker">${escapeHtml(speakerLabel)}</span>
@@ -1064,11 +1079,15 @@ function renderTranscript() {
   requestAnimationFrame(() => {
     if (shouldFollow) {
       list.scrollTop = list.scrollHeight;
-      state.transcriptPinnedToBottom = true;
+      requestAnimationFrame(() => {
+        list.scrollTop = list.scrollHeight;
+        state.transcriptPinnedToBottom = true;
+        updateTranscriptAutoFollowState();
+      });
     } else {
       list.scrollTop = previousScrollTop;
+      updateTranscriptAutoFollowState();
     }
-    updateTranscriptAutoFollowState();
   });
 }
 
@@ -1515,6 +1534,9 @@ async function startListening({ silent = false } = {}) {
   state.currentSession.updatedAt = nowIso();
   await persistCurrentSessionNow();
   await syncLastActiveSession();
+  if (state.settings.autoScroll && state.route === 'live') {
+    scrollTranscriptToLive('auto');
+  }
 
   const client = new RealtimeTranscriptionClient({
     apiKey: state.settings.apiKey,
