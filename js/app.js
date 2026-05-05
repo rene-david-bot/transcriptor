@@ -373,14 +373,19 @@ function isCompactTranscriptLayout() {
 function getTranscriptModeNote(mode = state.liveTranscriptView) {
   const compact = isCompactTranscriptLayout();
   if (mode === 'source') {
-    return 'Original mode keeps one rolling teleprompter for the source language only.';
+    return 'Read the current source speech in the fixed stage above. Final source paragraphs settle below.';
   }
   if (mode === 'target') {
-    return 'Translation mode keeps one rolling teleprompter for the translated language only.';
+    return 'Read the current translation in the fixed stage above. Final translated paragraphs settle below.';
   }
   return compact
-    ? 'Both mode stacks paired source and translation paragraphs in one rolling document.'
-    : 'Both mode keeps original and translation side by side in one rolling teleprompter.';
+    ? 'Both mode keeps the current speech fixed above, then stacks finalized source and translation paragraphs below.'
+    : 'Both mode keeps the current speech fixed above, then settles finalized original and translation paragraphs below.';
+}
+
+function isLiveStagePrimary(liveDraft = null) {
+  const draft = liveDraft || buildLiveTranscriptState();
+  return Boolean(state.currentSession && (draft.visible || state.speechActive || state.activeDraftItemId));
 }
 
 function applyTranscriptView() {
@@ -411,6 +416,13 @@ function isTranscriptNearBottom(threshold = 96) {
 }
 
 function updateTranscriptAutoFollowState() {
+  if (isLiveStagePrimary()) {
+    state.transcriptPinnedToBottom = true;
+    if (elements.jumpToLiveButton) {
+      elements.jumpToLiveButton.classList.add('hidden');
+    }
+    return;
+  }
   state.transcriptPinnedToBottom = isTranscriptNearBottom();
   if (elements.jumpToLiveButton) {
     elements.jumpToLiveButton.classList.toggle('hidden', state.transcriptPinnedToBottom || !state.currentSession);
@@ -1022,8 +1034,8 @@ function buildLiveTranscriptState() {
     sourceText: sourceDraft || (targetDraft ? 'Source text is settling…' : ''),
     targetText: targetDraft || (sourceDraft ? 'Translation is catching up…' : ''),
     liveStateLabel,
-    liveBadge: hasActiveSpeech ? 'Live band' : 'Holding band',
-    liveMeta: hasActiveSpeech ? 'Newest words stay here until the paragraph locks in' : 'Waiting for the current utterance to finalize',
+    liveBadge: hasActiveSpeech ? 'Current speech' : 'Holding stage',
+    liveMeta: hasActiveSpeech ? 'Keep reading here. Finalized paragraphs settle below.' : 'Holding the current utterance steady until it finalizes',
     timestamp: formatDuration(getEffectiveActiveDuration()),
     targetPending: Boolean(sourceDraft && !targetDraft),
     hasActiveSpeech,
@@ -1075,15 +1087,15 @@ function renderLiveBand(liveDraft) {
     band.innerHTML = `
       <div class="transcript-live-band__meta">
         <div class="transcript-live-band__meta-group">
-          <span class="transcript-live-band__badge">Live band</span>
+          <span class="transcript-live-band__badge">Current speech</span>
           <span class="transcript-live-band__timestamp">Ready</span>
         </div>
         <span class="transcript-live-band__state">${escapeHtml(liveDraft.liveStateLabel)}</span>
       </div>
       <p class="transcript-live-band__placeholder">${escapeHtml(
         state.currentSession
-          ? 'Current speech will appear here first, then move into the teleprompter above once finalized.'
-          : 'Start listening. New words will appear here first, and finalized paragraphs will collect above.'
+          ? 'The currently read text stays fixed here. Once it finalizes, it moves into the archive below.'
+          : 'Start listening. The currently read text will stay fixed here, and finalized paragraphs will collect below.'
       )}</p>
     `;
     return;
@@ -1128,6 +1140,7 @@ function renderTranscript() {
   const list = elements.transcriptList;
   if (!list) return;
   const liveDraft = buildLiveTranscriptState();
+  const freezeArchiveDuringLive = isLiveStagePrimary(liveDraft);
   const sourceLabel = liveDraft.sourceLabel;
   const targetLabel = liveDraft.targetLabel;
   const keepPinnedDuringCapture = Boolean(
@@ -1136,7 +1149,9 @@ function renderTranscript() {
       ['connecting', 'listening', 'reconnecting'].includes(state.runtimeStatus)
   );
   const shouldFollow = Boolean(
-    state.settings.autoScroll && (keepPinnedDuringCapture || state.transcriptPinnedToBottom || list.scrollHeight <= list.clientHeight + 32)
+    state.settings.autoScroll &&
+      !freezeArchiveDuringLive &&
+      (keepPinnedDuringCapture || state.transcriptPinnedToBottom || list.scrollHeight <= list.clientHeight + 32)
   );
   const previousScrollTop = list.scrollTop;
 
@@ -1195,6 +1210,9 @@ function renderTranscript() {
       });
     } else {
       list.scrollTop = previousScrollTop;
+      if (freezeArchiveDuringLive) {
+        state.transcriptPinnedToBottom = true;
+      }
       updateTranscriptAutoFollowState();
     }
   });
