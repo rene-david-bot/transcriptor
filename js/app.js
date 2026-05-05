@@ -1089,7 +1089,7 @@ function renderDrafts() {
 function renderTranscriptParagraph({ kind, label, text, pending = false }) {
   return `
     <section class="transcript-paragraph transcript-paragraph--${kind}">
-      <span class="transcript-paragraph__label">${escapeHtml(label)}</span>
+      ${label ? `<span class="transcript-paragraph__label">${escapeHtml(label)}</span>` : ''}
       <p class="transcript-paragraph__text ${pending ? 'transcript-paragraph__text--pending' : ''}">${escapeHtml(text)}</p>
     </section>
   `;
@@ -1154,8 +1154,7 @@ function buildEmptyReaderSlot(role, { sourceLabel, targetLabel }) {
       role,
       empty: true,
       eyebrow: 'Previous',
-      title: 'Nothing committed yet',
-      description: 'The last committed sentence will stay here once speech starts.',
+      title: 'No previous sentence yet',
       sourceLabel,
       targetLabel,
     };
@@ -1166,10 +1165,7 @@ function buildEmptyReaderSlot(role, { sourceLabel, targetLabel }) {
       role,
       empty: true,
       eyebrow: 'Read now',
-      title: state.currentSession ? 'Waiting for the first committed sentence' : 'Start listening to begin',
-      description: state.currentSession
-        ? 'The sentence you should read will lock here after the first stable commit.'
-        : 'Start listening and the live reader will lock the first sentence here.',
+      title: state.currentSession ? 'Waiting for the first sentence' : 'Start listening',
       sourceLabel,
       targetLabel,
     };
@@ -1178,14 +1174,21 @@ function buildEmptyReaderSlot(role, { sourceLabel, targetLabel }) {
   return {
     role,
     empty: true,
-    eyebrow: 'Live preview',
-    title: 'Preview waiting',
-    description: state.currentSession
-      ? 'Incoming speech will preview here before it advances to the center card.'
-      : 'The next live sentence will preview here once capture starts.',
+    eyebrow: 'Preview',
+    title: 'No live preview yet',
     sourceLabel,
     targetLabel,
   };
+}
+
+function buildCompactReaderSlotText(slot, mode) {
+  const sourceText = slot.sourceText || '';
+  const targetText = !slot.targetPending ? slot.targetText || '' : '';
+
+  if (mode === 'source') return sourceText || 'Listening…';
+  if (mode === 'target') return targetText || slot.targetText || 'Translation is catching up…';
+  if (sourceText && targetText) return `${sourceText} • ${targetText}`;
+  return sourceText || targetText || slot.targetText || 'Listening…';
 }
 
 function renderTranscriptWindowSlot(slot) {
@@ -1193,49 +1196,52 @@ function renderTranscriptWindowSlot(slot) {
   const showSource = mode !== 'target';
   const showTarget = mode !== 'source';
   const bodyClass = showSource && showTarget ? 'transcript-window__body--both' : 'transcript-window__body--single';
-  const hasMeta = Boolean(slot.timestamp || slot.auxText);
+  const hasMeta = Boolean(slot.timestamp);
+  const showParagraphLabels = slot.role === 'current';
+  const showTitle = slot.role === 'current' || slot.empty;
+  const useCompactBody = slot.role !== 'current' && !slot.empty;
+  const compactText = useCompactBody ? buildCompactReaderSlotText(slot, mode) : '';
 
   return `
     <article class="transcript-window__slot transcript-window__slot--${slot.role}${slot.empty ? ' transcript-window__slot--empty' : ''}" data-reader-slot="${slot.role}">
       <div class="transcript-window__slot-head">
         <div class="transcript-window__slot-copy">
           <p class="transcript-window__eyebrow">${escapeHtml(slot.eyebrow)}</p>
-          <h4 class="transcript-window__title">${escapeHtml(slot.title)}</h4>
+          ${showTitle ? `<h4 class="transcript-window__title">${escapeHtml(slot.title)}</h4>` : ''}
         </div>
         ${
           hasMeta
             ? `<div class="transcript-pair__meta">
                 <span class="transcript-pair__time">${escapeHtml(slot.timestamp || '')}</span>
-                ${slot.auxText ? `<span class="transcript-pair__divider">•</span><span class="transcript-pair__aux">${escapeHtml(slot.auxText)}</span>` : ''}
               </div>`
             : ''
         }
       </div>
-      ${slot.empty ? `<p class="transcript-window__placeholder">${escapeHtml(slot.description || '')}</p>` : ''}
-      ${!slot.empty ? `<p class="transcript-window__description">${escapeHtml(slot.description || '')}</p>` : ''}
       ${
         !slot.empty
-          ? `<div class="transcript-window__body ${bodyClass}">
-              ${
-                showSource
-                  ? renderTranscriptParagraph({
-                      kind: 'source',
-                      label: slot.sourceLabel,
-                      text: slot.sourceText || 'Listening…',
-                    })
-                  : ''
-              }
-              ${
-                showTarget
-                  ? renderTranscriptParagraph({
-                      kind: 'target',
-                      label: slot.targetLabel,
-                      text: slot.targetText || 'Translation is catching up…',
-                      pending: slot.targetPending,
-                    })
-                  : ''
-              }
-            </div>`
+          ? useCompactBody
+            ? `<p class="transcript-window__compact-line">${escapeHtml(compactText)}</p>`
+            : `<div class="transcript-window__body ${bodyClass}">
+                ${
+                  showSource
+                    ? renderTranscriptParagraph({
+                        kind: 'source',
+                        label: showParagraphLabels ? slot.sourceLabel : '',
+                        text: slot.sourceText || 'Listening…',
+                      })
+                    : ''
+                }
+                ${
+                  showTarget
+                    ? renderTranscriptParagraph({
+                        kind: 'target',
+                        label: showParagraphLabels ? slot.targetLabel : '',
+                        text: slot.targetText || 'Translation is catching up…',
+                        pending: slot.targetPending,
+                      })
+                    : ''
+                }
+              </div>`
           : ''
       }
     </article>
@@ -1262,7 +1268,6 @@ function renderTranscriptLiveBand(liveDraft) {
         ...previousCommitted,
         role: 'previous',
         eyebrow: 'Previous',
-        description: 'The last committed sentence stays visible here for quick context.',
       }
     : buildEmptyReaderSlot('previous', { sourceLabel, targetLabel });
 
@@ -1271,14 +1276,12 @@ function renderTranscriptLiveBand(liveDraft) {
         ...currentCommitted,
         role: 'current',
         eyebrow: 'Read now',
-        description: 'This center card stays steady and only advances when a sentence commits.',
       }
     : livePreview
       ? {
           ...livePreview,
           role: 'current',
           eyebrow: 'Read now',
-          description: 'No sentence has committed yet, so the first live sentence is anchored here.',
         }
       : buildEmptyReaderSlot('current', { sourceLabel, targetLabel });
 
@@ -1286,10 +1289,7 @@ function renderTranscriptLiveBand(liveDraft) {
     ? {
         ...livePreview,
         role: 'preview',
-        eyebrow: 'Live preview',
-        description: liveDraft.hasActiveSpeech
-          ? 'Fresh speech lands here first before it replaces the center card.'
-          : 'The next sentence is stabilizing here before it commits.',
+        eyebrow: 'Preview',
       }
     : buildEmptyReaderSlot('preview', { sourceLabel, targetLabel });
 
@@ -1304,7 +1304,6 @@ function renderTranscriptLiveBand(liveDraft) {
         <span class="transcript-live-band__badge">${escapeHtml(bandStatus)}</span>
         <span class="transcript-live-band__timestamp">${escapeHtml(liveDraft.timestamp || 'Live')}</span>
       </div>
-      <div class="transcript-live-band__state">${escapeHtml(liveDraft.liveMeta || '')}</div>
     </div>
     <div class="transcript-window">
       ${renderTranscriptWindowSlot(previousSlot)}
