@@ -224,46 +224,11 @@
                   </div>
                 </section>
 
-                <section class="panel drafts-panel">
-                  <div class="panel__header">
-                    <div>
-                      <p class="eyebrow">Live drafts</p>
-                      <h3>Current speech in progress</h3>
-                    </div>
-                  </div>
-
-                  <div class="draft-grid">
-                    <article class="draft-card">
-                      <div class="draft-card__header">
-                        <span id="sourceDraftLabel">Source draft</span>
-                        <span class="draft-state" id="sourceDraftState">Waiting</span>
-                      </div>
-                      <p class="draft-text" id="sourceDraftText">No live source-language draft yet.</p>
-                      <div class="draft-carry hidden" id="sourceDraftCarry">
-                        <span class="draft-carry__label">Previous segment</span>
-                        <p class="draft-text draft-text--carry" id="sourceDraftCarryText"></p>
-                      </div>
-                    </article>
-
-                    <article class="draft-card">
-                      <div class="draft-card__header">
-                        <span id="targetDraftLabel">Translation draft</span>
-                        <span class="draft-state" id="targetDraftState">Waiting</span>
-                      </div>
-                      <p class="draft-text" id="targetDraftText">No live translation draft yet.</p>
-                      <div class="draft-carry hidden" id="targetDraftCarry">
-                        <span class="draft-carry__label">Previous segment</span>
-                        <p class="draft-text draft-text--carry" id="targetDraftCarryText"></p>
-                      </div>
-                    </article>
-                  </div>
-                </section>
-
                 <section class="panel transcript-panel">
                   <div class="panel__header panel__header--spread">
                     <div>
-                      <p class="eyebrow">Transcript</p>
-                      <h3>Bilingual scrolling transcript</h3>
+                      <p class="eyebrow">Live transcript</p>
+                      <h3>One scrolling bilingual timeline</h3>
                     </div>
                     <div class="button-row button-row--wrap">
                       <button class="button button--ghost button--small" id="exportMarkdownButton">Export Markdown</button>
@@ -272,7 +237,32 @@
                     </div>
                   </div>
 
-                  <div class="transcript-list text-size-medium" id="transcriptList" aria-live="polite"></div>
+                  <div class="transcript-toolbar">
+                    <div class="transcript-view-switch" aria-label="Transcript view">
+                      <button type="button" class="transcript-view-button" data-transcript-view="source">Original</button>
+                      <button type="button" class="transcript-view-button is-active" data-transcript-view="both">Both</button>
+                      <button type="button" class="transcript-view-button" data-transcript-view="target">Translation</button>
+                    </div>
+
+                    <div class="transcript-toolbar__meta">
+                      <span class="transcript-live-state" id="transcriptLiveState">Waiting for speech</span>
+                      <button type="button" class="button button--ghost button--small hidden" id="jumpToLiveButton">Jump to live</button>
+                    </div>
+                  </div>
+
+                  <div class="transcript-board transcript-board--both" id="transcriptBoard">
+                    <div class="transcript-board__head">
+                      <span class="transcript-board__meta-label">Speaker · time</span>
+                      <span class="transcript-board__column-label transcript-board__column-label--source" id="transcriptSourceHeading"
+                        >Original</span
+                      >
+                      <span class="transcript-board__column-label transcript-board__column-label--target" id="transcriptTargetHeading"
+                        >Translation</span
+                      >
+                    </div>
+
+                    <div class="transcript-list text-size-medium" id="transcriptList" aria-live="polite"></div>
+                  </div>
                 </section>
               </div>
 

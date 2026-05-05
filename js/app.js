@@ -143,6 +143,8 @@ const state = {
   clockTimer: null,
   installPrompt: null,
   activeDraftItemId: null,
+  liveTranscriptView: 'both',
+  transcriptPinnedToBottom: true,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -178,6 +180,11 @@ const elements = {
   stopButton: $('#stopButton'),
   newSessionButton: $('#newSessionButton'),
   endSessionButton: $('#endSessionButton'),
+  transcriptBoard: $('#transcriptBoard'),
+  transcriptSourceHeading: $('#transcriptSourceHeading'),
+  transcriptTargetHeading: $('#transcriptTargetHeading'),
+  transcriptLiveState: $('#transcriptLiveState'),
+  jumpToLiveButton: $('#jumpToLiveButton'),
   sourceDraftLabel: $('#sourceDraftLabel'),
   sourceDraftText: $('#sourceDraftText'),
   sourceDraftState: $('#sourceDraftState'),
@@ -217,6 +224,8 @@ const elements = {
   toggleAutoScrollButton: $('#toggleAutoScrollButton'),
   renameSessionButton: $('#renameSessionButton'),
 };
+
+const TRANSCRIPT_VIEW_MODES = new Set(['source', 'both', 'target']);
 
 function nowIso() {
   return new Date().toISOString();
@@ -340,6 +349,55 @@ function applySettingsToForms() {
   document.body.classList.add(`text-size-${settings.textSize || 'medium'}`);
   elements.transcriptList.classList.remove('text-size-small', 'text-size-medium', 'text-size-large', 'text-size-xlarge');
   elements.transcriptList.classList.add(`text-size-${settings.textSize || 'medium'}`);
+  if (elements.transcriptSourceHeading) {
+    elements.transcriptSourceHeading.textContent = getLanguageName(state.currentSession?.sourceLanguage || settings.sourceLanguage || '');
+  }
+  if (elements.transcriptTargetHeading) {
+    elements.transcriptTargetHeading.textContent = getLanguageName(state.currentSession?.targetLanguage || settings.targetLanguage || '');
+  }
+  applyTranscriptView();
+}
+
+function getTranscriptViewButtons() {
+  return $$('[data-transcript-view]');
+}
+
+function applyTranscriptView() {
+  if (!elements.transcriptBoard) return;
+  const mode = TRANSCRIPT_VIEW_MODES.has(state.liveTranscriptView) ? state.liveTranscriptView : 'both';
+  elements.transcriptBoard.classList.remove('transcript-board--source', 'transcript-board--both', 'transcript-board--target');
+  elements.transcriptBoard.classList.add(`transcript-board--${mode}`);
+  getTranscriptViewButtons().forEach((button) => {
+    const active = button.dataset.transcriptView === mode;
+    button.classList.toggle('is-active', active);
+    button.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+}
+
+function setTranscriptView(mode) {
+  state.liveTranscriptView = TRANSCRIPT_VIEW_MODES.has(mode) ? mode : 'both';
+  applyTranscriptView();
+}
+
+function isTranscriptNearBottom(threshold = 96) {
+  const list = elements.transcriptList;
+  if (!list) return true;
+  return list.scrollHeight - list.scrollTop - list.clientHeight <= threshold;
+}
+
+function updateTranscriptAutoFollowState() {
+  state.transcriptPinnedToBottom = isTranscriptNearBottom();
+  if (elements.jumpToLiveButton) {
+    elements.jumpToLiveButton.classList.toggle('hidden', state.transcriptPinnedToBottom || !state.currentSession);
+  }
+}
+
+function scrollTranscriptToLive(behavior = 'smooth') {
+  const list = elements.transcriptList;
+  if (!list) return;
+  list.scrollTo({ top: list.scrollHeight, behavior });
+  state.transcriptPinnedToBottom = true;
+  updateTranscriptAutoFollowState();
 }
 
 async function persistSettings(partial = {}) {
@@ -862,122 +920,156 @@ function renderSessionSummary() {
   elements.segmentCountValue.textContent = String(state.currentSegments.length);
 }
 
-function renderDrafts() {
+function buildLiveTranscriptState() {
   const session = state.currentSession;
-  const sourceLanguage = session ? getLanguageName(session.sourceLanguage) : 'Source';
-  const targetLanguage = session ? getLanguageName(session.targetLanguage) : 'Target';
-  const lastSegment = state.currentSegments[state.currentSegments.length - 1];
-  elements.sourceDraftLabel.textContent = `${sourceLanguage} draft`;
-  elements.targetDraftLabel.textContent = `${targetLanguage} draft`;
+  const sourceLabel = getLanguageName(session?.sourceLanguage || state.settings.sourceLanguage || '');
+  const targetLabel = getLanguageName(session?.targetLanguage || state.settings.targetLanguage || '');
 
-  const sourceDraft = session?.draftSource?.trim();
-  const targetDraft = session?.draftTranslation?.trim();
-  const normalizedSourceDraft = normalizeTranscript(sourceDraft || '');
+  if (!session) {
+    return {
+      visible: false,
+      sourceLabel,
+      targetLabel,
+      liveStateLabel: 'Start listening to build the live bilingual timeline.',
+    };
+  }
+
+  const sourceDraft = String(session.draftSource || '').trim();
+  const targetDraft = String(session.draftTranslation || '').trim();
   const hasActiveSpeech = Boolean(sourceDraft) && (state.speechActive || Boolean(state.activeDraftItemId));
-  const activeDraftPending = Boolean(
+  const targetRefreshing = Boolean(
     sourceDraft &&
       ((state.draftTranslationPending && state.draftTranslationPending.itemId === state.activeDraftItemId) ||
         (state.draftTranslationActive && state.draftTranslationActive.itemId === state.activeDraftItemId))
   );
-  const fallbackCarryVisible = Boolean(
-    sourceDraft &&
-      state.activeDraftItemId &&
-      lastSegment?.sourceText &&
-      normalizeTranscript(lastSegment.sourceText) !== normalizedSourceDraft
-  );
-  let carrySource = state.liveDraftCarrySource || (fallbackCarryVisible ? String(lastSegment?.sourceText || '').trim() : '');
-  const carryMatchesLastSegment = Boolean(
-    carrySource &&
-      lastSegment?.sourceText &&
-      normalizeTranscript(lastSegment.sourceText) === normalizeTranscript(carrySource)
-  );
-  let carryTargetRaw =
-    state.liveDraftCarryTranslation ||
-    (carryMatchesLastSegment ? String(lastSegment?.translatedText || lastSegment?.translatedDraft || '').trim() : '') ||
-    (fallbackCarryVisible ? String(lastSegment?.translatedText || lastSegment?.translatedDraft || '').trim() : '');
-  const carryDuplicatesCurrent = Boolean(
-    carrySource && normalizedSourceDraft && normalizeTranscript(carrySource) === normalizedSourceDraft
-  );
 
-  if (carryDuplicatesCurrent) {
-    carrySource = '';
-    carryTargetRaw = '';
+  let liveStateLabel = state.settings.autoScroll
+    ? 'Following the newest lines automatically.'
+    : 'Auto-follow is off. Scroll manually or use Jump to live.';
+
+  if (!state.transcriptPinnedToBottom && (state.currentSegments.length || sourceDraft || targetDraft)) {
+    liveStateLabel = 'Browsing earlier lines. Tap Jump to live to rejoin the current speech.';
+  } else if (hasActiveSpeech && targetDraft) {
+    liveStateLabel = 'Original and translation are updating in place.';
+  } else if (hasActiveSpeech) {
+    liveStateLabel = 'Listening live. Translation is catching up.';
+  } else if (sourceDraft && targetDraft) {
+    liveStateLabel = 'Holding the current utterance until the final segment lands.';
+  } else if (sourceDraft) {
+    liveStateLabel = 'Holding the current utterance while translation settles.';
+  } else if (!state.currentSegments.length) {
+    liveStateLabel = 'Waiting for the first utterance.';
   }
 
-  const carryTarget = carryTargetRaw || (carrySource ? 'Previous translation is catching up…' : '');
-  const carryVisible = Boolean(carrySource || carryTarget);
-  const targetRefreshing = activeDraftPending || (!targetDraft && hasActiveSpeech && carryVisible);
+  return {
+    visible: Boolean(sourceDraft || targetDraft),
+    sourceLabel,
+    targetLabel,
+    sourceText: sourceDraft || (targetDraft ? 'Source text is settling…' : ''),
+    targetText: targetDraft || (sourceDraft ? 'Translation is catching up…' : ''),
+    liveStateLabel,
+    liveBadge: hasActiveSpeech ? 'Live' : 'Holding',
+    liveMeta: hasActiveSpeech ? 'Updating while the speaker talks' : 'Waiting for final lock-in',
+    timestamp: formatDuration(getEffectiveActiveDuration()),
+    targetPending: Boolean(sourceDraft && !targetDraft),
+    hasActiveSpeech,
+  };
+}
 
-  elements.sourceDraftText.textContent = sourceDraft || 'No live source-language draft yet.';
-  elements.targetDraftText.textContent =
-    targetDraft || (targetRefreshing ? 'Translation is catching up…' : 'No live translation draft yet.');
-  elements.sourceDraftState.textContent = sourceDraft ? (hasActiveSpeech ? 'Updating' : 'Held') : 'Waiting';
-  elements.targetDraftState.textContent = targetDraft
-    ? targetRefreshing
-      ? 'Refreshing'
-      : hasActiveSpeech
-        ? 'Live'
-        : 'Held'
-    : targetRefreshing
-      ? 'Translating'
-      : 'Waiting';
-
-  elements.sourceDraftCarry.classList.toggle('hidden', !carrySource);
-  elements.sourceDraftCarryText.textContent = carrySource;
-  elements.targetDraftCarry.classList.toggle('hidden', !carryTarget);
-  elements.targetDraftCarryText.textContent = carryTarget;
+function renderDrafts() {
+  const liveDraft = buildLiveTranscriptState();
+  if (elements.transcriptSourceHeading) elements.transcriptSourceHeading.textContent = liveDraft.sourceLabel;
+  if (elements.transcriptTargetHeading) elements.transcriptTargetHeading.textContent = liveDraft.targetLabel;
+  if (elements.transcriptLiveState) elements.transcriptLiveState.textContent = liveDraft.liveStateLabel;
+  renderTranscript();
 }
 
 function renderTranscript() {
-  if (!state.currentSegments.length) {
-    elements.transcriptList.innerHTML = '<div class="note">No finalized transcript segments yet.</div>';
+  const list = elements.transcriptList;
+  const liveDraft = buildLiveTranscriptState();
+  const sourceLabel = liveDraft.sourceLabel;
+  const targetLabel = liveDraft.targetLabel;
+  const shouldFollow = Boolean(
+    state.settings.autoScroll && (state.transcriptPinnedToBottom || list.scrollHeight <= list.clientHeight + 32)
+  );
+  const previousScrollTop = list.scrollTop;
+
+  const finalizedRows = state.currentSegments.map((segment) => {
+    const translatedText = String(segment.translatedText || segment.translatedDraft || '').trim();
+    const translationPending = !translatedText && segment.translationStatus !== 'error';
+    const translatedDisplay = translatedText || (segment.translationStatus === 'error' ? 'Translation unavailable.' : 'Translating…');
+    const speakerLabel = segment.speakerLabel
+      ? segment.speakerLabel
+      : segment.speakerStatus === 'pending'
+        ? 'Speaker analyzing…'
+        : segment.speakerStatus === 'error'
+          ? 'Speaker unavailable'
+          : 'Speaker';
+    const auxParts = [];
+    if (segment.sequence) auxParts.push(`Segment ${segment.sequence}`);
+    if (segment.translationStatus === 'draft') auxParts.push('Translation polishing');
+    else if (translationPending) auxParts.push('Translation pending');
+
+    return `
+      <article class="transcript-row">
+        <div class="transcript-row__meta">
+          <strong class="transcript-row__time">${escapeHtml(buildTranscriptTimestamp(segment))}</strong>
+          <span class="transcript-row__speaker">${escapeHtml(speakerLabel)}</span>
+          <span class="transcript-row__aux">${escapeHtml(auxParts.join(' • ') || 'Finalized')}</span>
+        </div>
+        <div class="transcript-cell transcript-cell--source">
+          <span class="transcript-cell__label">${escapeHtml(sourceLabel)}</span>
+          <p class="transcript-cell__text">${escapeHtml(segment.sourceText)}</p>
+        </div>
+        <div class="transcript-cell transcript-cell--target">
+          <span class="transcript-cell__label">${escapeHtml(targetLabel)}</span>
+          <p class="transcript-cell__text ${translationPending ? 'transcript-cell__text--pending' : ''}">${escapeHtml(translatedDisplay)}</p>
+        </div>
+      </article>
+    `;
+  });
+
+  const liveRow = liveDraft.visible
+    ? `
+      <article class="transcript-row transcript-row--live">
+        <div class="transcript-row__meta">
+          <strong class="transcript-row__time">${escapeHtml(liveDraft.timestamp || 'Live')}</strong>
+          <span class="transcript-row__speaker">${escapeHtml(liveDraft.liveBadge)}</span>
+          <span class="transcript-row__state">${escapeHtml(liveDraft.liveMeta)}</span>
+        </div>
+        <div class="transcript-cell transcript-cell--source">
+          <span class="transcript-cell__label">${escapeHtml(sourceLabel)}</span>
+          <p class="transcript-cell__text ${liveDraft.hasActiveSpeech ? 'transcript-cell__text--live' : 'transcript-cell__text--held'}">${escapeHtml(
+            liveDraft.sourceText || 'Listening…'
+          )}</p>
+        </div>
+        <div class="transcript-cell transcript-cell--target">
+          <span class="transcript-cell__label">${escapeHtml(targetLabel)}</span>
+          <p class="transcript-cell__text ${liveDraft.targetPending ? 'transcript-cell__text--pending' : 'transcript-cell__text--live'}">${escapeHtml(
+            liveDraft.targetText || 'Translation is catching up…'
+          )}</p>
+        </div>
+      </article>
+    `
+    : '';
+
+  if (!finalizedRows.length && !liveRow) {
+    list.innerHTML = '<div class="transcript-empty">Start speaking and the live bilingual timeline will grow here.</div>';
+    updateTranscriptAutoFollowState();
     return;
   }
 
-  const sourceLabel = getLanguageName(state.currentSession?.sourceLanguage);
-  const targetLabel = getLanguageName(state.currentSession?.targetLanguage);
-  elements.transcriptList.innerHTML = state.currentSegments
-    .map((segment) => {
-      const translatedDisplay = segment.translatedText?.trim()
-        ? segment.translatedText
-        : segment.translationStatus === 'error'
-          ? 'Translation unavailable.'
-          : 'Translating…';
-      const metaParts = [`Segment ${segment.sequence || ''}`];
-      if (segment.speakerLabel) {
-        metaParts.push(segment.speakerLabel);
-      } else if (segment.speakerStatus === 'pending') {
-        metaParts.push('Speaker analyzing…');
-      } else if (segment.speakerStatus === 'error') {
-        metaParts.push('Speaker unavailable');
-      }
+  list.innerHTML = [...finalizedRows, liveRow].join('');
 
-      return `
-        <article class="transcript-entry">
-          <div class="transcript-entry__header">
-            <strong>${buildTranscriptTimestamp(segment)}</strong>
-            <span class="transcript-entry__meta">${escapeHtml(metaParts.join(' • '))}</span>
-          </div>
-          <div class="transcript-entry__columns">
-            <div>
-              <span class="transcript-entry__label">${sourceLabel}</span>
-              <p class="transcript-entry__text">${escapeHtml(segment.sourceText)}</p>
-            </div>
-            <div>
-              <span class="transcript-entry__label">${targetLabel}</span>
-              <p class="transcript-entry__text">${escapeHtml(translatedDisplay)}</p>
-            </div>
-          </div>
-        </article>
-      `;
-    })
-    .join('');
-
-  if (state.settings.autoScroll) {
-    requestAnimationFrame(() => {
-      elements.transcriptList.scrollTop = elements.transcriptList.scrollHeight;
-    });
-  }
+  requestAnimationFrame(() => {
+    if (shouldFollow) {
+      list.scrollTop = list.scrollHeight;
+      state.transcriptPinnedToBottom = true;
+    } else {
+      list.scrollTop = previousScrollTop;
+    }
+    updateTranscriptAutoFollowState();
+  });
 }
 
 function upsertCurrentSegmentInState(segment) {
@@ -1122,6 +1214,7 @@ async function loadSession(sessionId) {
   state.draftByItemId.clear();
   state.commitMetaByItemId.clear();
   state.activeDraftItemId = null;
+  state.transcriptPinnedToBottom = true;
   flushListeningClock();
   flushSpeechClock();
   setStatus(session.runtimeStatus || (session.status === 'ended' ? 'ended' : 'stopped'), session.status === 'ended' ? 'Session ended.' : 'Session loaded.');
@@ -1134,7 +1227,6 @@ function renderCurrentView() {
   renderSessionSummary();
   renderDrafts();
   renderSpeakerInsights();
-  renderTranscript();
   renderHistory();
   renderControls();
 }
@@ -1385,6 +1477,7 @@ async function handleStartFromSetup(event) {
   const session = await createSession(formValues);
   state.currentSession = session;
   state.currentSegments = [];
+  state.transcriptPinnedToBottom = true;
   clearLiveDraftCarry();
   await syncLastActiveSession();
   await refreshSessions();
@@ -2187,6 +2280,11 @@ function bindEvents() {
   elements.recoverDraftButton.addEventListener('click', resumeLastSession);
   elements.openHistoryFromSetup.addEventListener('click', () => setRoute('history'));
   elements.refreshHistoryButton.addEventListener('click', refreshSessions);
+  getTranscriptViewButtons().forEach((button) => {
+    button.addEventListener('click', () => setTranscriptView(button.dataset.transcriptView));
+  });
+  elements.jumpToLiveButton?.addEventListener('click', () => scrollTranscriptToLive());
+  elements.transcriptList.addEventListener('scroll', updateTranscriptAutoFollowState);
 
   elements.startButton.addEventListener('click', () => startListening());
   elements.pauseButton.addEventListener('click', pauseListening);
@@ -2471,10 +2569,11 @@ async function init() {
   fillLanguageSelect(elements.settingsSourceLanguage);
   fillLanguageSelect(elements.settingsTargetLanguage);
   bindEvents();
+  renderCurrentView();
+  installDebugHooks();
   await loadBootstrapData();
   renderCurrentView();
   startClockTimer();
-  installDebugHooks();
   await registerServiceWorker();
 }
 
