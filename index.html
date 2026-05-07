@@ -297,6 +297,34 @@
                     </div>
 
                     <div class="transcript-list text-size-medium" id="transcriptList"></div>
+
+                    <div class="transcript-review-bar">
+                      <div class="transcript-review-bar__top">
+                        <div class="transcript-review-bar__copy">
+                          <strong>Review audio</strong>
+                          <span id="reviewAudioStatus">Local session recording will appear here while capture runs.</span>
+                        </div>
+                        <div class="button-row button-row--wrap transcript-review-bar__actions">
+                          <button type="button" class="button button--ghost button--small" id="reviewPlayButton">Play</button>
+                          <button type="button" class="button button--ghost button--small" id="reviewPauseButton">Pause</button>
+                        </div>
+                      </div>
+                      <audio class="hidden" id="reviewAudio" controls preload="metadata"></audio>
+                    </div>
+
+                    <div class="speaker-change-dock">
+                      <div class="speaker-change-dock__top">
+                        <strong>Speaker change</strong>
+                        <span id="speakerChangeTimer">00:00</span>
+                      </div>
+                      <div class="speaker-change-dock__controls">
+                        <select id="speakerChangeCurrentSelect" aria-label="Current speaker"></select>
+                        <button type="button" class="button button--secondary button--small" id="speakerChangeButton">Speaker change</button>
+                        <button type="button" class="button button--ghost button--small" id="speakerChangePauseButton" aria-label="Pause or resume speaker timer">▶️</button>
+                        <button type="button" class="button button--ghost button--small" id="speakerChangeResetButton" aria-label="Reset speaker changes">🔄</button>
+                      </div>
+                      <div class="speaker-change-markers" id="speakerChangeMarkers"></div>
+                    </div>
                   </div>
                 </section>
               </div>
@@ -505,6 +533,6 @@
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-    <script type="module" src="./js/app.js?v=20260507-speaker-details"></script>
+    <script type="module" src="./js/app.js?v=20260507-session-review"></script>
   </body>
 </html>

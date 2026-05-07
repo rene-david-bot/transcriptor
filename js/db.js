@@ -1,5 +1,5 @@
 const DB_NAME = 'transcriptor-db';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const LOCAL_SETTINGS_KEY = 'transcripto-ui-settings';
 
 const LOCAL_SETTINGS_FIELDS = [
@@ -82,6 +82,12 @@ function openDatabase() {
         const store = db.createObjectStore('segments', { keyPath: 'id' });
         store.createIndex('sessionId', 'sessionId');
         store.createIndex('sessionId_sequence', ['sessionId', 'sequence']);
+      }
+
+      if (!db.objectStoreNames.contains('recordings')) {
+        const store = db.createObjectStore('recordings', { keyPath: 'id' });
+        store.createIndex('sessionId', 'sessionId');
+        store.createIndex('sessionId_startMs', ['sessionId', 'startMs']);
       }
 
       if (!db.objectStoreNames.contains('meta')) {
@@ -178,13 +184,21 @@ export async function listSessions() {
 
 export async function deleteSession(sessionId) {
   const db = await openDatabase();
-  const tx = db.transaction(['sessions', 'segments'], 'readwrite');
+  const tx = db.transaction(['sessions', 'segments', 'recordings'], 'readwrite');
   tx.objectStore('sessions').delete(sessionId);
   const index = tx.objectStore('segments').index('sessionId');
   const range = IDBKeyRange.only(sessionId);
   const request = index.openCursor(range);
   request.onsuccess = () => {
     const cursor = request.result;
+    if (!cursor) return;
+    cursor.delete();
+    cursor.continue();
+  };
+  const recordingIndex = tx.objectStore('recordings').index('sessionId');
+  const recordingRequest = recordingIndex.openCursor(range);
+  recordingRequest.onsuccess = () => {
+    const cursor = recordingRequest.result;
     if (!cursor) return;
     cursor.delete();
     cursor.continue();
@@ -203,12 +217,30 @@ export async function deleteEndedSessions() {
 
 export async function clearAllSessions() {
   const db = await openDatabase();
-  const tx = db.transaction(['sessions', 'segments', 'meta'], 'readwrite');
+  const tx = db.transaction(['sessions', 'segments', 'recordings', 'meta'], 'readwrite');
   tx.objectStore('sessions').clear();
   tx.objectStore('segments').clear();
+  tx.objectStore('recordings').clear();
   tx.objectStore('meta').delete('lastActiveSessionId');
   tx.objectStore('meta').delete('resumeHintDismissed');
   await txComplete(tx);
+}
+
+export async function upsertRecording(recording) {
+  const db = await openDatabase();
+  const tx = db.transaction('recordings', 'readwrite');
+  tx.objectStore('recordings').put(recording);
+  await txComplete(tx);
+  return recording;
+}
+
+export async function listRecordingsBySession(sessionId) {
+  const db = await openDatabase();
+  const tx = db.transaction('recordings', 'readonly');
+  const index = tx.objectStore('recordings').index('sessionId');
+  const recordings = await requestToPromise(index.getAll(IDBKeyRange.only(sessionId)));
+  await txComplete(tx);
+  return recordings.sort((a, b) => (a.startMs || 0) - (b.startMs || 0));
 }
 
 export async function upsertSegment(segment) {

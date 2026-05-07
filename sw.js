@@ -1,10 +1,10 @@
-const CACHE_NAME = 'transcripto-shell-v25';
+const CACHE_NAME = 'transcripto-shell-v26';
 const APP_SHELL = [
   './',
   './index.html',
   './styles.css',
   './manifest.webmanifest',
-  './js/app.js?v=20260507-speaker-details',
+  './js/app.js?v=20260507-session-review',
   './js/db.js',
   './js/exporters.js',
   './js/openai.js',
