@@ -222,6 +222,10 @@
                   <div class="status-line" id="statusLine">
                     Status: idle. Waiting to start.
                   </div>
+
+                  <div class="button-row button-row--wrap control-secondary-actions">
+                    <button class="button button--secondary button--small" id="finalizeSpeakerButton" type="button">Finalize speaker timing</button>
+                  </div>
                 </section>
 
                 <section class="panel transcript-panel">
@@ -288,9 +292,6 @@
                   </div>
                   <div class="status-line" id="speakerStatusLine">
                     Running quietly in the background.
-                  </div>
-                  <div class="button-row button-row--wrap speaker-actions">
-                    <button class="button button--secondary button--small" id="finalizeSpeakerButton" type="button">Finalize speaker timing</button>
                   </div>
                   <div class="speaker-summary" id="speakerSummary">
                     <div class="note">No speaker timing data yet.</div>
@@ -440,6 +441,6 @@
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-    <script type="module" src="./js/app.js?v=20260507-toggle-finalize"></script>
+    <script type="module" src="./js/app.js?v=20260507-mobile-finalize"></script>
   </body>
 </html>
