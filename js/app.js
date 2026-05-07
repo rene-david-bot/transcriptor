@@ -67,6 +67,10 @@ const DEFAULT_SETTINGS = {
   targetLanguage: 'en',
   glossary: '',
   speakerNames: '',
+  microphoneDeviceId: '',
+  echoCancellation: true,
+  noiseSuppression: true,
+  autoGainControl: true,
   theme: 'dark',
   autoScroll: true,
   textSize: 'medium',
@@ -116,6 +120,7 @@ const state = {
   client: null,
   runtimeStatus: 'idle',
   runtimeMessage: 'Waiting to start.',
+  availableMicrophones: [],
   listenStartedAtMs: null,
   speechStartedAtMs: null,
   speechActive: false,
@@ -168,6 +173,7 @@ const elements = {
   sidebarClose: $('#sidebarClose'),
   statusPill: $('#statusPill'),
   statusLine: $('#statusLine'),
+  openMicSettingsButton: $('#openMicSettingsButton'),
   topbarEyebrow: $('#topbarEyebrow'),
   toast: $('#toast'),
   startForm: $('#startForm'),
@@ -175,6 +181,11 @@ const elements = {
   toggleApiKey: $('#toggleApiKey'),
   sourceLanguageInput: $('#sourceLanguageInput'),
   targetLanguageInput: $('#targetLanguageInput'),
+  micDeviceInput: $('#micDeviceInput'),
+  refreshMicDevicesButton: $('#refreshMicDevicesButton'),
+  echoCancellationInput: $('#echoCancellationInput'),
+  noiseSuppressionInput: $('#noiseSuppressionInput'),
+  autoGainControlInput: $('#autoGainControlInput'),
   glossaryInput: $('#glossaryInput'),
   speakerNamesInput: $('#speakerNamesInput'),
   resumeLastSessionButton: $('#resumeLastSessionButton'),
@@ -184,7 +195,9 @@ const elements = {
   sessionMeta: $('#sessionMeta'),
   durationValue: $('#durationValue'),
   speechOnlyValue: $('#speechOnlyValue'),
+  segmentCountLabel: $('#segmentCountLabel'),
   segmentCountValue: $('#segmentCountValue'),
+  segmentCountMeta: $('#segmentCountMeta'),
   startButton: $('#startButton'),
   pauseButton: $('#pauseButton'),
   resumeButton: $('#resumeButton'),
@@ -229,6 +242,11 @@ const elements = {
   settingsToggleApiKey: $('#settingsToggleApiKey'),
   settingsSourceLanguage: $('#settingsSourceLanguage'),
   settingsTargetLanguage: $('#settingsTargetLanguage'),
+  settingsMicDeviceInput: $('#settingsMicDeviceInput'),
+  settingsRefreshMicDevicesButton: $('#settingsRefreshMicDevicesButton'),
+  settingsEchoCancellationInput: $('#settingsEchoCancellationInput'),
+  settingsNoiseSuppressionInput: $('#settingsNoiseSuppressionInput'),
+  settingsAutoGainControlInput: $('#settingsAutoGainControlInput'),
   textSizeSelect: $('#textSizeSelect'),
   themeSelect: $('#themeSelect'),
   autoScrollInput: $('#autoScrollInput'),
@@ -355,6 +373,76 @@ function fillLanguageSelect(select) {
   ).join('');
 }
 
+function normalizeAudioProcessingEnabled(value, fallback = true) {
+  return value === undefined ? fallback : Boolean(value);
+}
+
+function buildMicrophoneOptionLabel(device, index) {
+  const label = String(device?.label || '').trim();
+  if (label) return label;
+  return index === 0 ? 'Default microphone' : `Microphone ${index}`;
+}
+
+function populateMicrophoneSelect(select, devices = [], selectedId = '') {
+  if (!select) return;
+
+  const options = [{ value: '', label: 'Default microphone' }];
+  devices.forEach((device, index) => {
+    options.push({
+      value: String(device.deviceId || '').trim(),
+      label: buildMicrophoneOptionLabel(device, index + 1),
+    });
+  });
+
+  if (selectedId && !options.some((option) => option.value === selectedId)) {
+    options.push({
+      value: selectedId,
+      label: 'Previously selected microphone (currently unavailable)',
+    });
+  }
+
+  select.innerHTML = options
+    .map((option) => `<option value="${escapeHtml(option.value)}">${escapeHtml(option.label)}</option>`)
+    .join('');
+  select.value = selectedId || '';
+}
+
+async function refreshMicrophoneOptions({ silent = false } = {}) {
+  const mediaDevices = navigator.mediaDevices;
+  if (!mediaDevices?.enumerateDevices) {
+    state.availableMicrophones = [];
+    populateMicrophoneSelect(elements.micDeviceInput, [], state.settings.microphoneDeviceId || '');
+    populateMicrophoneSelect(elements.settingsMicDeviceInput, [], state.settings.microphoneDeviceId || '');
+    return [];
+  }
+
+  try {
+    const devices = await mediaDevices.enumerateDevices();
+    state.availableMicrophones = devices
+      .filter((device) => device.kind === 'audioinput')
+      .map((device) => ({ deviceId: String(device.deviceId || '').trim(), label: String(device.label || '').trim() }));
+
+    populateMicrophoneSelect(elements.micDeviceInput, state.availableMicrophones, state.settings.microphoneDeviceId || '');
+    populateMicrophoneSelect(elements.settingsMicDeviceInput, state.availableMicrophones, state.settings.microphoneDeviceId || '');
+
+    if (!silent) {
+      showToast(
+        state.availableMicrophones.some((device) => device.label)
+          ? 'Microphone list refreshed.'
+          : 'Microphone list refreshed. Device names may appear after microphone permission is granted.'
+      );
+    }
+
+    return state.availableMicrophones;
+  } catch (error) {
+    console.warn('Unable to enumerate microphones', error);
+    if (!silent) {
+      showToast('Microphone devices could not be listed right now.', 4500);
+    }
+    return [];
+  }
+}
+
 function applySettingsToForms() {
   const settings = state.settings;
   elements.apiKeyInput.value = settings.apiKey || '';
@@ -363,6 +451,26 @@ function applySettingsToForms() {
   elements.targetLanguageInput.value = settings.targetLanguage;
   elements.settingsSourceLanguage.value = settings.sourceLanguage;
   elements.settingsTargetLanguage.value = settings.targetLanguage;
+  populateMicrophoneSelect(elements.micDeviceInput, state.availableMicrophones, settings.microphoneDeviceId || '');
+  populateMicrophoneSelect(elements.settingsMicDeviceInput, state.availableMicrophones, settings.microphoneDeviceId || '');
+  if (elements.echoCancellationInput) {
+    elements.echoCancellationInput.checked = normalizeAudioProcessingEnabled(settings.echoCancellation);
+  }
+  if (elements.noiseSuppressionInput) {
+    elements.noiseSuppressionInput.checked = normalizeAudioProcessingEnabled(settings.noiseSuppression);
+  }
+  if (elements.autoGainControlInput) {
+    elements.autoGainControlInput.checked = normalizeAudioProcessingEnabled(settings.autoGainControl);
+  }
+  if (elements.settingsEchoCancellationInput) {
+    elements.settingsEchoCancellationInput.checked = normalizeAudioProcessingEnabled(settings.echoCancellation);
+  }
+  if (elements.settingsNoiseSuppressionInput) {
+    elements.settingsNoiseSuppressionInput.checked = normalizeAudioProcessingEnabled(settings.noiseSuppression);
+  }
+  if (elements.settingsAutoGainControlInput) {
+    elements.settingsAutoGainControlInput.checked = normalizeAudioProcessingEnabled(settings.autoGainControl);
+  }
   elements.glossaryInput.value = settings.glossary || '';
   elements.speakerNamesInput.value = settings.speakerNames || '';
   elements.settingsGlossaryInput.value = settings.glossary || '';
@@ -746,6 +854,13 @@ function openSidebar() {
   elements.backdrop.classList.add('backdrop--visible');
 }
 
+function openMicrophoneSettings() {
+  setRoute('settings');
+  requestAnimationFrame(() => {
+    elements.settingsMicDeviceInput?.focus();
+  });
+}
+
 function setRoute(route) {
   state.route = route;
   document.body.dataset.route = route;
@@ -760,6 +875,10 @@ function collectSettingsFromSetupForm() {
     apiKey: elements.apiKeyInput.value.trim(),
     sourceLanguage: elements.sourceLanguageInput.value,
     targetLanguage: elements.targetLanguageInput.value,
+    microphoneDeviceId: elements.micDeviceInput?.value || '',
+    echoCancellation: Boolean(elements.echoCancellationInput?.checked),
+    noiseSuppression: Boolean(elements.noiseSuppressionInput?.checked),
+    autoGainControl: Boolean(elements.autoGainControlInput?.checked),
     glossary: elements.glossaryInput.value.trim(),
     speakerNames: normalizeSpeakerNamesInput(elements.speakerNamesInput.value),
   };
@@ -770,6 +889,10 @@ function collectSettingsFromSettingsForm() {
     apiKey: elements.settingsApiKeyInput.value.trim(),
     sourceLanguage: elements.settingsSourceLanguage.value,
     targetLanguage: elements.settingsTargetLanguage.value,
+    microphoneDeviceId: elements.settingsMicDeviceInput?.value || '',
+    echoCancellation: Boolean(elements.settingsEchoCancellationInput?.checked),
+    noiseSuppression: Boolean(elements.settingsNoiseSuppressionInput?.checked),
+    autoGainControl: Boolean(elements.settingsAutoGainControlInput?.checked),
     glossary: elements.settingsGlossaryInput.value.trim(),
     speakerNames: normalizeSpeakerNamesInput(elements.settingsSpeakerNamesInput.value),
     textSize: elements.textSizeSelect.value,
@@ -1062,7 +1185,7 @@ function renderSpeakerInsights() {
   }
 
   if (pendingSegments) {
-    elements.speakerStatusLine.textContent = `${state.speakerTrackingStatus} ${pendingSegments} segment${pendingSegments === 1 ? '' : 's'} still processing.`;
+    elements.speakerStatusLine.textContent = `${state.speakerTrackingStatus} ${pendingSegments} raw segment${pendingSegments === 1 ? '' : 's'} still processing.`;
   } else if (sessionEnded && summary.length) {
     elements.speakerStatusLine.textContent = 'Session ended. Speaker totals stay available below and in exports.';
   } else if (sessionEnded) {
@@ -1086,6 +1209,25 @@ function renderSpeakerInsights() {
   renderSpeakerFinalizeButton();
 }
 
+function getTranscriptDisplayCounts() {
+  if (!state.currentSession && !state.currentSegments.length) {
+    return {
+      visibleRows: 0,
+      savedSegments: 0,
+    };
+  }
+
+  const liveDraft = buildLiveTranscriptState();
+  const feedRows = buildTranscriptFeedRows(liveDraft.sourceLabel, liveDraft.targetLabel);
+  const liveRow = buildTranscriptDisplayItemFromLiveDraft(liveDraft);
+  const { rows: mergedRows, liveRow: appendedLiveRow } = mergeLiveRowIntoFeedRows(feedRows, liveRow);
+
+  return {
+    visibleRows: mergedRows.length + (appendedLiveRow ? 1 : 0),
+    savedSegments: state.currentSegments.length,
+  };
+}
+
 function buildTranscriptTimestamp(segment) {
   const style = state.settings.timestampStyle || 'elapsed';
   if (style === 'wall-clock') return formatShortTime(segment.createdAt);
@@ -1100,15 +1242,23 @@ function renderSessionSummary() {
     elements.sessionMeta.textContent = 'Start a session to begin.';
     elements.durationValue.textContent = '00:00';
     elements.speechOnlyValue.textContent = '00:00';
+    if (elements.segmentCountLabel) elements.segmentCountLabel.textContent = 'Rows shown';
     elements.segmentCountValue.textContent = '0';
+    if (elements.segmentCountMeta) elements.segmentCountMeta.textContent = '0 saved segments';
     return;
   }
+
+  const counts = getTranscriptDisplayCounts();
 
   elements.sessionTitle.textContent = session.title;
   elements.sessionMeta.textContent = buildSessionMeta(session);
   elements.durationValue.textContent = formatDuration(getEffectiveActiveDuration());
   elements.speechOnlyValue.textContent = formatDuration(getEffectiveSpeechDuration());
-  elements.segmentCountValue.textContent = String(state.currentSegments.length);
+  if (elements.segmentCountLabel) elements.segmentCountLabel.textContent = 'Rows shown';
+  elements.segmentCountValue.textContent = String(counts.visibleRows);
+  if (elements.segmentCountMeta) {
+    elements.segmentCountMeta.textContent = `${counts.savedSegments} saved segment${counts.savedSegments === 1 ? '' : 's'}`;
+  }
 }
 
 function buildLiveTranscriptState() {
@@ -2461,6 +2611,10 @@ async function startListening({ silent = false } = {}) {
     sourceLanguageName: getLanguageName(state.currentSession.sourceLanguage),
     targetLanguageName: getLanguageName(state.currentSession.targetLanguage),
     glossary: buildSessionGlossary(state.currentSession),
+    microphoneDeviceId: state.settings.microphoneDeviceId,
+    echoCancellation: normalizeAudioProcessingEnabled(state.settings.echoCancellation),
+    noiseSuppression: normalizeAudioProcessingEnabled(state.settings.noiseSuppression),
+    autoGainControl: normalizeAudioProcessingEnabled(state.settings.autoGainControl),
     onEvent: handleRealtimeEvent,
     onStreamAvailable: (stream) => {
       startSpeakerTracking(stream).catch((error) => {
@@ -2490,6 +2644,7 @@ async function startListening({ silent = false } = {}) {
 
   try {
     await client.connect();
+    refreshMicrophoneOptions({ silent: true }).catch(() => {});
     markListeningStart();
     startClockTimer();
     if (!silent) {
@@ -3150,6 +3305,7 @@ async function resumeLastSession() {
 async function saveSettingsFromSettingsForm(event) {
   event.preventDefault();
   const values = collectSettingsFromSettingsForm();
+  const previousSettings = { ...state.settings };
   await persistSettings(values);
 
   let speakerNamesChanged = false;
@@ -3172,6 +3328,18 @@ async function saveSettingsFromSettingsForm(event) {
   if (!speakerNamesChanged) {
     renderCurrentView();
   }
+
+  const microphoneSettingsChanged =
+    previousSettings.microphoneDeviceId !== values.microphoneDeviceId ||
+    normalizeAudioProcessingEnabled(previousSettings.echoCancellation) !== values.echoCancellation ||
+    normalizeAudioProcessingEnabled(previousSettings.noiseSuppression) !== values.noiseSuppression ||
+    normalizeAudioProcessingEnabled(previousSettings.autoGainControl) !== values.autoGainControl;
+
+  if (microphoneSettingsChanged && state.client) {
+    showToast('Mic settings saved. Stop and resume capture to apply them.', 4500);
+    return;
+  }
+
   showToast('Settings saved locally.');
 }
 
@@ -3227,6 +3395,13 @@ function bindEvents() {
   elements.resumeLastSessionButton.addEventListener('click', resumeLastSession);
   elements.recoverDraftButton.addEventListener('click', resumeLastSession);
   elements.openHistoryFromSetup.addEventListener('click', () => setRoute('history'));
+  elements.openMicSettingsButton?.addEventListener('click', openMicrophoneSettings);
+  elements.refreshMicDevicesButton?.addEventListener('click', () => {
+    refreshMicrophoneOptions().catch(() => {});
+  });
+  elements.settingsRefreshMicDevicesButton?.addEventListener('click', () => {
+    refreshMicrophoneOptions().catch(() => {});
+  });
   elements.refreshHistoryButton.addEventListener('click', refreshSessions);
   getTranscriptViewButtons().forEach((button) => {
     button.addEventListener('click', () => setTranscriptView(button.dataset.transcriptView));
@@ -3324,6 +3499,10 @@ function bindEvents() {
     elements.installCard.classList.remove('hidden');
   });
 
+  navigator.mediaDevices?.addEventListener?.('devicechange', () => {
+    refreshMicrophoneOptions({ silent: true }).catch(() => {});
+  });
+
   elements.installButton.addEventListener('click', async () => {
     if (!state.installPrompt) return;
     state.installPrompt.prompt();
@@ -3358,6 +3537,7 @@ async function loadBootstrapData() {
   state.lastActiveSessionId = await getMeta('lastActiveSessionId');
   await refreshSessions();
   applySettingsToForms();
+  await refreshMicrophoneOptions({ silent: true });
 
   if (state.lastActiveSessionId) {
     const session = state.sessions.find((item) => item.id === state.lastActiveSessionId && item.status !== 'ended');
@@ -3387,6 +3567,10 @@ function buildDebugSnapshot() {
     route: state.route,
     runtimeStatus: state.runtimeStatus,
     segmentCount: state.currentSegments.length,
+    segmentMetricLabel: elements.segmentCountLabel?.textContent || '',
+    segmentMetricValue: elements.segmentCountValue?.textContent || '',
+    segmentMetricMeta: elements.segmentCountMeta?.textContent || '',
+    speakerStatusLine: elements.speakerStatusLine?.textContent || '',
     transcriptText: transcriptListText,
     transcriptTail: transcriptListText.slice(-1600),
     liveBandText,

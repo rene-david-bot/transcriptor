@@ -137,6 +137,37 @@
                   <small>Applied to detected speakers in order (A, B, C) and can be renamed later from the speaker timing panel.</small>
                 </label>
 
+                <section class="inline-settings-card">
+                  <div class="inline-settings-card__header">
+                    <div>
+                      <p class="eyebrow">Microphone</p>
+                      <h4 class="inline-settings-card__title">Mic settings</h4>
+                    </div>
+                    <button type="button" class="button button--ghost button--small" id="refreshMicDevicesButton">Refresh devices</button>
+                  </div>
+
+                  <label class="field">
+                    <span>Preferred microphone</span>
+                    <select id="micDeviceInput" name="microphoneDeviceId"></select>
+                    <small>Uses the default microphone when none is selected. Device names usually appear after microphone permission is granted.</small>
+                  </label>
+
+                  <div class="microphone-toggle-grid">
+                    <label class="field field--toggle">
+                      <span>Echo cancellation</span>
+                      <input id="echoCancellationInput" name="echoCancellation" type="checkbox" />
+                    </label>
+                    <label class="field field--toggle">
+                      <span>Noise suppression</span>
+                      <input id="noiseSuppressionInput" name="noiseSuppression" type="checkbox" />
+                    </label>
+                    <label class="field field--toggle">
+                      <span>Auto gain control</span>
+                      <input id="autoGainControlInput" name="autoGainControl" type="checkbox" />
+                    </label>
+                  </div>
+                </section>
+
                 <div class="button-row button-row--wrap">
                   <button type="submit" class="button button--primary">Start listening</button>
                   <button type="button" class="button button--secondary hidden" id="resumeLastSessionButton">Resume last session</button>
@@ -196,8 +227,9 @@
                       <strong id="speechOnlyValue">00:00</strong>
                     </div>
                     <div class="metric-card">
-                      <span class="metric-card__label">Segments</span>
+                      <span class="metric-card__label" id="segmentCountLabel">Rows shown</span>
                       <strong id="segmentCountValue">0</strong>
+                      <small class="metric-card__meta" id="segmentCountMeta">0 saved segments</small>
                     </div>
                   </div>
                 </section>
@@ -225,6 +257,7 @@
 
                   <div class="button-row button-row--wrap control-secondary-actions">
                     <button class="button button--secondary button--small" id="finalizeSpeakerButton" type="button">Finalize speaker timing</button>
+                    <button class="button button--ghost button--small" id="openMicSettingsButton" type="button">Mic settings</button>
                   </div>
                 </section>
 
@@ -399,6 +432,37 @@
                   </select>
                 </label>
 
+                <section class="inline-settings-card">
+                  <div class="inline-settings-card__header">
+                    <div>
+                      <p class="eyebrow">Microphone</p>
+                      <h4 class="inline-settings-card__title">Mic settings</h4>
+                    </div>
+                    <button type="button" class="button button--ghost button--small" id="settingsRefreshMicDevicesButton">Refresh devices</button>
+                  </div>
+
+                  <label class="field">
+                    <span>Preferred microphone</span>
+                    <select id="settingsMicDeviceInput"></select>
+                    <small>Uses the default microphone when none is selected. Stop and resume capture to apply changes during an active session.</small>
+                  </label>
+
+                  <div class="microphone-toggle-grid">
+                    <label class="field field--toggle">
+                      <span>Echo cancellation</span>
+                      <input id="settingsEchoCancellationInput" type="checkbox" />
+                    </label>
+                    <label class="field field--toggle">
+                      <span>Noise suppression</span>
+                      <input id="settingsNoiseSuppressionInput" type="checkbox" />
+                    </label>
+                    <label class="field field--toggle">
+                      <span>Auto gain control</span>
+                      <input id="settingsAutoGainControlInput" type="checkbox" />
+                    </label>
+                  </div>
+                </section>
+
                 <label class="field">
                   <span>Glossary / context</span>
                   <textarea id="settingsGlossaryInput" rows="6"></textarea>
@@ -441,6 +505,6 @@
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-    <script type="module" src="./js/app.js?v=20260507-mobile-finalize"></script>
+    <script type="module" src="./js/app.js?v=20260507-mic-counts"></script>
   </body>
 </html>

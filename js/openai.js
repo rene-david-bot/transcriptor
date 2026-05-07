@@ -67,12 +67,30 @@ function extractResponseText(payload) {
 }
 
 export class RealtimeTranscriptionClient {
-  constructor({ apiKey, sourceLanguage, sourceLanguageName, targetLanguageName, glossary, onEvent, onStatus, onError, onStreamAvailable }) {
+  constructor({
+    apiKey,
+    sourceLanguage,
+    sourceLanguageName,
+    targetLanguageName,
+    glossary,
+    microphoneDeviceId,
+    echoCancellation = true,
+    noiseSuppression = true,
+    autoGainControl = true,
+    onEvent,
+    onStatus,
+    onError,
+    onStreamAvailable,
+  }) {
     this.apiKey = apiKey;
     this.sourceLanguage = normalizeLanguageCode(sourceLanguage);
     this.sourceLanguageName = sourceLanguageName;
     this.targetLanguageName = targetLanguageName;
     this.glossary = glossary || '';
+    this.microphoneDeviceId = String(microphoneDeviceId || '').trim();
+    this.echoCancellation = echoCancellation !== false;
+    this.noiseSuppression = noiseSuppression !== false;
+    this.autoGainControl = autoGainControl !== false;
     this.onEvent = onEvent;
     this.onStatus = onStatus;
     this.onError = onError;
@@ -88,18 +106,46 @@ export class RealtimeTranscriptionClient {
     this.lastManualCommitAt = 0;
   }
 
+  buildAudioConstraints({ includeDeviceId = true } = {}) {
+    const constraints = {
+      echoCancellation: this.echoCancellation,
+      noiseSuppression: this.noiseSuppression,
+      autoGainControl: this.autoGainControl,
+    };
+
+    if (includeDeviceId && this.microphoneDeviceId) {
+      constraints.deviceId = { exact: this.microphoneDeviceId };
+    }
+
+    return constraints;
+  }
+
+  async requestMicrophoneStream() {
+    try {
+      return await navigator.mediaDevices.getUserMedia({
+        audio: this.buildAudioConstraints(),
+      });
+    } catch (error) {
+      const missingSpecificMic =
+        this.microphoneDeviceId && ['OverconstrainedError', 'NotFoundError'].includes(String(error?.name || ''));
+
+      if (!missingSpecificMic) {
+        throw error;
+      }
+
+      this.onStatus?.('connecting', 'Preferred microphone unavailable, falling back to the default microphone...');
+      return navigator.mediaDevices.getUserMedia({
+        audio: this.buildAudioConstraints({ includeDeviceId: false }),
+      });
+    }
+  }
+
   async connect() {
     this.disposed = false;
     this.onStatus?.('connecting', 'Requesting microphone access and opening a live transcription connection...');
 
     try {
-      this.mediaStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-      });
+      this.mediaStream = await this.requestMicrophoneStream();
 
       if (this.onStreamAvailable) {
         try {
