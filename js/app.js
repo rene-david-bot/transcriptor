@@ -142,6 +142,7 @@ const state = {
   speakerChunkStartMs: 0,
   speakerChunkIndex: 0,
   speakerAttributionQueue: Promise.resolve(),
+  speakerSpansBySession: new Map(),
   speakerTrackingInFlight: false,
   speakerTrackingPendingChunks: 0,
   speakerTrackingSessionId: null,
@@ -1884,6 +1885,14 @@ async function stopSpeakerTracking({ statusMessage } = {}) {
   const recorder = state.speakerRecorder;
 
   if (recorder && recorder.state !== 'inactive') {
+    try {
+      if (typeof recorder.requestData === 'function') {
+        recorder.requestData();
+      }
+    } catch {
+      // ignore
+    }
+
     await new Promise((resolve) => {
       recorder.addEventListener('stop', resolve, { once: true });
       recorder.stop();
@@ -1903,15 +1912,84 @@ async function stopSpeakerTracking({ statusMessage } = {}) {
   }
 }
 
+function rememberSpeakerSpans(sessionId, speakerSpans) {
+  if (!sessionId || !speakerSpans?.length) return;
+  const existing = state.speakerSpansBySession.get(sessionId) || [];
+  const merged = [...existing, ...speakerSpans]
+    .sort((a, b) => (a.startMs || 0) - (b.startMs || 0))
+    .slice(-400);
+  state.speakerSpansBySession.set(sessionId, merged);
+}
+
+function getBestSpeakerMatchForSegment(segment, speakerSpans) {
+  if (!segment || !speakerSpans?.length) return null;
+
+  const segmentStartMs = Number(segment.startMs || 0);
+  const segmentEndMs = Number(segment.endMs || segmentStartMs);
+  const segmentDurationMs = Math.max(600, segmentEndMs - segmentStartMs);
+  let bestMatch = null;
+
+  for (const speakerSpan of speakerSpans) {
+    const sharedMs = overlapMs(segmentStartMs, segmentEndMs, speakerSpan.startMs, speakerSpan.endMs);
+    const timeScore = sharedMs / segmentDurationMs;
+    const textScore = computeWordOverlapScore(segment.sourceText, speakerSpan.text);
+    const score = timeScore + textScore * 0.45;
+
+    if (!bestMatch || score > bestMatch.score) {
+      bestMatch = {
+        ...speakerSpan,
+        sharedMs,
+        timeScore,
+        textScore,
+        score,
+      };
+    }
+  }
+
+  if (!bestMatch) return null;
+  if (bestMatch.score < 0.22 && bestMatch.textScore < 0.5) return null;
+  return bestMatch;
+}
+
+function buildSpeakerLabeledSegment(transcriptSegment, session, bestMatch) {
+  if (!transcriptSegment || !bestMatch) return transcriptSegment;
+
+  return {
+    ...transcriptSegment,
+    speakerRawLabel: bestMatch.rawSpeaker,
+    speakerLabel: resolveSpeakerLabel(bestMatch.rawSpeaker, session, bestMatch.label),
+    speakerScore: Number(bestMatch.score.toFixed(3)),
+    speakerConfidence: Math.min(1, Number((bestMatch.timeScore + bestMatch.textScore * 0.25).toFixed(3))),
+    speakerDurationMs: Math.max(transcriptSegment.speakerDurationMs || 0, Math.round(bestMatch.sharedMs || 0)),
+    speakerStatus: 'done',
+    speakerUpdatedAt: nowIso(),
+  };
+}
+
+async function applyStoredSpeakerSpansToSegment(segment, session = state.currentSession) {
+  const sessionId = segment?.sessionId;
+  if (!sessionId) return segment;
+  const speakerSpans = state.speakerSpansBySession.get(sessionId) || [];
+  if (!speakerSpans.length) return segment;
+
+  const bestMatch = getBestSpeakerMatchForSegment(segment, speakerSpans);
+  if (!bestMatch) return segment;
+
+  const existingScore = Number(segment.speakerScore || 0);
+  if (segment.speakerLabel && existingScore >= bestMatch.score + 0.05) {
+    return segment;
+  }
+
+  const labeledSegment = buildSpeakerLabeledSegment(segment, session, bestMatch);
+  await upsertSegment(labeledSegment);
+  if (state.currentSession?.id === sessionId) {
+    upsertCurrentSegmentInState(labeledSegment);
+  }
+  return labeledSegment;
+}
+
 async function applySpeakerLabelsFromDiarizedChunk({ sessionId, chunkStartMs, chunkEndMs, diarizedSegments }) {
   const session = state.currentSession?.id === sessionId ? state.currentSession : await getSession(sessionId);
-  const sessionSegments = state.currentSession?.id === sessionId ? [...state.currentSegments] : await listSegmentsBySession(sessionId);
-  const relevantSegments = sessionSegments.filter(
-    (segment) => (segment.endMs || 0) >= chunkStartMs - SPEAKER_MATCH_MARGIN_MS && (segment.startMs || 0) <= chunkEndMs + SPEAKER_MATCH_MARGIN_MS
-  );
-
-  if (!relevantSegments.length) return 0;
-
   const speakerSpans = diarizedSegments
     .map((segment) => ({
       label: formatSpeakerLabel(segment.speaker),
@@ -1924,47 +2002,25 @@ async function applySpeakerLabelsFromDiarizedChunk({ sessionId, chunkStartMs, ch
 
   if (!speakerSpans.length) return 0;
 
+  rememberSpeakerSpans(sessionId, speakerSpans);
+
+  const sessionSegments = state.currentSession?.id === sessionId ? [...state.currentSegments] : await listSegmentsBySession(sessionId);
+  const relevantSegments = sessionSegments.filter(
+    (segment) => (segment.endMs || 0) >= chunkStartMs - SPEAKER_MATCH_MARGIN_MS && (segment.startMs || 0) <= chunkEndMs + SPEAKER_MATCH_MARGIN_MS
+  );
+
+  if (!relevantSegments.length) return 0;
+
   let applied = 0;
 
   for (const transcriptSegment of relevantSegments) {
-    const segmentStartMs = Number(transcriptSegment.startMs || 0);
-    const segmentEndMs = Number(transcriptSegment.endMs || segmentStartMs);
-    const segmentDurationMs = Math.max(600, segmentEndMs - segmentStartMs);
-    let bestMatch = null;
-
-    for (const speakerSpan of speakerSpans) {
-      const sharedMs = overlapMs(segmentStartMs, segmentEndMs, speakerSpan.startMs, speakerSpan.endMs);
-      const timeScore = sharedMs / segmentDurationMs;
-      const textScore = computeWordOverlapScore(transcriptSegment.sourceText, speakerSpan.text);
-      const score = timeScore + textScore * 0.45;
-
-      if (!bestMatch || score > bestMatch.score) {
-        bestMatch = {
-          ...speakerSpan,
-          sharedMs,
-          timeScore,
-          textScore,
-          score,
-        };
-      }
-    }
-
+    const bestMatch = getBestSpeakerMatchForSegment(transcriptSegment, speakerSpans);
     if (!bestMatch) continue;
-    if (bestMatch.score < 0.22 && bestMatch.textScore < 0.5) continue;
 
     const existingScore = Number(transcriptSegment.speakerScore || 0);
     if (transcriptSegment.speakerLabel && existingScore >= bestMatch.score + 0.05) continue;
 
-    const updatedSegment = {
-      ...transcriptSegment,
-      speakerRawLabel: bestMatch.rawSpeaker,
-      speakerLabel: resolveSpeakerLabel(bestMatch.rawSpeaker, session, bestMatch.label),
-      speakerScore: Number(bestMatch.score.toFixed(3)),
-      speakerConfidence: Math.min(1, Number((bestMatch.timeScore + bestMatch.textScore * 0.25).toFixed(3))),
-      speakerDurationMs: Math.max(transcriptSegment.speakerDurationMs || 0, Math.round(bestMatch.sharedMs || 0)),
-      speakerStatus: 'done',
-      speakerUpdatedAt: nowIso(),
-    };
+    const updatedSegment = buildSpeakerLabeledSegment(transcriptSegment, session, bestMatch);
 
     await upsertSegment(updatedSegment);
     if (state.currentSession?.id === sessionId) {
@@ -2592,12 +2648,14 @@ async function finalizeSegmentFromEvent(event) {
     createdAt: commitMeta.committedAtIso || nowIso(),
   };
 
-  upsertCurrentSegmentInState(segment);
-  await upsertSegment(segment);
+  const labeledSegment = await applyStoredSpeakerSpansToSegment(segment, state.currentSession);
+
+  upsertCurrentSegmentInState(labeledSegment);
+  await upsertSegment(labeledSegment);
   clearDraftState(itemId, { preserveVisibleDraft: true });
   await persistCurrentSessionNow();
   renderCurrentView();
-  queueFinalSegmentTranslation(segment);
+  queueFinalSegmentTranslation(labeledSegment);
 }
 
 async function handleRealtimeEvent(event) {
