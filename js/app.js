@@ -108,6 +108,7 @@ const DISPLAY_ROW_MAX_SENTENCE_COUNT = 2;
 const TRANSCRIPT_FOLLOW_TRIGGER_RATIO = 0.72;
 const TRANSCRIPT_FOLLOW_SLACK_PX = 72;
 const SPEAKER_CHUNK_MS = 20000;
+const SPEAKER_INITIAL_CHUNK_MS = 8000;
 const SPEAKER_MIN_CHUNK_BYTES = 4000;
 const SPEAKER_MATCH_MARGIN_MS = 3200;
 
@@ -147,6 +148,7 @@ const state = {
   speakerChunkStopTimer: null,
   speakerChunkStartMs: 0,
   speakerChunkIndex: 0,
+  speakerNextChunkDurationMs: SPEAKER_INITIAL_CHUNK_MS,
   speakerAttributionQueue: Promise.resolve(),
   speakerSpansBySession: new Map(),
   speakerTrackingInFlight: false,
@@ -155,6 +157,7 @@ const state = {
   speakerTrackingSessionId: null,
   speakerTrackingStatus: 'Speaker detection is idle.',
   speakerFinalizeInProgress: false,
+  speakerSummaryExpandedKeys: new Set(),
   sessionPersistTimer: null,
   clockTimer: null,
   installPrompt: null,
@@ -1050,8 +1053,9 @@ function buildSpeakerSummary(segments) {
     const rawLabel = getSegmentRawSpeakerLabel(segment);
     const label = segment.speakerLabel || getDefaultSpeakerLabel(rawLabel);
     if (!label) continue;
-    const key = rawLabel || label;
+    const key = getSpeakerSummaryKey(rawLabel, label);
     const current = summaryMap.get(key) || {
+      key,
       label,
       rawLabel,
       defaultLabel: getDefaultSpeakerLabel(rawLabel),
@@ -1066,8 +1070,83 @@ function buildSpeakerSummary(segments) {
   return Array.from(summaryMap.values()).sort((a, b) => b.durationMs - a.durationMs || a.label.localeCompare(b.label));
 }
 
+function getSpeakerSummaryKey(rawLabel = '', label = '') {
+  return normalizeTranscriptSpeakerKey(rawLabel || label || '');
+}
+
+function getSpeakerSummaryKeyForSegment(segment) {
+  return getSpeakerSummaryKey(getSegmentRawSpeakerLabel(segment), segment?.speakerLabel || '');
+}
+
+function pruneExpandedSpeakerKeys(summary = []) {
+  const validKeys = new Set(summary.map((speaker) => speaker.key).filter(Boolean));
+  state.speakerSummaryExpandedKeys = new Set(
+    [...state.speakerSummaryExpandedKeys].filter((key) => validKeys.has(key))
+  );
+}
+
+function buildSpeakerSegmentsForSummary(speaker) {
+  const speakerKey = speaker?.key || getSpeakerSummaryKey(speaker?.rawLabel, speaker?.label);
+  if (!speakerKey) return [];
+
+  return state.currentSegments
+    .filter((segment) => getSpeakerSummaryKeyForSegment(segment) === speakerKey)
+    .sort((left, right) => {
+      const leftStart = left.startMs ?? left.endMs ?? 0;
+      const rightStart = right.startMs ?? right.endMs ?? 0;
+      return leftStart - rightStart || (left.sequence || 0) - (right.sequence || 0);
+    });
+}
+
+function renderSpeakerSegmentDetails(speaker) {
+  const speakerSegments = buildSpeakerSegmentsForSummary(speaker);
+  if (!speakerSegments.length) {
+    return '<div class="speaker-stat__details-empty">No saved transcript text for this speaker yet.</div>';
+  }
+
+  return `
+    <div class="speaker-stat__details-list">
+      ${speakerSegments
+        .map((segment) => {
+          const sourceText = String(segment.sourceText || '').trim();
+          const translatedText = String(segment.translatedText || segment.translatedDraft || '').trim();
+          return `
+            <div class="speaker-detail-row">
+              <span class="speaker-detail-row__time">${escapeHtml(buildTranscriptTimestamp(segment))}</span>
+              <div class="speaker-detail-row__copy">
+                <p class="speaker-detail-row__source">${escapeHtml(sourceText || 'No transcript text saved yet.')}</p>
+                ${translatedText ? `<p class="speaker-detail-row__target">${escapeHtml(translatedText)}</p>` : ''}
+              </div>
+            </div>
+          `;
+        })
+        .join('')}
+    </div>
+  `;
+}
+
+function toggleSpeakerSummaryExpansion(key) {
+  const normalizedKey = String(key || '').trim();
+  if (!normalizedKey) return;
+
+  const nextExpandedKeys = new Set(state.speakerSummaryExpandedKeys);
+  if (nextExpandedKeys.has(normalizedKey)) {
+    nextExpandedKeys.delete(normalizedKey);
+  } else {
+    nextExpandedKeys.add(normalizedKey);
+  }
+
+  state.speakerSummaryExpandedKeys = nextExpandedKeys;
+  renderSpeakerInsights();
+}
+
 function renderSpeakerSummaryCards(summary) {
-  if (!summary.length) return '';
+  if (!summary.length) {
+    state.speakerSummaryExpandedKeys = new Set();
+    return '';
+  }
+
+  pruneExpandedSpeakerKeys(summary);
 
   const totalDurationMs = summary.reduce((total, speaker) => total + speaker.durationMs, 0);
 
@@ -1080,31 +1159,52 @@ function renderSpeakerSummaryCards(summary) {
       </div>
     `,
     ...summary.map(
-      (speaker) => `
-        <div class="speaker-stat">
-          <div class="speaker-stat__content">
-            <div class="speaker-stat__header-row">
-              <strong>${escapeHtml(speaker.label)}</strong>
-              ${
-                speaker.rawLabel
-                  ? `<button class="button button--ghost button--small" data-speaker-action="rename" data-speaker-raw-label="${escapeHtml(
-                      speaker.rawLabel
-                    )}">Rename</button>`
-                  : ''
-              }
-            </div>
-            <small>${escapeHtml(
-              [
-                speaker.defaultLabel && speaker.defaultLabel !== speaker.label ? speaker.defaultLabel : null,
-                `${speaker.segments} segment${speaker.segments === 1 ? '' : 's'}`,
-              ]
-                .filter(Boolean)
-                .join(' • ')
-            )}</small>
+      (speaker) => {
+        const expanded = state.speakerSummaryExpandedKeys.has(speaker.key);
+        return `
+        <div class="speaker-stat ${expanded ? 'speaker-stat--expanded' : ''}">
+          <div class="speaker-stat__top-row">
+            <button
+              class="speaker-stat__toggle"
+              type="button"
+              data-speaker-action="toggle"
+              data-speaker-key="${escapeHtml(speaker.key)}"
+              aria-expanded="${expanded ? 'true' : 'false'}"
+            >
+              <div class="speaker-stat__content">
+                <div class="speaker-stat__header-row">
+                  <strong>${escapeHtml(speaker.label)}</strong>
+                </div>
+                <small>${escapeHtml(
+                  [
+                    speaker.defaultLabel && speaker.defaultLabel !== speaker.label ? speaker.defaultLabel : null,
+                    `${speaker.segments} segment${speaker.segments === 1 ? '' : 's'}`,
+                  ]
+                    .filter(Boolean)
+                    .join(' • ')
+                )}</small>
+              </div>
+              <div class="speaker-stat__toggle-side">
+                <span class="speaker-stat__duration">${formatDuration(speaker.durationMs)}</span>
+                <span class="speaker-stat__chevron" aria-hidden="true">${expanded ? '▾' : '▸'}</span>
+              </div>
+            </button>
+            ${
+              speaker.rawLabel
+                ? `<button class="button button--ghost button--small" data-speaker-action="rename" data-speaker-raw-label="${escapeHtml(
+                    speaker.rawLabel
+                  )}">Rename</button>`
+                : ''
+            }
           </div>
-          <span>${formatDuration(speaker.durationMs)}</span>
+          ${
+            expanded
+              ? `<div class="speaker-stat__details">${renderSpeakerSegmentDetails(speaker)}</div>`
+              : ''
+          }
         </div>
-      `
+      `;
+      }
     ),
   ].join('');
 }
@@ -1112,6 +1212,14 @@ function renderSpeakerSummaryCards(summary) {
 function getPendingSpeakerSegmentCount(sessionId = state.currentSession?.id) {
   if (!sessionId) return 0;
   return state.currentSegments.filter((segment) => segment.sessionId === sessionId && segment.speakerStatus === 'pending').length;
+}
+
+function canStartSpeakerTrackingManually(session = state.currentSession) {
+  if (!session || !state.speakerTrackingSupported) return false;
+  if (session.status !== 'active') return false;
+  const stream = state.client?.mediaStream;
+  if (!stream?.getAudioTracks) return false;
+  return stream.getAudioTracks().some((track) => track.readyState !== 'ended');
 }
 
 function renderSpeakerFinalizeButton() {
@@ -1127,7 +1235,8 @@ function renderSpeakerFinalizeButton() {
   const queueBusy = state.speakerTrackingPendingChunks > 0 || state.speakerTrackingInFlight;
   const pendingSegments = getPendingSpeakerSegmentCount(session?.id);
   const hasSummary = state.currentSegments.some((segment) => Boolean(segment.speakerLabel));
-  const canFinalize = Boolean(session && state.speakerTrackingSupported && (hasRecorder || queueBusy || pendingSegments));
+  const canStartManually = canStartSpeakerTrackingManually(session) && !hasRecorder && !queueBusy && !pendingSegments;
+  const canFinalize = Boolean(session && state.speakerTrackingSupported && (hasRecorder || queueBusy || pendingSegments || canStartManually));
 
   elements.finalizeSpeakerButton.disabled = state.speakerFinalizeInProgress || !canFinalize;
 
@@ -1142,7 +1251,12 @@ function renderSpeakerFinalizeButton() {
   }
 
   if (state.speakerFinalizeInProgress) {
-    elements.finalizeSpeakerButton.textContent = 'Finalizing speaker timing…';
+    elements.finalizeSpeakerButton.textContent = hasRecorder || queueBusy || pendingSegments ? 'Finalizing speaker timing…' : 'Starting speaker timing…';
+    return;
+  }
+
+  if (canStartManually) {
+    elements.finalizeSpeakerButton.textContent = 'Start speaker timing now';
     return;
   }
 
@@ -1167,6 +1281,7 @@ function renderSpeakerInsights() {
   const summary = buildSpeakerSummary(state.currentSegments);
   const sessionEnded = session?.status === 'ended';
   const stoppedSession = session && ['paused', 'ended'].includes(session.status);
+  const canStartManually = canStartSpeakerTrackingManually(session);
 
   if (!session) {
     elements.speakerStatusLine.textContent = 'Speaker timing will appear here during a live session.';
@@ -1186,6 +1301,8 @@ function renderSpeakerInsights() {
 
   if (pendingSegments) {
     elements.speakerStatusLine.textContent = `${state.speakerTrackingStatus} ${pendingSegments} raw segment${pendingSegments === 1 ? '' : 's'} still processing.`;
+  } else if (canStartManually && !state.speakerRecorder && !state.speakerTrackingInFlight) {
+    elements.speakerStatusLine.textContent = 'Speaker timing is ready. Tap the button above to start it now.';
   } else if (sessionEnded && summary.length) {
     elements.speakerStatusLine.textContent = 'Session ended. Speaker totals stay available below and in exports.';
   } else if (sessionEnded) {
@@ -1200,7 +1317,7 @@ function renderSpeakerInsights() {
 
   if (!summary.length) {
     elements.speakerSummary.innerHTML =
-      '<div class="note">Speaker timing runs quietly in the background and can lag a little behind the live text. Use the button above when you want an explicit catch-up pass.</div>';
+      '<div class="note">Speaker timing runs quietly in the background and can lag a little behind the live text. Tap the button above to start it manually or force an explicit catch-up pass.</div>';
     renderSpeakerFinalizeButton();
     return;
   }
@@ -2138,6 +2255,7 @@ async function stopSpeakerTracking({ statusMessage } = {}) {
   state.speakerStream = null;
   state.speakerMimeType = '';
   state.speakerChunkStartMs = 0;
+  state.speakerNextChunkDurationMs = SPEAKER_INITIAL_CHUNK_MS;
   state.speakerTrackingSessionId = null;
 
   if (statusMessage) {
@@ -2181,6 +2299,48 @@ async function waitForSpeakerAttributionIdle({ sessionId = state.currentSession?
   return isSpeakerAttributionIdle(sessionId);
 }
 
+async function startSpeakerTimingFromCurrentSession() {
+  if (!state.currentSession) {
+    showToast('Create or open a session first.');
+    return false;
+  }
+
+  if (!state.speakerTrackingSupported) {
+    showToast('Speaker timing is not supported in this browser.');
+    return false;
+  }
+
+  const sourceStream = state.client?.mediaStream;
+  if (!sourceStream?.clone) {
+    showToast('Speaker timing cannot start from the current live session right now.', 4500);
+    return false;
+  }
+
+  const liveTracks = sourceStream.getAudioTracks?.() || [];
+  if (!liveTracks.some((track) => track.readyState !== 'ended')) {
+    showToast('Speaker timing needs an active microphone stream.', 4500);
+    return false;
+  }
+
+  state.speakerTrackingStatus = 'Starting speaker timing from the current live microphone...';
+  state.speakerNextChunkDurationMs = SPEAKER_INITIAL_CHUNK_MS;
+  renderSpeakerInsights();
+
+  try {
+    await startSpeakerTracking(sourceStream.clone());
+    const started = Boolean(state.speakerRecorder && state.speakerRecorder.state !== 'inactive');
+    if (started) {
+      showToast('Speaker timing started. First results should arrive sooner now.');
+      return true;
+    }
+  } catch (error) {
+    console.warn('Unable to start speaker timing from the live session', error);
+  }
+
+  showToast('Speaker timing could not start right now.', 4500);
+  return false;
+}
+
 async function finalizeSpeakerTiming() {
   if (!state.currentSession) {
     showToast('Create or open a session first.');
@@ -2202,6 +2362,18 @@ async function finalizeSpeakerTiming() {
   const hadQueuedWork = !isSpeakerAttributionIdle(sessionId);
 
   if (!hasRecorder && !hadQueuedWork) {
+    if (canStartSpeakerTrackingManually(state.currentSession)) {
+      state.speakerFinalizeInProgress = true;
+      renderSpeakerFinalizeButton();
+      try {
+        await startSpeakerTimingFromCurrentSession();
+      } finally {
+        state.speakerFinalizeInProgress = false;
+        renderSpeakerInsights();
+      }
+      return;
+    }
+
     showToast('There is no queued speaker timing to finalize right now.');
     renderSpeakerFinalizeButton();
     return;
@@ -2309,13 +2481,19 @@ function startSpeakerChunkRecorder({ sessionId, sourceLanguage }) {
       'error',
       () => {
         clearSpeakerChunkStopTimer();
-        state.speakerTrackingStatus = 'Speaker timing is unavailable in this session.';
+        state.speakerRecorder = null;
+        state.speakerTrackingSessionId = null;
+        stopSpeakerTracks(stream);
+        state.speakerStream = null;
+        state.speakerTrackingStatus = 'Speaker timing stopped. Tap the button to retry.';
         renderSpeakerInsights();
       },
       { once: true }
     );
 
     recorder.start();
+    const chunkDurationMs = Math.max(3000, Number(state.speakerNextChunkDurationMs || SPEAKER_CHUNK_MS));
+    state.speakerNextChunkDurationMs = SPEAKER_CHUNK_MS;
     state.speakerChunkStopTimer = window.setTimeout(() => {
       try {
         if (recorder.state !== 'inactive') {
@@ -2324,10 +2502,14 @@ function startSpeakerChunkRecorder({ sessionId, sourceLanguage }) {
       } catch {
         // ignore
       }
-    }, SPEAKER_CHUNK_MS);
+    }, chunkDurationMs);
   } catch (error) {
     console.warn('Unable to rotate background speaker recorder', error);
-    state.speakerTrackingStatus = 'Speaker timing is unavailable in this session.';
+    stopSpeakerTracks(stream);
+    state.speakerRecorder = null;
+    state.speakerStream = null;
+    state.speakerTrackingSessionId = null;
+    state.speakerTrackingStatus = 'Speaker timing stopped. Tap the button to retry.';
     renderSpeakerInsights();
   }
 }
@@ -2529,14 +2711,18 @@ async function startSpeakerTracking(stream) {
     state.speakerStream = stream;
     state.speakerMimeType = mimeType || stream.getAudioTracks?.()[0]?.getSettings?.().mimeType || 'audio/webm';
     state.speakerChunkStartMs = getEffectiveActiveDuration();
+    state.speakerNextChunkDurationMs = Math.max(3000, Number(state.speakerNextChunkDurationMs || SPEAKER_INITIAL_CHUNK_MS));
     state.speakerTrackingSessionId = sessionId;
-    state.speakerTrackingStatus = 'Buffering speaker timing in parallel. First results arrive after about 20 seconds.';
+    state.speakerTrackingStatus = 'Buffering speaker timing in parallel. First results usually arrive after about 8 seconds.';
     renderSpeakerInsights();
     startSpeakerChunkRecorder({ sessionId, sourceLanguage });
   } catch (error) {
     console.warn('Unable to start background speaker tracking', error);
-    state.speakerTrackingSupported = false;
-    state.speakerTrackingStatus = 'Speaker timing could not start here, but live capture still works.';
+    state.speakerTrackingSupported = true;
+    state.speakerTrackingSessionId = null;
+    state.speakerStream = null;
+    state.speakerRecorder = null;
+    state.speakerTrackingStatus = 'Speaker timing could not start. Tap the button to retry.';
     stopSpeakerTracks(stream);
     renderSpeakerInsights();
   }
@@ -3431,6 +3617,12 @@ function bindEvents() {
   elements.newSessionButton.addEventListener('click', createFreshSessionFromLive);
   elements.renameSessionButton.addEventListener('click', renameCurrentSession);
   elements.speakerSummary.addEventListener('click', async (event) => {
+    const toggleButton = event.target.closest('[data-speaker-action="toggle"]');
+    if (toggleButton) {
+      toggleSpeakerSummaryExpansion(toggleButton.dataset.speakerKey);
+      return;
+    }
+
     const renameButton = event.target.closest('[data-speaker-action="rename"]');
     if (!renameButton) return;
     await renameSpeakerForCurrentSession(renameButton.dataset.speakerRawLabel);
@@ -3571,11 +3763,59 @@ function buildDebugSnapshot() {
     segmentMetricValue: elements.segmentCountValue?.textContent || '',
     segmentMetricMeta: elements.segmentCountMeta?.textContent || '',
     speakerStatusLine: elements.speakerStatusLine?.textContent || '',
+    finalizeSpeakerButton: elements.finalizeSpeakerButton?.textContent || '',
+    speakerSummaryText: elements.speakerSummary?.innerText || '',
     transcriptText: transcriptListText,
     transcriptTail: transcriptListText.slice(-1600),
     liveBandText,
     liveBandTail: liveBandText.slice(-1600),
   };
+}
+
+function setDebugSegments(segments = []) {
+  if (!state.currentSession) return buildDebugSnapshot();
+
+  const sessionId = state.currentSession.id;
+  state.currentSegments = (Array.isArray(segments) ? segments : []).map((segment, index) => {
+    const startMs = Number(segment?.startMs ?? index * 4000);
+    const endMs = Number(segment?.endMs ?? startMs + 2500);
+    return {
+      id: segment?.id || `${sessionId}:debug-segment-${index + 1}`,
+      sessionId,
+      sequence: Number(segment?.sequence ?? index + 1),
+      startMs,
+      endMs,
+      speechEndMs: Number(segment?.speechEndMs ?? endMs),
+      sourceLanguage: segment?.sourceLanguage || state.currentSession.sourceLanguage,
+      targetLanguage: segment?.targetLanguage || state.currentSession.targetLanguage,
+      sourceText: String(segment?.sourceText || '').trim(),
+      translatedText: String(segment?.translatedText || '').trim(),
+      translatedDraft: String(segment?.translatedDraft || '').trim(),
+      translationStatus: segment?.translationStatus || 'done',
+      speakerRawLabel: segment?.speakerRawLabel || '',
+      speakerLabel: segment?.speakerLabel || '',
+      speakerStatus: segment?.speakerStatus || 'done',
+      speakerDurationMs: Number(segment?.speakerDurationMs ?? Math.max(1000, endMs - startMs)),
+      createdAt: segment?.createdAt || nowIso(),
+    };
+  });
+  state.currentSession.segmentCount = state.currentSegments.length;
+  renderCurrentView();
+  return buildDebugSnapshot();
+}
+
+function setDebugSpeakerState(partial = {}) {
+  if (Object.prototype.hasOwnProperty.call(partial, 'speakerSummaryExpandedKeys')) {
+    state.speakerSummaryExpandedKeys = new Set(partial.speakerSummaryExpandedKeys || []);
+  }
+
+  Object.entries(partial || {}).forEach(([key, value]) => {
+    if (key === 'speakerSummaryExpandedKeys') return;
+    state[key] = value;
+  });
+
+  renderCurrentView();
+  return buildDebugSnapshot();
 }
 
 async function persistDebugSettings(partial = {}) {
@@ -3751,6 +3991,8 @@ function installDebugHooks() {
     persistSettingsForTest: persistDebugSettings,
     createSessionForTest: createDebugSession,
     startListeningForTest: startListeningForDebug,
+    setSegmentsForTest: setDebugSegments,
+    setSpeakerStateForTest: setDebugSpeakerState,
     getViewForTest: buildDebugSnapshot,
     snapshot: buildDebugSnapshot,
     setDraftTranslation: setDebugDraftTranslation,
