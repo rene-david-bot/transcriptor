@@ -139,14 +139,17 @@ const state = {
   speakerRecorder: null,
   speakerStream: null,
   speakerMimeType: '',
+  speakerChunkStopTimer: null,
   speakerChunkStartMs: 0,
   speakerChunkIndex: 0,
   speakerAttributionQueue: Promise.resolve(),
   speakerSpansBySession: new Map(),
   speakerTrackingInFlight: false,
   speakerTrackingPendingChunks: 0,
+  speakerTrackingStopRequested: false,
   speakerTrackingSessionId: null,
   speakerTrackingStatus: 'Speaker detection is idle.',
+  speakerFinalizeInProgress: false,
   sessionPersistTimer: null,
   clockTimer: null,
   installPrompt: null,
@@ -190,6 +193,9 @@ const elements = {
   endSessionButton: $('#endSessionButton'),
   transcriptBoard: $('#transcriptBoard'),
   transcriptLanguageChip: $('#transcriptLanguageChip'),
+  transcriptViewSourceButton: $('#transcriptViewSource'),
+  transcriptViewBothButton: $('#transcriptViewBoth'),
+  transcriptViewTargetButton: $('#transcriptViewTarget'),
   transcriptModeNote: $('#transcriptModeNote'),
   transcriptSourceHeading: $('#transcriptSourceHeading'),
   transcriptTargetHeading: $('#transcriptTargetHeading'),
@@ -208,6 +214,7 @@ const elements = {
   targetDraftCarry: $('#targetDraftCarry'),
   targetDraftCarryText: $('#targetDraftCarryText'),
   speakerStatusLine: $('#speakerStatusLine'),
+  finalizeSpeakerButton: $('#finalizeSpeakerButton'),
   speakerSummary: $('#speakerSummary'),
   transcriptList: $('#transcriptList'),
   transcriptLiveBand: $('#transcriptLiveBand'),
@@ -385,11 +392,35 @@ function applySettingsToForms() {
     const targetCode = formatLanguageCode(state.currentSession?.targetLanguage || settings.targetLanguage || '');
     elements.transcriptLanguageChip.textContent = `${sourceCode || 'source'} ↔ ${targetCode || 'target'}`;
   }
+  applyTranscriptViewButtonLabels();
   applyTranscriptView();
 }
 
 function getTranscriptViewButtons() {
   return $$('[data-transcript-view]');
+}
+
+function applyTranscriptViewButtonLabels() {
+  const sourceLabel = getLanguageName(state.currentSession?.sourceLanguage || state.settings.sourceLanguage || 'source');
+  const targetLabel = getLanguageName(state.currentSession?.targetLanguage || state.settings.targetLanguage || 'target');
+
+  if (elements.transcriptViewSourceButton) {
+    elements.transcriptViewSourceButton.textContent = sourceLabel;
+    elements.transcriptViewSourceButton.setAttribute('aria-label', `Show ${sourceLabel} only`);
+    elements.transcriptViewSourceButton.title = sourceLabel;
+  }
+
+  if (elements.transcriptViewBothButton) {
+    elements.transcriptViewBothButton.textContent = 'Both';
+    elements.transcriptViewBothButton.setAttribute('aria-label', `Show ${sourceLabel} and ${targetLabel}`);
+    elements.transcriptViewBothButton.title = `${sourceLabel} + ${targetLabel}`;
+  }
+
+  if (elements.transcriptViewTargetButton) {
+    elements.transcriptViewTargetButton.textContent = targetLabel;
+    elements.transcriptViewTargetButton.setAttribute('aria-label', `Show ${targetLabel} only`);
+    elements.transcriptViewTargetButton.title = targetLabel;
+  }
 }
 
 function normalizeTheme(theme) {
@@ -955,11 +986,61 @@ function renderSpeakerSummaryCards(summary) {
   ].join('');
 }
 
+function getPendingSpeakerSegmentCount(sessionId = state.currentSession?.id) {
+  if (!sessionId) return 0;
+  return state.currentSegments.filter((segment) => segment.sessionId === sessionId && segment.speakerStatus === 'pending').length;
+}
+
+function renderSpeakerFinalizeButton() {
+  if (!elements.finalizeSpeakerButton) return;
+
+  const session = state.currentSession;
+  const hasRecorder = Boolean(
+    session &&
+      state.speakerTrackingSessionId === session.id &&
+      state.speakerRecorder &&
+      state.speakerRecorder.state !== 'inactive'
+  );
+  const queueBusy = state.speakerTrackingPendingChunks > 0 || state.speakerTrackingInFlight;
+  const pendingSegments = getPendingSpeakerSegmentCount(session?.id);
+  const hasSummary = state.currentSegments.some((segment) => Boolean(segment.speakerLabel));
+  const canFinalize = Boolean(session && state.speakerTrackingSupported && (hasRecorder || queueBusy || pendingSegments));
+
+  elements.finalizeSpeakerButton.disabled = state.speakerFinalizeInProgress || !canFinalize;
+
+  if (!session) {
+    elements.finalizeSpeakerButton.textContent = 'Finalize speaker timing';
+    return;
+  }
+
+  if (!state.speakerTrackingSupported) {
+    elements.finalizeSpeakerButton.textContent = 'Speaker timing unavailable';
+    return;
+  }
+
+  if (state.speakerFinalizeInProgress) {
+    elements.finalizeSpeakerButton.textContent = 'Finalizing speaker timing…';
+    return;
+  }
+
+  if (hasRecorder && !queueBusy && !pendingSegments) {
+    elements.finalizeSpeakerButton.textContent = 'Capture speaker timing now';
+    return;
+  }
+
+  if (pendingSegments || queueBusy || hasRecorder) {
+    elements.finalizeSpeakerButton.textContent = 'Finalize speaker timing';
+    return;
+  }
+
+  elements.finalizeSpeakerButton.textContent = hasSummary ? 'Speaker timing finalized' : 'No speaker timing yet';
+}
+
 function renderSpeakerInsights() {
   if (!elements.speakerStatusLine || !elements.speakerSummary) return;
 
   const session = state.currentSession;
-  const pendingSegments = state.currentSegments.filter((segment) => segment.speakerStatus === 'pending').length;
+  const pendingSegments = getPendingSpeakerSegmentCount(session?.id);
   const summary = buildSpeakerSummary(state.currentSegments);
   const sessionEnded = session?.status === 'ended';
   const stoppedSession = session && ['paused', 'ended'].includes(session.status);
@@ -967,6 +1048,7 @@ function renderSpeakerInsights() {
   if (!session) {
     elements.speakerStatusLine.textContent = 'Speaker timing will appear here during a live session.';
     elements.speakerSummary.innerHTML = '<div class="note">No speaker timing data yet.</div>';
+    renderSpeakerFinalizeButton();
     return;
   }
 
@@ -975,6 +1057,7 @@ function renderSpeakerInsights() {
     elements.speakerSummary.innerHTML = summary.length
       ? renderSpeakerSummaryCards(summary)
       : '<div class="note">Speaker timing is unavailable in this browser.</div>';
+    renderSpeakerFinalizeButton();
     return;
   }
 
@@ -994,11 +1077,13 @@ function renderSpeakerInsights() {
 
   if (!summary.length) {
     elements.speakerSummary.innerHTML =
-      '<div class="note">Speaker timing runs quietly in the background and can lag a little behind the live text.</div>';
+      '<div class="note">Speaker timing runs quietly in the background and can lag a little behind the live text. Use the button above when you want an explicit catch-up pass.</div>';
+    renderSpeakerFinalizeButton();
     return;
   }
 
   elements.speakerSummary.innerHTML = renderSpeakerSummaryCards(summary);
+  renderSpeakerFinalizeButton();
 }
 
 function buildTranscriptTimestamp(segment) {
@@ -1881,18 +1966,17 @@ function stopSpeakerTracks(stream) {
   });
 }
 
+function clearSpeakerChunkStopTimer() {
+  window.clearTimeout(state.speakerChunkStopTimer);
+  state.speakerChunkStopTimer = null;
+}
+
 async function stopSpeakerTracking({ statusMessage } = {}) {
+  state.speakerTrackingStopRequested = true;
+  clearSpeakerChunkStopTimer();
   const recorder = state.speakerRecorder;
 
   if (recorder && recorder.state !== 'inactive') {
-    try {
-      if (typeof recorder.requestData === 'function') {
-        recorder.requestData();
-      }
-    } catch {
-      // ignore
-    }
-
     await new Promise((resolve) => {
       recorder.addEventListener('stop', resolve, { once: true });
       recorder.stop();
@@ -1908,6 +1992,192 @@ async function stopSpeakerTracking({ statusMessage } = {}) {
 
   if (statusMessage) {
     state.speakerTrackingStatus = statusMessage;
+    renderSpeakerInsights();
+  }
+}
+
+async function flushSpeakerRecorderChunk({ continueTracking = true } = {}) {
+  const recorder = state.speakerRecorder;
+  if (!recorder || recorder.state === 'inactive') return false;
+
+  state.speakerTrackingStopRequested = !continueTracking;
+  clearSpeakerChunkStopTimer();
+
+  await new Promise((resolve) => {
+    recorder.addEventListener('stop', resolve, { once: true });
+    try {
+      recorder.stop();
+    } catch {
+      resolve();
+    }
+  }).catch(() => {});
+
+  return true;
+}
+
+function isSpeakerAttributionIdle(sessionId = state.currentSession?.id) {
+  const pendingSegments = getPendingSpeakerSegmentCount(sessionId);
+  return pendingSegments === 0 && state.speakerTrackingPendingChunks === 0 && !state.speakerTrackingInFlight;
+}
+
+async function waitForSpeakerAttributionIdle({ sessionId = state.currentSession?.id, timeoutMs = 120000, pollMs = 300 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    if (isSpeakerAttributionIdle(sessionId)) return true;
+    await new Promise((resolve) => window.setTimeout(resolve, pollMs));
+  }
+
+  return isSpeakerAttributionIdle(sessionId);
+}
+
+async function finalizeSpeakerTiming() {
+  if (!state.currentSession) {
+    showToast('Create or open a session first.');
+    return;
+  }
+
+  if (!state.speakerTrackingSupported) {
+    showToast('Speaker timing is not supported in this browser.');
+    return;
+  }
+
+  if (state.speakerFinalizeInProgress) return;
+
+  const sessionId = state.currentSession.id;
+  const continueTracking = Boolean(state.client && state.currentSession.status === 'active');
+  const hasRecorder = Boolean(
+    state.speakerTrackingSessionId === sessionId && state.speakerRecorder && state.speakerRecorder.state !== 'inactive'
+  );
+  const hadQueuedWork = !isSpeakerAttributionIdle(sessionId);
+
+  if (!hasRecorder && !hadQueuedWork) {
+    showToast('There is no queued speaker timing to finalize right now.');
+    renderSpeakerFinalizeButton();
+    return;
+  }
+
+  state.speakerFinalizeInProgress = true;
+  state.speakerTrackingStatus = hasRecorder
+    ? continueTracking
+      ? 'Capturing the current speaker chunk for an explicit catch-up pass...'
+      : 'Capturing the last speaker chunk...'
+    : 'Finishing queued speaker timing...';
+  renderSpeakerInsights();
+
+  try {
+    if (hasRecorder) {
+      await flushSpeakerRecorderChunk({ continueTracking });
+    }
+
+    const finalized = await waitForSpeakerAttributionIdle({
+      sessionId,
+      timeoutMs: continueTracking ? 30000 : 120000,
+    });
+
+    if (finalized) {
+      state.speakerTrackingStatus = 'Speaker timing updated.';
+      showToast('Speaker timing finalized.');
+    } else {
+      state.speakerTrackingStatus = 'Speaker timing is still catching up.';
+      showToast('Speaker timing is still catching up in the background.', 4500);
+    }
+  } catch (error) {
+    console.warn('Unable to finalize speaker timing', error);
+    state.speakerTrackingStatus = 'Speaker timing is unavailable in this session.';
+    showToast('Speaker timing could not finish right now.', 4500);
+  } finally {
+    state.speakerFinalizeInProgress = false;
+    renderSpeakerInsights();
+  }
+}
+
+function shouldContinueSpeakerTracking(sessionId, stream) {
+  return Boolean(
+    !state.speakerTrackingStopRequested &&
+      state.speakerTrackingSessionId === sessionId &&
+      state.speakerStream === stream &&
+      state.currentSession?.id === sessionId &&
+      state.currentSession.status === 'active'
+  );
+}
+
+function startSpeakerChunkRecorder({ sessionId, sourceLanguage }) {
+  const stream = state.speakerStream;
+  if (!stream || state.speakerTrackingStopRequested) return;
+
+  try {
+    const preferredMimeType = state.speakerMimeType || pickSpeakerCaptureMimeType();
+    const recorder = preferredMimeType ? new MediaRecorder(stream, { mimeType: preferredMimeType }) : new MediaRecorder(stream);
+    const chunkParts = [];
+    const chunkStartMs = state.speakerChunkStartMs;
+    const effectiveMimeType =
+      recorder.mimeType || preferredMimeType || stream.getAudioTracks?.()[0]?.getSettings?.().mimeType || 'audio/webm';
+
+    state.speakerRecorder = recorder;
+    state.speakerMimeType = effectiveMimeType;
+
+    recorder.addEventListener('dataavailable', (event) => {
+      if (event.data?.size) {
+        chunkParts.push(event.data);
+      }
+    });
+
+    recorder.addEventListener(
+      'stop',
+      () => {
+        clearSpeakerChunkStopTimer();
+        if (state.speakerRecorder === recorder) {
+          state.speakerRecorder = null;
+        }
+
+        const chunkEndMs = getEffectiveActiveDuration();
+        state.speakerChunkStartMs = chunkEndMs;
+
+        const chunkBlob = chunkParts.length ? new Blob(chunkParts, { type: effectiveMimeType }) : null;
+        if (chunkBlob && chunkBlob.size >= SPEAKER_MIN_CHUNK_BYTES && chunkEndMs > chunkStartMs) {
+          state.speakerChunkIndex += 1;
+          queueSpeakerAttribution({
+            index: state.speakerChunkIndex,
+            blob: chunkBlob,
+            startMs: chunkStartMs,
+            endMs: chunkEndMs,
+            mimeType: effectiveMimeType,
+            sessionId,
+            sourceLanguage,
+          });
+        }
+
+        if (shouldContinueSpeakerTracking(sessionId, stream)) {
+          startSpeakerChunkRecorder({ sessionId, sourceLanguage });
+        }
+      },
+      { once: true }
+    );
+
+    recorder.addEventListener(
+      'error',
+      () => {
+        clearSpeakerChunkStopTimer();
+        state.speakerTrackingStatus = 'Speaker timing is unavailable in this session.';
+        renderSpeakerInsights();
+      },
+      { once: true }
+    );
+
+    recorder.start();
+    state.speakerChunkStopTimer = window.setTimeout(() => {
+      try {
+        if (recorder.state !== 'inactive') {
+          recorder.stop();
+        }
+      } catch {
+        // ignore
+      }
+    }, SPEAKER_CHUNK_MS);
+  } catch (error) {
+    console.warn('Unable to rotate background speaker recorder', error);
+    state.speakerTrackingStatus = 'Speaker timing is unavailable in this session.';
     renderSpeakerInsights();
   }
 }
@@ -2101,47 +2371,18 @@ async function startSpeakerTracking(stream) {
   const mimeType = pickSpeakerCaptureMimeType();
 
   try {
-    const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
     const sessionId = state.currentSession.id;
     const sourceLanguage = state.currentSession.sourceLanguage;
 
     state.speakerTrackingSupported = true;
-    state.speakerRecorder = recorder;
+    state.speakerTrackingStopRequested = false;
     state.speakerStream = stream;
-    state.speakerMimeType = recorder.mimeType || mimeType || stream.getAudioTracks?.()[0]?.getSettings?.().mimeType || 'audio/webm';
+    state.speakerMimeType = mimeType || stream.getAudioTracks?.()[0]?.getSettings?.().mimeType || 'audio/webm';
     state.speakerChunkStartMs = getEffectiveActiveDuration();
     state.speakerTrackingSessionId = sessionId;
     state.speakerTrackingStatus = 'Buffering speaker timing in parallel. First results arrive after about 20 seconds.';
     renderSpeakerInsights();
-
-    recorder.addEventListener('dataavailable', (event) => {
-      const chunkBlob = event.data;
-      const chunkEndMs = getEffectiveActiveDuration();
-      const chunkStartMs = state.speakerChunkStartMs;
-      state.speakerChunkStartMs = chunkEndMs;
-
-      if (!chunkBlob || chunkBlob.size < SPEAKER_MIN_CHUNK_BYTES || chunkEndMs <= chunkStartMs) {
-        return;
-      }
-
-      state.speakerChunkIndex += 1;
-      queueSpeakerAttribution({
-        index: state.speakerChunkIndex,
-        blob: chunkBlob,
-        startMs: chunkStartMs,
-        endMs: chunkEndMs,
-        mimeType: chunkBlob.type || state.speakerMimeType || 'audio/webm',
-        sessionId,
-        sourceLanguage,
-      });
-    });
-
-    recorder.addEventListener('error', () => {
-      state.speakerTrackingStatus = 'Speaker timing is unavailable in this session.';
-      renderSpeakerInsights();
-    });
-
-    recorder.start(SPEAKER_CHUNK_MS);
+    startSpeakerChunkRecorder({ sessionId, sourceLanguage });
   } catch (error) {
     console.warn('Unable to start background speaker tracking', error);
     state.speakerTrackingSupported = false;
@@ -2287,7 +2528,7 @@ async function stopListening() {
     flushListeningClock();
     flushSpeechClock();
     state.speechActive = false;
-    await stopSpeakerTracking({ statusMessage: 'Stopped. Speaker timing may finish the last buffered audio.' });
+    await stopSpeakerTracking({ statusMessage: 'Stopped. Use Finalize speaker timing for the last buffered audio.' });
     await state.client.disconnect({ nextStatus: 'stopped', message: 'Stopped. You can start again in the same session.' });
     state.client = null;
   }
@@ -2310,7 +2551,7 @@ async function endCurrentSession() {
     flushListeningClock();
     flushSpeechClock();
     state.speechActive = false;
-    await stopSpeakerTracking({ statusMessage: 'Ending session. Speaker timing may finish the last buffered audio.' });
+    await stopSpeakerTracking({ statusMessage: 'Ending session. Use Finalize speaker timing for the last buffered audio.' });
     await state.client.disconnect({ nextStatus: 'ended', message: 'Session ended.' });
     state.client = null;
   }
@@ -2991,6 +3232,7 @@ function bindEvents() {
     button.addEventListener('click', () => setTranscriptView(button.dataset.transcriptView));
   });
   elements.jumpToLiveButton?.addEventListener('click', () => scrollTranscriptToLive());
+  elements.finalizeSpeakerButton?.addEventListener('click', finalizeSpeakerTiming);
   elements.transcriptHistoryDetails?.addEventListener('toggle', () => {
     if (elements.transcriptHistoryDetails.open && state.settings.autoScroll) {
       requestAnimationFrame(() => {

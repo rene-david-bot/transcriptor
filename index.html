@@ -241,6 +241,18 @@
                     <div class="transcript-toolbar">
                       <div class="transcript-language-chip" id="transcriptLanguageChip">en ↔ de</div>
 
+                      <div class="transcript-view-switch" role="group" aria-label="Transcript language view">
+                        <button type="button" class="transcript-view-button" id="transcriptViewSource" data-transcript-view="source" aria-pressed="false">
+                          Source
+                        </button>
+                        <button type="button" class="transcript-view-button" id="transcriptViewBoth" data-transcript-view="both" aria-pressed="true">
+                          Both
+                        </button>
+                        <button type="button" class="transcript-view-button" id="transcriptViewTarget" data-transcript-view="target" aria-pressed="false">
+                          Target
+                        </button>
+                      </div>
+
                       <div class="transcript-toolbar__meta">
                         <span class="transcript-live-state" id="transcriptLiveState">Waiting for speech</span>
                         <button type="button" class="button button--ghost button--small hidden" id="jumpToLiveButton">Jump to live</button>
@@ -276,6 +288,9 @@
                   </div>
                   <div class="status-line" id="speakerStatusLine">
                     Running quietly in the background.
+                  </div>
+                  <div class="button-row button-row--wrap speaker-actions">
+                    <button class="button button--secondary button--small" id="finalizeSpeakerButton" type="button">Finalize speaker timing</button>
                   </div>
                   <div class="speaker-summary" id="speakerSummary">
                     <div class="note">No speaker timing data yet.</div>
@@ -425,6 +440,6 @@
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-    <script type="module" src="./js/app.js?v=20260507-stopfix"></script>
+    <script type="module" src="./js/app.js?v=20260507-toggle-finalize"></script>
   </body>
 </html>
