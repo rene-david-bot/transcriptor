@@ -1590,9 +1590,9 @@ function renderSpeakerSummaryCards(summary) {
   return [
     `
       <div class="speaker-total">
-        <strong>Total speaker time</strong>
+        <strong>Automatic diarized speaker time</strong>
         <span>${formatDuration(totalDurationMs)}</span>
-        <small>Best effort, based on diarized segments only.</small>
+        <small>From speaker identification across diarized transcript segments.</small>
       </div>
     `,
     ...summary.map(
@@ -1670,13 +1670,18 @@ function renderManualSpeakerSlotSummary(slotRollup, { final = false } = {}) {
 
   return `
     <div class="speaker-slot-summary">
+      <div class="speaker-total speaker-total--manual-window">
+        <strong>Manual stopwatch time</strong>
+        <span>${formatDuration(slotRollup.totalWindowMs || 0)}</span>
+        <small>Raw time from the speaker slots you tapped manually.</small>
+      </div>
       <div class="speaker-total speaker-total--manual">
-        <strong>${final ? 'Total speech-only time' : 'Manual slot speech time'}</strong>
+        <strong>${final ? 'Matched speech inside manual slots' : 'Matched speech in manual slots'}</strong>
         <span>${formatDuration(slotRollup.totalSpeechMs || 0)}</span>
         <small>${escapeHtml(
           final
-            ? 'Matched from transcript rows inside your manual speaker slots.'
-            : 'Best effort from your manual speaker slots and the transcript so far.'
+            ? 'Transcript speech found inside your manual speaker slots after the final pass.'
+            : 'Best effort from transcript rows that overlap your manual speaker slots so far.'
         )}</small>
       </div>
       ${slotRollup.speakers
@@ -1685,9 +1690,12 @@ function renderManualSpeakerSlotSummary(slotRollup, { final = false } = {}) {
             <div class="speaker-slot-summary__card">
               <div class="speaker-slot-summary__header">
                 <strong>${escapeHtml(speaker.label)}</strong>
-                <span>${formatDuration(speaker.speechMs || 0)}</span>
               </div>
-              <small>${escapeHtml(`${speaker.slotCount} slot${speaker.slotCount === 1 ? '' : 's'} • window ${formatDuration(speaker.windowMs || 0)}`)}</small>
+              <small>${escapeHtml(
+                `${speaker.slotCount} slot${speaker.slotCount === 1 ? '' : 's'} • manual ${formatDuration(speaker.windowMs || 0)} • matched ${formatDuration(
+                  speaker.speechMs || 0
+                )}`
+              )}</small>
               <div class="speaker-slot-summary__chips">
                 ${speaker.slots
                   .map(
@@ -1698,7 +1706,11 @@ function renderManualSpeakerSlotSummary(slotRollup, { final = false } = {}) {
                         data-speaker-action="play-slot"
                         data-start-ms="${Number(slot.startMs || 0)}"
                         aria-label="Play ${escapeHtml(speaker.label)} slot"
-                      >${escapeHtml(`${formatDuration(slot.startMs || 0)} → ${formatDuration(slot.endMs || 0)} • ${formatDuration(slot.speechMs || 0)}`)}</button>`
+                      >${escapeHtml(
+                        `${formatDuration(slot.startMs || 0)} → ${formatDuration(slot.endMs || 0)} • manual ${formatDuration(
+                          slot.windowMs || 0
+                        )} • matched ${formatDuration(slot.speechMs || 0)}`
+                      )}</button>`
                   )
                   .join('')}
               </div>
@@ -1907,19 +1919,23 @@ function renderSpeakerInsights() {
   if (state.speakerFinalizeInProgress) {
     elements.speakerStatusLine.textContent = state.speakerFinalizeProgress?.statusLine || state.speakerTrackingStatus;
   } else if (pendingRecordingPasses) {
-    elements.speakerStatusLine.textContent = `Showing provisional speaker hints. ${pendingRecordingPasses} saved recording clip${pendingRecordingPasses === 1 ? '' : 's'} are ready for the final speaker pass.`;
+    elements.speakerStatusLine.textContent = `Showing provisional speaker hints. ${pendingRecordingPasses} saved recording clip${pendingRecordingPasses === 1 ? '' : 's'} ${
+      pendingRecordingPasses === 1 ? 'is' : 'are'
+    } ready for the final speaker pass.`;
   } else if (pendingSegments) {
-    elements.speakerStatusLine.textContent = `Showing provisional speaker hints. ${pendingSegments} raw segment${pendingSegments === 1 ? '' : 's'} are still processing.`;
+    elements.speakerStatusLine.textContent = `Showing provisional speaker hints. ${pendingSegments} raw segment${pendingSegments === 1 ? '' : 's'} ${
+      pendingSegments === 1 ? 'is' : 'are'
+    } still processing.`;
   } else if (canStartManually && !state.speakerRecorder && !state.speakerTrackingInFlight) {
     elements.speakerStatusLine.textContent = 'The final speaker pass is ready. Tap the button above to run it now.';
   } else if (sessionEnded && hasFinalSpeakerTiming) {
-    elements.speakerStatusLine.textContent = 'Final speaker timing is ready. The totals below use your manual slots plus the finalized transcript.';
+    elements.speakerStatusLine.textContent = 'Final speaker timing is ready. The totals below separate manual stopwatch time, matched manual-slot speech, and automatic diarized totals.';
   } else if (sessionEnded && summary.length) {
     elements.speakerStatusLine.textContent = 'Session ended. The speaker view below is still provisional until you run the final speaker pass.';
   } else if (sessionEnded) {
     elements.speakerStatusLine.textContent = 'Session ended. No finalized speaker timing is available for this session.';
   } else if (stoppedSession && hasFinalSpeakerTiming) {
-    elements.speakerStatusLine.textContent = 'Final speaker timing is ready. You can review totals, slots, and playback below.';
+    elements.speakerStatusLine.textContent = 'Final speaker timing is ready. You can compare manual stopwatch time, matched manual-slot speech, and automatic diarized totals below.';
   } else if (stoppedSession && summary.length) {
     elements.speakerStatusLine.textContent = 'Capture stopped. The speaker view below is provisional until you run the final speaker pass.';
   } else if (stoppedSession) {
@@ -2912,6 +2928,11 @@ function renderRecordingReview() {
   const currentClip = currentIndex >= 0 ? state.sessionRecordings[currentIndex] : null;
   const currentPlaybackMs = getVisibleSessionPlaybackMs();
   const playing = isReviewAudioPlaying();
+  const floatingPlayback = playing && state.route === 'live';
+
+  if (typeof document !== 'undefined' && document.body) {
+    document.body.dataset.reviewAudioFloating = floatingPlayback ? 'true' : 'false';
+  }
 
   if (elements.reviewAudioStatus) {
     const parts = [];
@@ -2934,6 +2955,7 @@ function renderRecordingReview() {
   }
   if (elements.reviewAudioTransport) {
     elements.reviewAudioTransport.classList.toggle('hidden', !count);
+    elements.reviewAudioTransport.classList.toggle('review-audio-transport--floating', floatingPlayback && count > 0);
   }
   if (elements.reviewAudio) {
     elements.reviewAudio.classList.add('hidden');
@@ -3062,16 +3084,22 @@ function renderManualSpeakerControls() {
                 ${
                   state.manualSpeakerEditingEventId === event.id
                     ? `<div class="speaker-change-marker-row__editor">
-                        <select data-speaker-marker-id="${escapeHtml(event.id)}" aria-label="Choose speaker for ${escapeHtml(
+                        <div class="speaker-change-marker-row__editor-options" role="group" aria-label="Choose speaker for ${escapeHtml(
                           event.speakerLabel || 'speaker'
                         )}">
                           ${options
                             .map(
-                              (label) =>
-                                `<option value="${escapeHtml(label)}" ${label === event.speakerLabel ? 'selected' : ''}>${escapeHtml(label)}</option>`
+                              (label) => `
+                                <button
+                                  class="speaker-change-marker-row__editor-option ${label === event.speakerLabel ? 'speaker-change-marker-row__editor-option--active' : ''}"
+                                  type="button"
+                                  data-speaker-marker-choice-id="${escapeHtml(event.id)}"
+                                  data-speaker-label="${escapeHtml(label)}"
+                                  aria-pressed="${label === event.speakerLabel ? 'true' : 'false'}"
+                                >${escapeHtml(label)}</button>`
                             )
                             .join('')}
-                        </select>
+                        </div>
                       </div>`
                     : ''
                 }
@@ -5641,6 +5669,27 @@ function bindEvents() {
     renderManualSpeakerControls();
   });
   elements.speakerChangeMarkers?.addEventListener('click', async (event) => {
+    const choiceButton = event.target.closest('[data-speaker-marker-choice-id]');
+    if (choiceButton) {
+      const markerId = String(choiceButton.dataset.speakerMarkerChoiceId || '').trim();
+      const nextSpeakerLabel = String(choiceButton.dataset.speakerLabel || '').trim();
+      const index = state.manualSpeakerEvents.findIndex(
+        (item, itemIndex) => String(item.id || `manual-speaker-${itemIndex}-${Number(item.atMs || 0)}`) === markerId
+      );
+      if (!Number.isInteger(index) || index < 0 || !state.manualSpeakerEvents[index] || !nextSpeakerLabel) return;
+      state.manualSpeakerEvents[index] = {
+        ...state.manualSpeakerEvents[index],
+        speakerLabel: nextSpeakerLabel,
+      };
+      state.manualSpeakerEditingEventId = '';
+      await applyManualSpeakerEventsToCurrentSession().catch((error) => console.warn('Unable to apply manual speaker labels', error));
+      return;
+    }
+
+    if (event.target.closest('.speaker-change-marker-row__editor')) {
+      return;
+    }
+
     const toggleButton = event.target.closest('[data-speaker-marker-toggle-id]');
     if (toggleButton) {
       const nextId = String(toggleButton.dataset.speakerMarkerToggleId || '').trim();
@@ -5657,20 +5706,6 @@ function bindEvents() {
       showToast('No saved audio clip covers that speaker mark yet.');
     }
   });
-  elements.speakerChangeMarkers?.addEventListener('change', (event) => {
-    const select = event.target.closest('[data-speaker-marker-id]');
-    if (!select) return;
-    const markerId = String(select.dataset.speakerMarkerId || '').trim();
-    const index = state.manualSpeakerEvents.findIndex((item, itemIndex) => String(item.id || `manual-speaker-${itemIndex}-${Number(item.atMs || 0)}`) === markerId);
-    if (!Number.isInteger(index) || index < 0 || !state.manualSpeakerEvents[index]) return;
-    state.manualSpeakerEvents[index] = {
-      ...state.manualSpeakerEvents[index],
-      speakerLabel: select.value,
-    };
-    state.manualSpeakerEditingEventId = '';
-    applyManualSpeakerEventsToCurrentSession().catch((error) => console.warn('Unable to apply manual speaker labels', error));
-  });
-
   elements.startButton.addEventListener('click', () => startListening());
   elements.pauseButton.addEventListener('click', pauseListening);
   elements.resumeButton.addEventListener('click', () => startListening());
