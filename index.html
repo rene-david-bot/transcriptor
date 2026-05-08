@@ -298,30 +298,24 @@
 
                     <div class="transcript-list text-size-medium" id="transcriptList"></div>
 
-                    <div class="transcript-review-bar">
-                      <div class="transcript-review-bar__top">
-                        <div class="transcript-review-bar__copy">
-                          <strong>Review audio</strong>
-                          <span id="reviewAudioStatus">Local session recording will appear here while capture runs.</span>
-                        </div>
-                        <div class="button-row button-row--wrap transcript-review-bar__actions">
-                          <button type="button" class="button button--ghost button--small" id="reviewPlayButton">Play</button>
-                          <button type="button" class="button button--ghost button--small" id="reviewPauseButton">Pause</button>
-                        </div>
-                      </div>
-                      <audio class="hidden" id="reviewAudio" controls preload="metadata"></audio>
-                    </div>
-
-                    <div class="speaker-change-dock">
+                    <div class="speaker-change-dock" id="speakerChangeDock">
                       <div class="speaker-change-dock__top">
-                        <strong>Speaker change</strong>
-                        <span id="speakerChangeTimer">00:00</span>
+                        <div class="speaker-change-dock__copy">
+                          <strong>Manual speaker timing</strong>
+                          <span>Use the stopwatch flow, then tap 👥 when the speaker changes.</span>
+                        </div>
+                        <div class="speaker-change-dock__timer-wrap">
+                          <span class="speaker-change-dock__timer" id="speakerChangeTimer">00:00.00</span>
+                          <small id="speakerChangeTimerState">Ready</small>
+                        </div>
                       </div>
-                      <div class="speaker-change-dock__controls">
+                      <div class="speaker-change-dock__speaker-row">
+                        <span class="speaker-change-dock__speaker-label">Current speaker</span>
                         <select id="speakerChangeCurrentSelect" aria-label="Current speaker"></select>
-                        <button type="button" class="button button--secondary button--small" id="speakerChangeButton">Speaker change</button>
-                        <button type="button" class="button button--ghost button--small" id="speakerChangePauseButton" aria-label="Pause or resume speaker timer">▶️</button>
-                        <button type="button" class="button button--ghost button--small" id="speakerChangeResetButton" aria-label="Reset speaker changes">🔄</button>
+                      </div>
+                      <div class="speaker-change-dock__actions">
+                        <button type="button" class="button speaker-change-action" id="speakerChangeButton">👥 Mark</button>
+                        <button type="button" class="button speaker-change-action" id="speakerChangePauseButton">Resume</button>
                       </div>
                       <div class="speaker-change-markers" id="speakerChangeMarkers"></div>
                     </div>
@@ -356,6 +350,19 @@
                   </div>
                   <div class="speaker-summary" id="speakerSummary">
                     <div class="note">No speaker timing data yet.</div>
+                  </div>
+                  <div class="review-audio-panel">
+                    <div class="review-audio-panel__top">
+                      <div class="review-audio-panel__copy">
+                        <strong>Whole session audio</strong>
+                        <span id="reviewAudioStatus">Local session recording will appear here while capture runs.</span>
+                      </div>
+                      <div class="button-row button-row--wrap review-audio-panel__actions">
+                        <button type="button" class="button button--ghost button--small" id="reviewPlayButton">Play</button>
+                        <button type="button" class="button button--ghost button--small" id="reviewPauseButton">Pause</button>
+                      </div>
+                    </div>
+                    <audio class="hidden" id="reviewAudio" controls preload="metadata"></audio>
                   </div>
                 </section>
 
@@ -533,6 +540,6 @@
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-    <script type="module" src="./js/app.js?v=20260508-speaker-finalize-progress"></script>
+    <script type="module" src="./js/app.js?v=20260508-speaker-review-stopwatch"></script>
   </body>
 </html>

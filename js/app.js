@@ -181,7 +181,7 @@ const state = {
   wakeLockWanted: false,
   wakeLockMessage: '',
   manualSpeakerEvents: [],
-  manualSpeakerTimerStartedAt: 0,
+  manualSpeakerBaseOffsetMs: 0,
   manualSpeakerElapsedMs: 0,
   manualSpeakerPaused: true,
   manualSpeakerCurrentLabel: '',
@@ -264,7 +264,9 @@ const elements = {
   reviewAudioStatus: $('#reviewAudioStatus'),
   reviewPlayButton: $('#reviewPlayButton'),
   reviewPauseButton: $('#reviewPauseButton'),
+  speakerChangeDock: $('#speakerChangeDock'),
   speakerChangeTimer: $('#speakerChangeTimer'),
+  speakerChangeTimerState: $('#speakerChangeTimerState'),
   speakerChangeButton: $('#speakerChangeButton'),
   speakerChangePauseButton: $('#speakerChangePauseButton'),
   speakerChangeResetButton: $('#speakerChangeResetButton'),
@@ -346,6 +348,20 @@ function formatDurationShort(ms = 0) {
   return `${pad(minutes)}:${pad(seconds)}`;
 }
 
+function formatManualStopwatchTime(ms = 0) {
+  const totalCentiseconds = Math.max(0, Math.floor(ms / 10));
+  const hours = Math.floor(totalCentiseconds / 360000);
+  const minutes = Math.floor((totalCentiseconds % 360000) / 6000);
+  const seconds = Math.floor((totalCentiseconds % 6000) / 100);
+  const centiseconds = totalCentiseconds % 100;
+
+  if (hours > 0) {
+    return `${pad(hours)}:${pad(minutes)}:${pad(seconds)}.${pad(centiseconds)}`;
+  }
+
+  return `${pad(minutes)}:${pad(seconds)}.${pad(centiseconds)}`;
+}
+
 function wait(ms = 0) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
@@ -354,11 +370,21 @@ function recordingTimeToLocalOffset(recording, absoluteMs) {
   return Math.max(0, (absoluteMs || 0) - Number(recording?.startMs || 0));
 }
 
+function getManualSpeakerSessionPositionMs(session = state.currentSession) {
+  if (!session) return 0;
+  return session.status === 'active' ? getEffectiveActiveDuration() : Number(session.activeDurationMs || 0);
+}
+
 function getManualSpeakerElapsedMs() {
-  return Math.max(
-    0,
-    Number(state.manualSpeakerElapsedMs || 0) + (state.manualSpeakerPaused ? 0 : Date.now() - Number(state.manualSpeakerTimerStartedAt || 0))
-  );
+  if (state.manualSpeakerPaused) {
+    return Math.max(0, Number(state.manualSpeakerElapsedMs || 0));
+  }
+
+  return Math.max(0, getManualSpeakerSessionPositionMs() - Number(state.manualSpeakerBaseOffsetMs || 0));
+}
+
+function isManualSpeakerTimerRunning() {
+  return Boolean(state.currentSession && state.currentSession.status === 'active' && !state.manualSpeakerPaused);
 }
 
 function formatShortTime(isoString) {
@@ -1140,6 +1166,8 @@ function buildSpeakerSummary(segments) {
     const rawLabel = getSegmentRawSpeakerLabel(segment);
     const label = getTranscriptSpeakerLabel(segment) || getDefaultSpeakerLabel(rawLabel);
     if (!label) continue;
+    const segmentStartMs = Number(segment.startMs ?? segment.endMs ?? 0);
+    const segmentEndMs = Number(segment.endMs ?? segment.startMs ?? 0);
     const key = getSpeakerSummaryKey(rawLabel, label);
     const current = summaryMap.get(key) || {
       key,
@@ -1148,9 +1176,13 @@ function buildSpeakerSummary(segments) {
       defaultLabel: getDefaultSpeakerLabel(rawLabel),
       durationMs: 0,
       segments: 0,
+      startMs: null,
+      endMs: null,
     };
     current.durationMs += Math.max(1000, segment.speakerDurationMs || segment.endMs - segment.startMs || 0);
     current.segments += 1;
+    current.startMs = current.startMs === null ? segmentStartMs : Math.min(current.startMs, segmentStartMs);
+    current.endMs = current.endMs === null ? segmentEndMs : Math.max(current.endMs, segmentEndMs);
     summaryMap.set(key, current);
   }
 
@@ -1197,9 +1229,16 @@ function renderSpeakerSegmentDetails(speaker) {
         .map((segment) => {
           const sourceText = String(segment.sourceText || '').trim();
           const translatedText = String(segment.translatedText || segment.translatedDraft || '').trim();
+          const segmentStartMs = Number(segment.startMs ?? segment.endMs ?? 0);
           return `
             <div class="speaker-detail-row">
-              <span class="speaker-detail-row__time">${escapeHtml(buildTranscriptTimestamp(segment))}</span>
+              <button
+                class="speaker-detail-row__time speaker-detail-row__time-button"
+                type="button"
+                data-speaker-action="play-segment"
+                data-start-ms="${segmentStartMs}"
+                aria-label="Play from ${escapeHtml(buildTranscriptTimestamp(segment))}"
+              >${escapeHtml(buildTranscriptTimestamp(segment))}</button>
               <div class="speaker-detail-row__copy">
                 <p class="speaker-detail-row__source">${escapeHtml(sourceText || 'No transcript text saved yet.')}</p>
                 ${translatedText ? `<p class="speaker-detail-row__target">${escapeHtml(translatedText)}</p>` : ''}
@@ -1236,6 +1275,9 @@ function renderSpeakerSummaryCards(summary) {
   pruneExpandedSpeakerKeys(summary);
 
   const totalDurationMs = summary.reduce((total, speaker) => total + speaker.durationMs, 0);
+  const currentPlaybackSegment = state.currentSegments.find((segment) => segment.id === state.sessionPlaybackSegmentId);
+  const currentPlaybackSpeakerKey = currentPlaybackSegment ? getSpeakerSummaryKeyForSegment(currentPlaybackSegment) : '';
+  const speakerPlaybackEnabled = state.sessionRecordings.some((recording) => hasRecordingBlob(recording));
 
   return [
     `
@@ -1248,8 +1290,23 @@ function renderSpeakerSummaryCards(summary) {
     ...summary.map(
       (speaker) => {
         const expanded = state.speakerSummaryExpandedKeys.has(speaker.key);
+        const speakerPlaying = currentPlaybackSpeakerKey && currentPlaybackSpeakerKey === speaker.key;
+        const speakerPlayMarkup =
+          speakerPlaybackEnabled && Number.isFinite(speaker.startMs)
+            ? `<button
+                class="icon-button speaker-stat__icon-button ${speakerPlaying ? 'speaker-stat__icon-button--active' : ''}"
+                type="button"
+                data-speaker-action="play-speaker"
+                data-speaker-key="${escapeHtml(speaker.key)}"
+                data-start-ms="${Number(speaker.startMs || 0)}"
+                aria-label="Play ${escapeHtml(speaker.label)}"
+                title="Play ${escapeHtml(speaker.label)}"
+              >🔊</button>`
+            : '';
         return `
-        <div class="speaker-stat ${expanded ? 'speaker-stat--expanded' : ''}">
+        <div class="speaker-stat ${expanded ? 'speaker-stat--expanded' : ''} ${speakerPlaying ? 'speaker-stat--playing' : ''}" data-speaker-key="${escapeHtml(
+          speaker.key
+        )}">
           <div class="speaker-stat__top-row">
             <button
               class="speaker-stat__toggle"
@@ -1276,13 +1333,16 @@ function renderSpeakerSummaryCards(summary) {
                 <span class="speaker-stat__chevron" aria-hidden="true">${expanded ? '▾' : '▸'}</span>
               </div>
             </button>
-            ${
-              speaker.rawLabel
-                ? `<button class="button button--ghost button--small" data-speaker-action="rename" data-speaker-raw-label="${escapeHtml(
-                    speaker.rawLabel
-                  )}">Rename</button>`
-                : ''
-            }
+            <div class="speaker-stat__actions">
+              ${speakerPlayMarkup}
+              ${
+                speaker.rawLabel
+                  ? `<button class="button button--ghost button--small" data-speaker-action="rename" data-speaker-raw-label="${escapeHtml(
+                      speaker.rawLabel
+                    )}">Rename</button>`
+                  : ''
+              }
+            </div>
           </div>
           ${
             expanded
@@ -1520,6 +1580,7 @@ function renderSpeakerInsights() {
   }
 
   elements.speakerSummary.innerHTML = [speakerProcessingCard, renderSpeakerSummaryCards(summary)].filter(Boolean).join('');
+  updateSpeakerPlaybackIndicator();
   renderSpeakerFinalizeButton();
 }
 
@@ -1670,13 +1731,16 @@ function renderTranscriptParagraph({ kind, label, text, pending = false }) {
   `;
 }
 
+function getAutomaticSpeakerLabelForSegment(segment, session = state.currentSession) {
+  if (!segment?.speakerRawLabel) return '';
+  return resolveSpeakerLabel(segment.speakerRawLabel, session, getDefaultSpeakerLabel(segment.speakerRawLabel));
+}
+
 function getTranscriptSpeakerLabel(segment) {
   const manualLabel = getManualSpeakerLabelForSegment(segment);
   if (manualLabel) return manualLabel;
   if (segment.speakerLabel) return String(segment.speakerLabel || '').trim();
-  if (segment.speakerRawLabel) {
-    return resolveSpeakerLabel(segment.speakerRawLabel, state.currentSession, getDefaultSpeakerLabel(segment.speakerRawLabel));
-  }
+  if (segment.speakerRawLabel) return getAutomaticSpeakerLabelForSegment(segment);
   const seededNames = parseSpeakerNames(state.currentSession?.speakerNames || state.settings.speakerNames || '');
   if (seededNames.length === 1) {
     return seededNames[0];
@@ -2269,6 +2333,13 @@ function renderTranscript() {
   renderTranscriptHistory();
 }
 
+function ensureReviewAudioPlaybackDefaults() {
+  const audio = elements.reviewAudio;
+  if (!audio) return;
+  if (audio.defaultPlaybackRate !== 1) audio.defaultPlaybackRate = 1;
+  if (audio.playbackRate !== 1) audio.playbackRate = 1;
+}
+
 function getCurrentPlaybackAbsoluteMs() {
   const audio = elements.reviewAudio;
   const recording = state.sessionRecordings[state.sessionPlaybackClipIndex];
@@ -2276,9 +2347,23 @@ function getCurrentPlaybackAbsoluteMs() {
   return Number(recording.startMs || 0) + Math.round((audio.currentTime || 0) * 1000);
 }
 
-function updatePlaybackHighlight({ shouldScroll = false } = {}) {
+function updateSpeakerPlaybackIndicator() {
+  const currentPlaybackSegment = state.currentSegments.find((segment) => segment.id === state.sessionPlaybackSegmentId);
+  const activeSpeakerKey = currentPlaybackSegment ? getSpeakerSummaryKeyForSegment(currentPlaybackSegment) : '';
+
+  Array.from(elements.speakerSummary?.querySelectorAll('.speaker-stat[data-speaker-key]') || []).forEach((card) => {
+    card.classList.toggle('speaker-stat--playing', Boolean(activeSpeakerKey) && card.dataset.speakerKey === activeSpeakerKey);
+  });
+
+  Array.from(elements.speakerSummary?.querySelectorAll('.speaker-stat__icon-button[data-speaker-key]') || []).forEach((button) => {
+    button.classList.toggle('speaker-stat__icon-button--active', Boolean(activeSpeakerKey) && button.dataset.speakerKey === activeSpeakerKey);
+  });
+}
+
+function updatePlaybackHighlight({ shouldScroll = false, forceScroll = false } = {}) {
   const absoluteMs = getCurrentPlaybackAbsoluteMs();
   const rows = Array.from(elements.transcriptList?.querySelectorAll('.transcript-pair[data-start-ms]') || []);
+  const previousSegmentId = state.sessionPlaybackSegmentId;
   let activeRow = null;
   rows.forEach((row) => {
     const startMs = Number(row.dataset.startMs || 0);
@@ -2288,19 +2373,43 @@ function updatePlaybackHighlight({ shouldScroll = false } = {}) {
     if (active) activeRow = row;
   });
   state.sessionPlaybackSegmentId = activeRow?.dataset.segmentKey || '';
-  if (activeRow && shouldScroll && state.sessionPlaybackAutoScroll) {
+  if (activeRow && shouldScroll && state.sessionPlaybackAutoScroll && (forceScroll || state.sessionPlaybackSegmentId !== previousSegmentId)) {
     activeRow.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }
+  if (state.sessionPlaybackSegmentId !== previousSegmentId) {
+    updateSpeakerPlaybackIndicator();
   }
 }
 
 function findRecordingIndexForTime(absoluteMs) {
-  return state.sessionRecordings.findIndex((recording) => absoluteMs >= Number(recording.startMs || 0) && absoluteMs < Number(recording.endMs || 0));
+  const targetMs = Number(absoluteMs || 0);
+  const exactIndex = state.sessionRecordings.findIndex((recording) => {
+    if (!hasRecordingBlob(recording)) return false;
+    const startMs = Number(recording.startMs || 0);
+    const endMs = Number(recording.endMs || startMs);
+    return targetMs >= startMs && targetMs <= endMs + 300;
+  });
+
+  if (exactIndex !== -1) return exactIndex;
+
+  let fallbackIndex = -1;
+  state.sessionRecordings.forEach((recording, index) => {
+    if (!hasRecordingBlob(recording)) return;
+    if (targetMs >= Number(recording.startMs || 0)) {
+      fallbackIndex = index;
+    }
+  });
+
+  if (fallbackIndex !== -1) return fallbackIndex;
+
+  return state.sessionRecordings.findIndex((recording) => hasRecordingBlob(recording));
 }
 
-async function loadRecordingClip(index, { autoplay = false, seekMs = null } = {}) {
+async function loadRecordingClip(index, { autoplay = false, seekMs = null, forceScroll = false } = {}) {
   const audio = elements.reviewAudio;
   const recording = state.sessionRecordings[index];
   if (!audio || !recording?.blob) return false;
+  ensureReviewAudioPlaybackDefaults();
   if (state.sessionPlaybackClipIndex === index && audio.src) {
     if (seekMs !== null) {
       audio.currentTime = Math.max(0, recordingTimeToLocalOffset(recording, seekMs) / 1000);
@@ -2308,7 +2417,7 @@ async function loadRecordingClip(index, { autoplay = false, seekMs = null } = {}
     if (autoplay) {
       await audio.play().catch(() => {});
     }
-    updatePlaybackHighlight({ shouldScroll: true });
+    updatePlaybackHighlight({ shouldScroll: true, forceScroll });
     return true;
   }
   if (state.sessionPlaybackObjectUrl) {
@@ -2322,11 +2431,12 @@ async function loadRecordingClip(index, { autoplay = false, seekMs = null } = {}
   await new Promise((resolve) => {
     audio.addEventListener('loadedmetadata', resolve, { once: true });
   }).catch(() => {});
+  ensureReviewAudioPlaybackDefaults();
   if (seekMs !== null) {
     audio.currentTime = Math.max(0, recordingTimeToLocalOffset(recording, seekMs) / 1000);
   }
   renderRecordingReview();
-  updatePlaybackHighlight({ shouldScroll: true });
+  updatePlaybackHighlight({ shouldScroll: true, forceScroll });
   if (autoplay) {
     try {
       await audio.play();
@@ -2337,11 +2447,22 @@ async function loadRecordingClip(index, { autoplay = false, seekMs = null } = {}
   return true;
 }
 
+async function playSessionAudioAtMs(absoluteMs, { autoplay = true } = {}) {
+  const clipIndex = findRecordingIndexForTime(absoluteMs);
+  if (clipIndex === -1) return false;
+  return loadRecordingClip(clipIndex, { autoplay, seekMs: absoluteMs, forceScroll: true });
+}
+
 async function playReviewAudio() {
   const audio = elements.reviewAudio;
   if (!audio || !state.sessionRecordings.length) return;
+  ensureReviewAudioPlaybackDefaults();
   if (state.sessionPlaybackClipIndex < 0) {
-    await loadRecordingClip(0, { autoplay: true });
+    await loadRecordingClip(0, { autoplay: true, forceScroll: true });
+    return;
+  }
+  if (audio.ended && state.sessionPlaybackClipIndex >= state.sessionRecordings.length - 1) {
+    await loadRecordingClip(0, { autoplay: true, seekMs: 0, forceScroll: true });
     return;
   }
   await audio.play().catch(() => {});
@@ -2358,12 +2479,18 @@ function renderRecordingReview() {
   const undiarized = state.sessionRecordings.filter((recording) => !recording.diarizedAt).length;
   const currentIndex = state.sessionPlaybackClipIndex;
   const currentClip = currentIndex >= 0 ? state.sessionRecordings[currentIndex] : null;
+  const rawPlaybackMs = getCurrentPlaybackAbsoluteMs();
+  const currentPlaybackMs = rawPlaybackMs === null ? null : durationMs ? Math.min(rawPlaybackMs, durationMs) : rawPlaybackMs;
+  const playing = Boolean(elements.reviewAudio && !elements.reviewAudio.paused && !elements.reviewAudio.ended);
 
   if (elements.reviewAudioStatus) {
     const parts = [];
     if (count) parts.push(`${count} clip${count === 1 ? '' : 's'} saved locally`);
     if (durationMs) parts.push(`${formatDuration(durationMs)} recorded`);
     if (undiarized) parts.push(`${undiarized} clip${undiarized === 1 ? '' : 's'} ready for speaker finalize`);
+    if (currentPlaybackMs !== null && durationMs) {
+      parts.push(`${playing ? 'Playing' : 'Ready at'} ${formatDuration(currentPlaybackMs)} of ${formatDuration(durationMs)}`);
+    }
     if (state.wakeLockMessage) parts.push(state.wakeLockMessage);
     elements.reviewAudioStatus.textContent = parts.join(' • ') || 'Local session recording will appear here while capture runs.';
   }
@@ -2388,33 +2515,74 @@ function renderManualSpeakerControls() {
   if (!elements.speakerChangeTimer) return;
   const options = getSpeakerOptionsForManualControls();
   const currentLabel = state.manualSpeakerCurrentLabel || options[0] || 'Speaker A';
+  const timerRunning = isManualSpeakerTimerRunning();
+  const baseOffsetMs = Number(state.manualSpeakerBaseOffsetMs || 0);
+  const manualEvents = [...state.manualSpeakerEvents]
+    .sort((left, right) => (left.atMs || 0) - (right.atMs || 0))
+    .map((event, index, events) => ({
+      ...event,
+      splitMs: Math.max(0, Number(event.atMs || 0) - Number(index > 0 ? events[index - 1].atMs : baseOffsetMs)),
+      overallMs: Math.max(0, Number(event.atMs || 0) - baseOffsetMs),
+    }))
+    .reverse();
+
   state.manualSpeakerCurrentLabel = currentLabel;
-  elements.speakerChangeTimer.textContent = formatDurationShort(getManualSpeakerElapsedMs());
+  elements.speakerChangeDock?.setAttribute('data-manual-speaker-state', timerRunning ? 'running' : 'paused');
+  elements.speakerChangeTimer.textContent = formatManualStopwatchTime(getManualSpeakerElapsedMs());
+  if (elements.speakerChangeTimerState) {
+    elements.speakerChangeTimerState.textContent = timerRunning
+      ? `${currentLabel} live`
+      : state.currentSession?.status === 'ended'
+        ? 'Session ended'
+        : state.currentSession?.status === 'active'
+          ? 'Stopped'
+          : 'Ready';
+  }
   if (elements.speakerChangeCurrentSelect) {
     elements.speakerChangeCurrentSelect.innerHTML = options
       .map((label) => `<option value="${escapeHtml(label)}" ${label === currentLabel ? 'selected' : ''}>${escapeHtml(label)}</option>`)
       .join('');
+    elements.speakerChangeCurrentSelect.disabled = !state.currentSession || state.currentSession.status === 'ended';
+  }
+  if (elements.speakerChangeButton) {
+    elements.speakerChangeButton.textContent = timerRunning ? '👥 Mark' : 'Reset';
+    elements.speakerChangeButton.disabled = timerRunning
+      ? !state.currentSession || state.currentSession.status === 'ended'
+      : !state.currentSession || (manualEvents.length === 0 && getManualSpeakerElapsedMs() === 0);
+    elements.speakerChangeButton.dataset.mode = timerRunning ? 'mark' : 'reset';
+    elements.speakerChangeButton.classList.toggle('speaker-change-action--mark', timerRunning);
+    elements.speakerChangeButton.classList.toggle('speaker-change-action--reset', !timerRunning);
   }
   if (elements.speakerChangePauseButton) {
-    elements.speakerChangePauseButton.textContent = state.manualSpeakerPaused ? '▶️' : '⏸️';
+    elements.speakerChangePauseButton.textContent = timerRunning ? 'Stop' : 'Resume';
+    elements.speakerChangePauseButton.disabled =
+      !state.currentSession || state.currentSession.status === 'ended' || (!timerRunning && state.currentSession.status !== 'active');
+    elements.speakerChangePauseButton.dataset.mode = timerRunning ? 'stop' : 'resume';
+    elements.speakerChangePauseButton.classList.toggle('speaker-change-action--stop', timerRunning);
+    elements.speakerChangePauseButton.classList.toggle('speaker-change-action--resume', !timerRunning);
   }
   if (elements.speakerChangeMarkers) {
-    if (!state.manualSpeakerEvents.length) {
-      elements.speakerChangeMarkers.innerHTML = '<div class="speaker-change-marker-empty">No manual speaker changes marked yet.</div>';
+    if (!manualEvents.length) {
+      elements.speakerChangeMarkers.innerHTML = '<div class="speaker-change-marker-empty">No speaker marks yet. Tap Resume to start, then use 👥 when the speaker changes.</div>';
     } else {
-      elements.speakerChangeMarkers.innerHTML = state.manualSpeakerEvents
-        .map(
-          (event, index) => `
-            <label class="speaker-change-marker-row">
-              <span>${escapeHtml(formatDurationShort(event.atMs || 0))}</span>
-              <select data-speaker-marker-index="${index}">
-                ${options
-                  .map((label) => `<option value="${escapeHtml(label)}" ${label === event.speakerLabel ? 'selected' : ''}>${escapeHtml(label)}</option>`)
-                  .join('')}
-              </select>
-            </label>`
-        )
-        .join('');
+      elements.speakerChangeMarkers.innerHTML = [
+        '<div class="speaker-change-marker-headings"><span>Speaker</span><span>Split</span><span>Overall</span></div>',
+        manualEvents
+          .map(
+            (event) => `
+              <div class="speaker-change-marker-row">
+                <span class="speaker-change-marker-row__speaker">${escapeHtml(event.speakerLabel || 'Speaker')}</span>
+                <span>${escapeHtml(formatManualStopwatchTime(event.splitMs || 0))}</span>
+                <button
+                  class="speaker-change-marker-row__overall"
+                  type="button"
+                  data-speaker-marker-play-ms="${Number(event.atMs || 0)}"
+                  aria-label="Play from ${escapeHtml(formatManualStopwatchTime(event.overallMs || 0))}"
+                >${escapeHtml(formatManualStopwatchTime(event.overallMs || 0))}</button>
+              </div>`
+          )
+          .join(''),
+      ].join('');
     }
   }
 }
@@ -2545,6 +2713,9 @@ async function createSession({ sourceLanguage, targetLanguage, glossary, speaker
     draftTranslation: '',
     lastSequence: 0,
     manualSpeakerEvents: [],
+    manualSpeakerBaseOffsetMs: 0,
+    manualSpeakerElapsedMs: 0,
+    manualSpeakerPaused: true,
     manualSpeakerCurrentLabel: '',
   };
 
@@ -2562,10 +2733,10 @@ async function loadSession(sessionId) {
   state.speakerFinalizeProgress = null;
   clearLiveDraftCarry();
   state.manualSpeakerEvents = Array.isArray(session.manualSpeakerEvents) ? [...session.manualSpeakerEvents] : [];
+  state.manualSpeakerBaseOffsetMs = Number(session.manualSpeakerBaseOffsetMs || 0);
   state.manualSpeakerCurrentLabel = String(session.manualSpeakerCurrentLabel || '').trim();
-  state.manualSpeakerElapsedMs = 0;
-  state.manualSpeakerTimerStartedAt = 0;
-  state.manualSpeakerPaused = true;
+  state.manualSpeakerElapsedMs = Math.max(0, Number(session.manualSpeakerElapsedMs || 0));
+  state.manualSpeakerPaused = session.manualSpeakerPaused !== false;
   state.speakerTrackingStatus = state.speakerTrackingSupported
     ? 'Speaker timing is a best-effort background feature and may lag slightly.'
     : 'This browser does not support background speaker detection.';
@@ -3278,32 +3449,59 @@ async function applyStoredSpeakerSpansToSegment(segment, session = state.current
   return labeledSegment;
 }
 
+function syncManualSpeakerStateToSession(session = state.currentSession) {
+  if (!session) return;
+  session.manualSpeakerEvents = [...state.manualSpeakerEvents].sort((a, b) => (a.atMs || 0) - (b.atMs || 0));
+  session.manualSpeakerCurrentLabel = String(state.manualSpeakerCurrentLabel || '').trim();
+  session.manualSpeakerBaseOffsetMs = Math.max(0, Number(state.manualSpeakerBaseOffsetMs || 0));
+  session.manualSpeakerElapsedMs = Math.max(0, Number(state.manualSpeakerElapsedMs || 0));
+  session.manualSpeakerPaused = Boolean(state.manualSpeakerPaused);
+}
+
+async function persistManualSpeakerStateNow() {
+  if (!state.currentSession) return;
+  syncManualSpeakerStateToSession();
+  await persistCurrentSessionNow();
+}
+
 async function applyManualSpeakerEventsToCurrentSession() {
   if (!state.currentSession) return;
   const session = state.currentSession;
-  const manualEvents = [...state.manualSpeakerEvents].sort((a, b) => (a.atMs || 0) - (b.atMs || 0));
-  session.manualSpeakerEvents = manualEvents;
-  session.manualSpeakerCurrentLabel = String(state.manualSpeakerCurrentLabel || '').trim();
+  syncManualSpeakerStateToSession(session);
   const updatedSegments = [];
 
   for (const segment of state.currentSegments) {
     const manualLabel = getManualSpeakerLabelForSegment(segment, session);
-    if (!manualLabel || segment.speakerLabel === manualLabel) continue;
+    const automaticLabel = getAutomaticSpeakerLabelForSegment(segment, session);
+    const nextLabel = String(manualLabel || automaticLabel || '').trim();
+    const nextConfidence = manualLabel
+      ? 1
+      : automaticLabel
+        ? Math.max(Number(segment.speakerConfidence || 0), 0.55)
+        : 0;
+
+    if (
+      String(segment.speakerLabel || '').trim() === nextLabel &&
+      (!manualLabel || Number(segment.speakerConfidence || 0) === nextConfidence)
+    ) {
+      continue;
+    }
+
     const updatedSegment = {
       ...segment,
-      speakerLabel: manualLabel,
+      speakerLabel: nextLabel,
       speakerRawLabel: segment.speakerRawLabel || '',
-      speakerStatus: 'done',
+      speakerStatus: nextLabel ? 'done' : segment.speakerStatus,
       speakerUpdatedAt: nowIso(),
-      speakerScore: Math.max(Number(segment.speakerScore || 0), 1),
-      speakerConfidence: 1,
+      speakerScore: manualLabel ? Math.max(Number(segment.speakerScore || 0), 1) : Number(segment.speakerScore || 0),
+      speakerConfidence: nextConfidence,
     };
     await upsertSegment(updatedSegment);
     updatedSegments.push(updatedSegment);
   }
 
   updatedSegments.forEach((segment) => upsertCurrentSegmentInState(segment));
-  scheduleSessionPersist();
+  await persistCurrentSessionNow();
   renderTranscript();
   renderSpeakerInsights();
 }
@@ -3469,8 +3667,8 @@ async function handleStartFromSetup(event) {
   state.currentSegments = [];
   state.sessionRecordings = [];
   state.manualSpeakerEvents = [];
+  state.manualSpeakerBaseOffsetMs = 0;
   state.manualSpeakerElapsedMs = 0;
-  state.manualSpeakerTimerStartedAt = 0;
   state.manualSpeakerPaused = true;
   state.speakerFinalizeProgress = null;
   state.manualSpeakerCurrentLabel = getSpeakerOptionsForManualControls(session)[0] || 'Speaker A';
@@ -3587,6 +3785,7 @@ async function pauseListening() {
   flushListeningClock();
   flushSpeechClock();
   state.speechActive = false;
+  await pauseManualSpeakerTimer({ persist: false });
   await stopSpeakerTracking({ statusMessage: 'Paused. Speaker timing may keep catching up briefly.' });
   await stopSessionRecording();
   await state.client.disconnect({ nextStatus: 'paused', message: 'Paused. Microphone sending has stopped.' });
@@ -3605,6 +3804,7 @@ async function stopListening() {
     flushListeningClock();
     flushSpeechClock();
     state.speechActive = false;
+    await pauseManualSpeakerTimer({ persist: false });
     await stopSpeakerTracking({ statusMessage: 'Stopped. Use Finalize speaker timing for the last buffered audio.' });
     await stopSessionRecording();
     await state.client.disconnect({ nextStatus: 'stopped', message: 'Stopped. You can start again in the same session.' });
@@ -3630,6 +3830,7 @@ async function endCurrentSession() {
     flushListeningClock();
     flushSpeechClock();
     state.speechActive = false;
+    await pauseManualSpeakerTimer({ persist: false });
     await stopSpeakerTracking({ statusMessage: 'Ending session. Use Finalize speaker timing for the last buffered audio.' });
     await stopSessionRecording();
     await state.client.disconnect({ nextStatus: 'ended', message: 'Session ended.' });
@@ -3666,45 +3867,79 @@ async function createFreshSessionFromLive() {
   setRoute('setup');
 }
 
-function toggleManualSpeakerTimer() {
+async function pauseManualSpeakerTimer({ persist = true } = {}) {
   if (state.manualSpeakerPaused) {
-    state.manualSpeakerPaused = false;
-    state.manualSpeakerTimerStartedAt = Date.now();
-  } else {
-    state.manualSpeakerElapsedMs = getManualSpeakerElapsedMs();
-    state.manualSpeakerPaused = true;
-    state.manualSpeakerTimerStartedAt = 0;
+    renderManualSpeakerControls();
+    return;
   }
+
+  state.manualSpeakerElapsedMs = getManualSpeakerElapsedMs();
+  state.manualSpeakerPaused = true;
+  syncManualSpeakerStateToSession();
+
+  if (persist) {
+    await persistManualSpeakerStateNow();
+  }
+
   renderManualSpeakerControls();
 }
 
-async function markManualSpeakerChange() {
-  if (!state.currentSession) return;
-  if (state.manualSpeakerPaused) {
-    state.manualSpeakerPaused = false;
-    state.manualSpeakerTimerStartedAt = Date.now();
+async function resumeManualSpeakerTimer({ persist = true, seedInitialSpeaker = true } = {}) {
+  if (!state.currentSession || state.currentSession.status !== 'active') {
+    renderManualSpeakerControls();
+    return;
   }
-  const atMs = Math.max(0, Number(state.currentSession.activeDurationMs || 0));
+
+  state.manualSpeakerPaused = false;
+  state.manualSpeakerBaseOffsetMs = Math.max(0, getManualSpeakerSessionPositionMs() - Number(state.manualSpeakerElapsedMs || 0));
+  syncManualSpeakerStateToSession();
+
+  if (seedInitialSpeaker && !state.manualSpeakerEvents.length) {
+    await markManualSpeakerChange({ autoStart: false });
+    return;
+  }
+
+  if (persist) {
+    await persistManualSpeakerStateNow();
+  }
+
+  renderManualSpeakerControls();
+}
+
+async function markManualSpeakerChange({ atMs = getManualSpeakerSessionPositionMs(), autoStart = true } = {}) {
+  if (!state.currentSession || state.currentSession.status !== 'active') return;
+  if (state.manualSpeakerPaused && autoStart) {
+    await resumeManualSpeakerTimer({ persist: false, seedInitialSpeaker: false });
+  }
+
+  const normalizedAtMs = Math.max(0, Math.round(Number(atMs || 0)));
+  const speakerLabel = String(state.manualSpeakerCurrentLabel || getSpeakerOptionsForManualControls()[0] || 'Speaker A').trim();
+  const previousEvent = state.manualSpeakerEvents[state.manualSpeakerEvents.length - 1];
+
+  if (
+    previousEvent &&
+    previousEvent.speakerLabel === speakerLabel &&
+    Math.abs(Number(previousEvent.atMs || 0) - normalizedAtMs) < 400
+  ) {
+    renderManualSpeakerControls();
+    return;
+  }
+
   const nextEvent = {
     id: crypto.randomUUID(),
-    atMs,
-    speakerLabel: String(state.manualSpeakerCurrentLabel || getSpeakerOptionsForManualControls()[0] || 'Speaker A').trim(),
+    atMs: normalizedAtMs,
+    speakerLabel,
   };
   state.manualSpeakerEvents = [...state.manualSpeakerEvents, nextEvent].sort((a, b) => (a.atMs || 0) - (b.atMs || 0));
-  state.currentSession.manualSpeakerEvents = [...state.manualSpeakerEvents];
-  await persistCurrentSessionNow();
   await applyManualSpeakerEventsToCurrentSession();
   renderManualSpeakerControls();
 }
 
 async function resetManualSpeakerChanges() {
   state.manualSpeakerEvents = [];
+  state.manualSpeakerBaseOffsetMs = getManualSpeakerSessionPositionMs();
   state.manualSpeakerElapsedMs = 0;
-  state.manualSpeakerTimerStartedAt = state.manualSpeakerPaused ? 0 : Date.now();
-  if (state.currentSession) {
-    state.currentSession.manualSpeakerEvents = [];
-    await persistCurrentSessionNow();
-  }
+  await applyManualSpeakerEventsToCurrentSession();
   renderManualSpeakerControls();
   renderSpeakerInsights();
 }
@@ -4394,16 +4629,26 @@ function bindEvents() {
     const row = event.target.closest('.transcript-pair[data-start-ms]');
     if (!row) return;
     const startMs = Number(row.dataset.startMs || 0);
-    const clipIndex = findRecordingIndexForTime(startMs);
-    if (clipIndex === -1) return;
-    await loadRecordingClip(clipIndex, { autoplay: true, seekMs: startMs });
+    const played = await playSessionAudioAtMs(startMs);
+    if (!played) {
+      showToast('No saved audio clip covers that part yet.');
+    }
   });
   window.addEventListener('resize', applyTranscriptView);
   elements.reviewPlayButton?.addEventListener('click', playReviewAudio);
   elements.reviewPauseButton?.addEventListener('click', pauseReviewAudio);
-  elements.reviewAudio?.addEventListener('timeupdate', () => updatePlaybackHighlight({ shouldScroll: true }));
-  elements.reviewAudio?.addEventListener('play', () => renderRecordingReview());
-  elements.reviewAudio?.addEventListener('pause', () => renderRecordingReview());
+  elements.reviewAudio?.addEventListener('timeupdate', () => {
+    updatePlaybackHighlight({ shouldScroll: true });
+    renderRecordingReview();
+  });
+  elements.reviewAudio?.addEventListener('play', () => {
+    renderRecordingReview();
+    updateSpeakerPlaybackIndicator();
+  });
+  elements.reviewAudio?.addEventListener('pause', () => {
+    renderRecordingReview();
+    updateSpeakerPlaybackIndicator();
+  });
   elements.reviewAudio?.addEventListener('ended', async () => {
     const nextIndex = state.sessionPlaybackClipIndex + 1;
     if (nextIndex < state.sessionRecordings.length) {
@@ -4412,21 +4657,37 @@ function bindEvents() {
     }
     renderRecordingReview();
     updatePlaybackHighlight();
+    updateSpeakerPlaybackIndicator();
   });
   elements.speakerChangeButton?.addEventListener('click', () => {
-    markManualSpeakerChange().catch((error) => console.warn('Unable to save manual speaker marker', error));
+    const mode = elements.speakerChangeButton?.dataset.mode || 'mark';
+    const action = mode === 'reset' ? resetManualSpeakerChanges() : markManualSpeakerChange();
+    action.catch((error) => console.warn('Unable to handle manual speaker action', error));
   });
-  elements.speakerChangePauseButton?.addEventListener('click', toggleManualSpeakerTimer);
+  elements.speakerChangePauseButton?.addEventListener('click', () => {
+    const mode = elements.speakerChangePauseButton?.dataset.mode || 'resume';
+    const action = mode === 'stop' ? pauseManualSpeakerTimer() : resumeManualSpeakerTimer();
+    action.catch((error) => console.warn('Unable to update manual speaker timer', error));
+  });
   elements.speakerChangeResetButton?.addEventListener('click', () => {
     resetManualSpeakerChanges().catch((error) => console.warn('Unable to reset manual speaker changes', error));
   });
   elements.speakerChangeCurrentSelect?.addEventListener('change', async () => {
     state.manualSpeakerCurrentLabel = elements.speakerChangeCurrentSelect.value;
     if (state.currentSession) {
-      state.currentSession.manualSpeakerCurrentLabel = state.manualSpeakerCurrentLabel;
+      syncManualSpeakerStateToSession();
       await persistCurrentSessionNow();
     }
     renderManualSpeakerControls();
+  });
+  elements.speakerChangeMarkers?.addEventListener('click', async (event) => {
+    const playButton = event.target.closest('[data-speaker-marker-play-ms]');
+    if (!playButton) return;
+    const startMs = Number(playButton.dataset.speakerMarkerPlayMs || 0);
+    const played = await playSessionAudioAtMs(startMs);
+    if (!played) {
+      showToast('No saved audio clip covers that speaker mark yet.');
+    }
   });
   elements.speakerChangeMarkers?.addEventListener('change', (event) => {
     const select = event.target.closest('[data-speaker-marker-index]');
@@ -4448,6 +4709,26 @@ function bindEvents() {
   elements.newSessionButton.addEventListener('click', createFreshSessionFromLive);
   elements.renameSessionButton.addEventListener('click', renameCurrentSession);
   elements.speakerSummary.addEventListener('click', async (event) => {
+    const playSpeakerButton = event.target.closest('[data-speaker-action="play-speaker"]');
+    if (playSpeakerButton) {
+      const startMs = Number(playSpeakerButton.dataset.startMs || 0);
+      const played = await playSessionAudioAtMs(startMs);
+      if (!played) {
+        showToast('No saved audio clip covers that speaker yet.');
+      }
+      return;
+    }
+
+    const playSegmentButton = event.target.closest('[data-speaker-action="play-segment"]');
+    if (playSegmentButton) {
+      const startMs = Number(playSegmentButton.dataset.startMs || 0);
+      const played = await playSessionAudioAtMs(startMs);
+      if (!played) {
+        showToast('No saved audio clip covers that line yet.');
+      }
+      return;
+    }
+
     const toggleButton = event.target.closest('[data-speaker-action="toggle"]');
     if (toggleButton) {
       toggleSpeakerSummaryExpansion(toggleButton.dataset.speakerKey);
@@ -4658,6 +4939,16 @@ function setDebugSpeakerState(partial = {}) {
   return buildDebugSnapshot();
 }
 
+function setDebugCurrentSession(partial = {}) {
+  if (!state.currentSession) return buildDebugSnapshot();
+  state.currentSession = {
+    ...state.currentSession,
+    ...(partial || {}),
+  };
+  renderCurrentView();
+  return buildDebugSnapshot();
+}
+
 async function persistDebugSettings(partial = {}) {
   debugNoPersistence = true;
   await persistSettings({
@@ -4695,6 +4986,9 @@ async function createDebugSession({
     draftTranslation: '',
     lastSequence: 0,
     manualSpeakerEvents: [],
+    manualSpeakerBaseOffsetMs: 0,
+    manualSpeakerElapsedMs: 0,
+    manualSpeakerPaused: true,
     manualSpeakerCurrentLabel: '',
   };
   state.currentSession = session;
@@ -4702,8 +4996,8 @@ async function createDebugSession({
   state.currentSegments = [];
   state.sessionRecordings = [];
   state.manualSpeakerEvents = [];
+  state.manualSpeakerBaseOffsetMs = 0;
   state.manualSpeakerElapsedMs = 0;
-  state.manualSpeakerTimerStartedAt = 0;
   state.manualSpeakerPaused = true;
   state.speakerFinalizeProgress = null;
   state.manualSpeakerCurrentLabel = getSpeakerOptionsForManualControls(session)[0] || 'Speaker A';
@@ -4842,6 +5136,7 @@ function installDebugHooks() {
     startListeningForTest: startListeningForDebug,
     setSegmentsForTest: setDebugSegments,
     setSpeakerStateForTest: setDebugSpeakerState,
+    setCurrentSessionForTest: setDebugCurrentSession,
     getViewForTest: buildDebugSnapshot,
     snapshot: buildDebugSnapshot,
     setDraftTranslation: setDebugDraftTranslation,

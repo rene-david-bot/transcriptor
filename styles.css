@@ -781,11 +781,34 @@ strong {
   border-color: rgba(96, 165, 250, 0.26);
 }
 
+.speaker-stat--playing {
+  border-color: rgba(96, 165, 250, 0.34);
+  box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.12);
+}
+
 .speaker-stat__top-row {
   display: grid;
   grid-template-columns: 1fr auto;
   gap: 0.75rem;
   align-items: start;
+}
+
+.speaker-stat__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.speaker-stat__icon-button {
+  width: 40px;
+  height: 40px;
+  border-radius: 14px;
+  font-size: 1rem;
+}
+
+.speaker-stat__icon-button--active {
+  border-color: rgba(96, 165, 250, 0.44);
+  background: rgba(59, 130, 246, 0.2);
 }
 
 .speaker-stat__toggle {
@@ -873,6 +896,14 @@ strong {
   font-size: 0.82rem;
   white-space: nowrap;
   padding-top: 0.1rem;
+}
+
+.speaker-detail-row__time-button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
 }
 
 .speaker-detail-row__copy {
@@ -1836,33 +1867,47 @@ strong {
   font-weight: 500;
 }
 
-.transcript-review-bar,
+.review-audio-panel,
 .speaker-change-dock {
   border-top: 1px solid var(--transcript-row-border);
-  padding: 0.85rem 1rem 1rem;
+  padding: 0.9rem 1rem 1rem;
   background: rgba(2, 6, 23, 0.22);
 }
 
-.transcript-review-bar__top,
+.review-audio-panel {
+  display: grid;
+  gap: 0.8rem;
+}
+
+.review-audio-panel__top,
 .speaker-change-dock__top,
-.speaker-change-dock__controls,
-.speaker-change-marker-row {
+.speaker-change-marker-row,
+.speaker-change-marker-headings {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 0.7rem;
 }
 
-.transcript-review-bar__copy {
+.review-audio-panel__copy,
+.speaker-change-dock__copy,
+.speaker-change-dock__timer-wrap {
   display: grid;
   gap: 0.15rem;
 }
 
-.transcript-review-bar__copy span,
-.speaker-change-marker-empty {
+.review-audio-panel__copy span,
+.speaker-change-dock__copy span,
+.speaker-change-dock__speaker-label,
+.speaker-change-marker-empty,
+.speaker-change-dock__timer-wrap small {
   color: var(--muted);
   font-size: 0.84rem;
   line-height: 1.45;
+}
+
+.review-audio-panel audio {
+  width: 100%;
 }
 
 .speaker-change-dock {
@@ -1870,35 +1915,119 @@ strong {
   bottom: 0;
   z-index: 2;
   backdrop-filter: blur(16px);
+  display: grid;
+  gap: 0.8rem;
 }
 
-.speaker-change-dock__controls {
-  margin-top: 0.7rem;
-  align-items: stretch;
+.speaker-change-dock__top {
+  align-items: start;
+}
+
+.speaker-change-dock__timer-wrap {
+  justify-items: end;
+  text-align: right;
+}
+
+.speaker-change-dock__timer {
+  font-size: clamp(1.65rem, 5vw, 2.4rem);
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.04em;
+  font-variant-numeric: tabular-nums;
+}
+
+.speaker-change-dock__speaker-row {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.speaker-change-dock__speaker-row select {
+  width: 100%;
+}
+
+.speaker-change-dock__actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.85rem;
+}
+
+.speaker-change-action {
+  min-height: 58px;
+  border-radius: 999px;
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.speaker-change-action--mark,
+.speaker-change-action--reset {
+  background: rgba(71, 85, 105, 0.34);
+  color: var(--text);
+  border-color: rgba(148, 163, 184, 0.18);
+}
+
+.speaker-change-action--stop {
+  background: rgba(239, 68, 68, 0.88);
+  color: #fff;
+  border-color: rgba(248, 113, 113, 0.4);
+}
+
+.speaker-change-action--resume {
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.96), rgba(139, 92, 246, 0.96));
+  color: #fff;
+  border-color: rgba(129, 140, 248, 0.38);
 }
 
 .speaker-change-markers {
   display: grid;
   gap: 0.45rem;
-  margin-top: 0.75rem;
-  max-height: 9rem;
+  max-height: 11rem;
   overflow: auto;
 }
 
+.speaker-change-marker-headings {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 0 0.1rem 0.35rem;
+  background: linear-gradient(180deg, rgba(2, 6, 23, 0.94), rgba(2, 6, 23, 0));
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.speaker-change-marker-headings span,
+.speaker-change-marker-row span,
+.speaker-change-marker-row__overall {
+  flex: 1;
+  min-width: 0;
+}
+
+.speaker-change-marker-row {
+  padding: 0.18rem 0.1rem;
+}
+
+.speaker-change-marker-row__speaker {
+  color: var(--text);
+  font-weight: 600;
+}
+
 .speaker-change-marker-row span {
-  min-width: 3.25rem;
   color: var(--muted);
   font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
 }
 
-.speaker-change-marker-row select {
-  max-width: 11rem;
-  padding: 0.6rem 0.75rem;
-}
-
-.transcript-review-bar audio {
-  width: 100%;
-  margin-top: 0.75rem;
+.speaker-change-marker-row__overall {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--primary-soft);
+  font-weight: 700;
+  font-size: 0.82rem;
+  text-align: right;
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
 }
 
 @media (max-width: 720px) {
@@ -1922,10 +2051,20 @@ strong {
     gap: 0.45rem;
   }
 
-  .transcript-review-bar__top,
-  .speaker-change-dock__controls,
+  .review-audio-panel__top,
+  .speaker-change-dock__top,
   .speaker-change-marker-row {
     flex-wrap: wrap;
+  }
+
+  .speaker-change-marker-headings {
+    display: none;
+  }
+
+  .speaker-change-marker-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1.1fr) repeat(2, minmax(0, 0.9fr));
+    gap: 0.55rem;
   }
 
   .speaker-change-dock {
@@ -2094,9 +2233,20 @@ body[data-theme='light'][data-route='live'] .transcript-paragraph--source .trans
   font-weight: 500;
 }
 
-body[data-theme='light'][data-route='live'] .transcript-review-bar,
+body[data-theme='light'][data-route='live'] .review-audio-panel,
 body[data-theme='light'][data-route='live'] .speaker-change-dock {
   background: rgba(255, 255, 255, 0.88);
+}
+
+body[data-theme='light'][data-route='live'] .speaker-change-marker-headings {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(255, 255, 255, 0));
+}
+
+body[data-theme='light'][data-route='live'] .speaker-change-action--mark,
+body[data-theme='light'][data-route='live'] .speaker-change-action--reset {
+  background: rgba(226, 232, 240, 0.92);
+  color: #0f172a;
+  border-color: rgba(203, 213, 225, 0.94);
 }
 
 body[data-theme='light'][data-route='live'] .transcript-paragraph--target {
