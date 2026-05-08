@@ -1283,11 +1283,11 @@ function normalizeManualSpeakerName(value) {
     .trim();
 }
 
-function getResolvedManualSpeakerSelection(session = state.currentSession, { preferDom = true } = {}) {
-  const domValue = preferDom ? normalizeManualSpeakerName(elements.speakerChangeCurrentSelect?.value || '') : '';
+function getResolvedManualSpeakerSelection(session = state.currentSession, { preferDom = false } = {}) {
   const stateValue = normalizeManualSpeakerName(state.manualSpeakerCurrentLabel || session?.manualSpeakerCurrentLabel || '');
+  const domValue = preferDom || !stateValue ? normalizeManualSpeakerName(elements.speakerChangeCurrentSelect?.value || '') : '';
   const fallbackValue = getSpeakerOptionsForManualControls(session)[0] || 'Speaker A';
-  const rawValue = domValue || stateValue || fallbackValue;
+  const rawValue = stateValue || domValue || fallbackValue;
   return findExistingManualSpeakerOption(rawValue, session) || rawValue;
 }
 
@@ -1405,10 +1405,10 @@ async function useManualSpeakerCustomName(rawValue = state.manualSpeakerCustomNa
 
   if (state.currentSession) {
     syncManualSpeakerStateToSession();
+    renderManualSpeakerControls();
     await persistCurrentSessionNow();
   }
 
-  renderManualSpeakerControls();
   showToast(existingLabel ? `${resolvedLabel} selected.` : `${resolvedLabel} added for this session.`);
   return true;
 }
@@ -1940,6 +1940,10 @@ function buildSpeakerTimingSummaryRows(slotRollup, summary = []) {
   return rows;
 }
 
+function formatSpeakerTimingSummaryDuration(ms = 0) {
+  return formatManualStopwatchTime(ms);
+}
+
 function renderSpeakerTimingSummary(slotRollup, summary, { final = false } = {}) {
   const rows = buildSpeakerTimingSummaryRows(slotRollup, summary);
   if (!rows.length) return '';
@@ -1952,11 +1956,11 @@ function renderSpeakerTimingSummary(slotRollup, summary, { final = false } = {})
       <div class="speaker-timing-summary__totals">
         <div class="speaker-timing-summary__total speaker-timing-summary__total--manual">
           <span>Manual stopwatch</span>
-          <strong>${formatDuration(slotRollup?.totalWindowMs || 0)}</strong>
+          <strong>${formatSpeakerTimingSummaryDuration(slotRollup?.totalWindowMs || 0)}</strong>
         </div>
         <div class="speaker-timing-summary__total speaker-timing-summary__total--auto">
           <span>${final ? 'Auto matched speech' : 'Auto matched speech'}</span>
-          <strong>${formatDuration(slotRollup?.totalSpeechMs || 0)}</strong>
+          <strong>${formatSpeakerTimingSummaryDuration(slotRollup?.totalSpeechMs || 0)}</strong>
         </div>
       </div>
       <div class="speaker-timing-summary__table-wrap">
@@ -1984,25 +1988,25 @@ function renderSpeakerTimingSummary(slotRollup, summary, { final = false } = {})
                     <strong>${escapeHtml(row.label)}</strong>
                   </button>
                   <span class="speaker-timing-summary__part" role="cell">${escapeHtml(row.note || '')}</span>
-                  <span role="cell">${formatDuration(row.manualMs || 0)}</span>
-                  <span role="cell">${formatDuration(row.autoMs || 0)}</span>
-                  <span role="cell">${firstRowForSpeaker ? formatDuration(row.totalMs || 0) : '—'}</span>
+                  <span role="cell">${formatSpeakerTimingSummaryDuration(row.manualMs || 0)}</span>
+                  <span role="cell">${formatSpeakerTimingSummaryDuration(row.autoMs || 0)}</span>
+                  <span role="cell">${firstRowForSpeaker ? formatSpeakerTimingSummaryDuration(row.totalMs || 0) : '—'}</span>
                 </div>`;
             })
             .join('')}
           <div class="speaker-timing-summary__foot" role="row">
             <strong role="cell">All speakers</strong>
             <span role="cell">Σ</span>
-            <span role="cell">${formatDuration(slotRollup?.totalWindowMs || 0)}</span>
-            <span role="cell">${formatDuration(totalAutoMs)}</span>
-            <span role="cell">${formatDuration(slotRollup?.totalWindowMs || 0)}</span>
+            <span role="cell">${formatSpeakerTimingSummaryDuration(slotRollup?.totalWindowMs || 0)}</span>
+            <span role="cell">${formatSpeakerTimingSummaryDuration(totalAutoMs)}</span>
+            <span role="cell">${formatSpeakerTimingSummaryDuration(slotRollup?.totalWindowMs || 0)}</span>
           </div>
         </div>
       </div>
       <small class="speaker-timing-summary__note">${escapeHtml(
         final
-          ? 'Manual shows the full segment you marked. Auto shows transcript speech found inside that segment after the final pass. Total shows that speaker’s summed manual stopwatch time on the first row only, and the footer verifies the overall sum.'
-          : 'Manual shows the full segment you marked. Auto shows the transcript speech found inside that segment so far. Total shows that speaker’s summed manual stopwatch time on the first row only, and the footer verifies the overall sum.'
+          ? 'Manual shows the exact stopwatch window you marked. Auto shows the exact transcript speech found inside that window after the final pass. Total shows that speaker’s summed manual stopwatch time on the first row only, and the footer uses the same exact stopwatch basis.'
+          : 'Manual shows the exact stopwatch window you marked. Auto shows the exact transcript speech found inside that window so far. Total shows that speaker’s summed manual stopwatch time on the first row only, and the footer uses the same exact stopwatch basis.'
       )}</small>
     </div>
   `;
