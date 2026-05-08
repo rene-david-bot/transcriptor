@@ -1283,11 +1283,11 @@ function normalizeManualSpeakerName(value) {
     .trim();
 }
 
-function getResolvedManualSpeakerSelection(session = state.currentSession, { preferDom = false } = {}) {
+function getResolvedManualSpeakerSelection(session = state.currentSession, { preferDom = true } = {}) {
+  const domValue = preferDom ? normalizeManualSpeakerName(elements.speakerChangeCurrentSelect?.value || '') : '';
   const stateValue = normalizeManualSpeakerName(state.manualSpeakerCurrentLabel || session?.manualSpeakerCurrentLabel || '');
-  const domValue = preferDom || !stateValue ? normalizeManualSpeakerName(elements.speakerChangeCurrentSelect?.value || '') : '';
   const fallbackValue = getSpeakerOptionsForManualControls(session)[0] || 'Speaker A';
-  const rawValue = stateValue || domValue || fallbackValue;
+  const rawValue = domValue || stateValue || fallbackValue;
   return findExistingManualSpeakerOption(rawValue, session) || rawValue;
 }
 
@@ -1410,6 +1410,39 @@ async function useManualSpeakerCustomName(rawValue = state.manualSpeakerCustomNa
   }
 
   showToast(existingLabel ? `${resolvedLabel} selected.` : `${resolvedLabel} added for this session.`);
+  return true;
+}
+
+async function applyManualSpeakerSelectionFromControl() {
+  const nextLabel = normalizeManualSpeakerName(elements.speakerChangeCurrentSelect?.value || '');
+  if (!nextLabel) return false;
+
+  const previousLabel = normalizeManualSpeakerName(state.manualSpeakerCurrentLabel || state.currentSession?.manualSpeakerCurrentLabel || '');
+  const previousPendingAtMs = state.manualSpeakerPendingChangeAtMs;
+  const resolvedLabel = findExistingManualSpeakerOption(nextLabel, state.currentSession) || nextLabel;
+
+  state.manualSpeakerCurrentLabel = resolvedLabel;
+  state.manualSpeakerCustomNameDraft = '';
+
+  if (state.currentSession) {
+    state.currentSession.manualSpeakerCurrentLabel = resolvedLabel;
+  }
+
+  if (state.currentSession?.status === 'active' && !state.manualSpeakerPaused) {
+    setPendingManualSpeakerChangeAtCurrentPosition();
+  } else {
+    clearPendingManualSpeakerChange();
+  }
+
+  renderManualSpeakerControls();
+
+  if (state.currentSession) {
+    syncManualSpeakerStateToSession();
+    if (resolvedLabel !== previousLabel || state.manualSpeakerPendingChangeAtMs !== previousPendingAtMs) {
+      await persistCurrentSessionNow();
+    }
+  }
+
   return true;
 }
 
@@ -6139,20 +6172,11 @@ function bindEvents() {
   elements.speakerChangeResetButton?.addEventListener('click', () => {
     resetManualSpeakerChanges().catch((error) => console.warn('Unable to reset manual speaker changes', error));
   });
-  elements.speakerChangeCurrentSelect?.addEventListener('change', async () => {
-    state.manualSpeakerCurrentLabel = elements.speakerChangeCurrentSelect.value;
-    state.manualSpeakerCustomNameDraft = '';
-    if (state.currentSession?.status === 'active' && !state.manualSpeakerPaused) {
-      setPendingManualSpeakerChangeAtCurrentPosition();
-    } else {
-      clearPendingManualSpeakerChange();
-    }
-    if (state.currentSession) {
-      syncManualSpeakerStateToSession();
-      await persistCurrentSessionNow();
-    }
-    renderManualSpeakerControls();
-  });
+  const handleManualSpeakerCurrentSelectChange = () => {
+    applyManualSpeakerSelectionFromControl().catch((error) => console.warn('Unable to update current speaker selection', error));
+  };
+  elements.speakerChangeCurrentSelect?.addEventListener('input', handleManualSpeakerCurrentSelectChange);
+  elements.speakerChangeCurrentSelect?.addEventListener('change', handleManualSpeakerCurrentSelectChange);
   elements.speakerChangeCustomInput?.addEventListener('input', () => {
     state.manualSpeakerCustomNameDraft = elements.speakerChangeCustomInput.value;
     if (elements.speakerChangeCustomUseButton) {
