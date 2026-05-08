@@ -278,6 +278,7 @@ const elements = {
   reviewAudioTransport: $('#reviewAudioTransport'),
   reviewAudioStatus: $('#reviewAudioStatus'),
   reviewPlayPauseButton: $('#reviewPlayPauseButton'),
+  reviewStopButton: $('#reviewStopButton'),
   reviewProgressInput: $('#reviewProgressInput'),
   reviewCurrentTime: $('#reviewCurrentTime'),
   reviewTotalTime: $('#reviewTotalTime'),
@@ -535,6 +536,15 @@ function syncReviewAudioTransportMount({ floatingPlayback = false } = {}) {
   if (transport.parentElement !== dock) {
     dock.appendChild(transport);
   }
+}
+
+function setReviewProgressVisual(absoluteMs, durationMs = getSessionRecordingDurationMs()) {
+  const input = elements.reviewProgressInput;
+  if (!input) return;
+  const safeDuration = Math.max(0, Number(durationMs || 0));
+  const safeAbsolute = Math.max(0, Number(absoluteMs || 0));
+  const ratio = safeDuration > 0 ? Math.min(100, Math.max(0, (safeAbsolute / safeDuration) * 100)) : 0;
+  input.style.setProperty('--range-progress', `${ratio}%`);
 }
 
 function setStatus(status, message) {
@@ -1729,7 +1739,9 @@ function renderSpeakerSummaryCards(summary, { includeTotalCard = true } = {}) {
 
 function buildSpeakerTimingSummaryRows(slotRollup, summary = []) {
   const manualSlots = Array.isArray(slotRollup?.slots) ? slotRollup.slots : [];
-  const summaryByKey = new Map(summary.map((speaker) => [speaker.key, speaker]));
+  const manualTotalByKey = new Map(
+    (Array.isArray(slotRollup?.speakers) ? slotRollup.speakers : []).map((speaker) => [speaker.key, Math.max(0, Number(speaker.windowMs || 0))])
+  );
   const manualKeys = new Set();
   const speakerPartIndex = new Map();
 
@@ -1739,7 +1751,7 @@ function buildSpeakerTimingSummaryRows(slotRollup, summary = []) {
       manualKeys.add(speakerKey);
       const nextPart = (speakerPartIndex.get(speakerKey) || 0) + 1;
       speakerPartIndex.set(speakerKey, nextPart);
-      const totalMs = Math.max(0, Number(summaryByKey.get(speakerKey)?.durationMs ?? slot.speechMs ?? 0));
+      const totalMs = Math.max(0, Number(manualTotalByKey.get(speakerKey) ?? slot.windowMs ?? 0));
       return {
         key: `${speakerKey}:${slot.id}:${nextPart}`,
         speakerKey,
@@ -1764,7 +1776,7 @@ function buildSpeakerTimingSummaryRows(slotRollup, summary = []) {
         note: 'Automatic only',
         manualMs: 0,
         autoMs: Math.max(0, Number(speaker.durationMs || 0)),
-        totalMs: Math.max(0, Number(speaker.durationMs || 0)),
+        totalMs: Math.max(0, Number(manualTotalByKey.get(speaker.key) || 0)),
         startMs: Math.max(0, Number(speaker.startMs || 0)),
       });
     });
@@ -1818,8 +1830,8 @@ function renderSpeakerTimingSummary(slotRollup, summary, { final = false } = {})
       </div>
       <small class="speaker-timing-summary__note">${escapeHtml(
         final
-          ? 'Manual shows the full segment you marked. Auto shows transcript speech found inside that segment after the final pass. Total repeats the automatic speaker total across the whole session.'
-          : 'Manual shows the full segment you marked. Auto shows the transcript speech found inside that segment so far. Total repeats the automatic speaker total across the whole session.'
+          ? 'Manual shows the full segment you marked. Auto shows transcript speech found inside that segment after the final pass. Total repeats the summed manual stopwatch time across all marked parts for that speaker.'
+          : 'Manual shows the full segment you marked. Auto shows the transcript speech found inside that segment so far. Total repeats the summed manual stopwatch time across all marked parts for that speaker.'
       )}</small>
     </div>
   `;
@@ -2992,9 +3004,8 @@ function setSessionPlaybackPreviewMs(absoluteMs) {
 }
 
 async function seekSessionAudioToMs(absoluteMs, { autoplay = null, forceScroll = true } = {}) {
-  const audio = elements.reviewAudio;
   const targetMs = clampSessionPlaybackMs(absoluteMs);
-  const shouldAutoplay = autoplay === null ? Boolean(audio && !audio.paused) : Boolean(autoplay);
+  const shouldAutoplay = autoplay === null ? true : Boolean(autoplay);
   state.sessionPlaybackPreviewMs = null;
   const played = await playSessionAudioAtMs(targetMs, { autoplay: shouldAutoplay });
   if (!played) return false;
@@ -3003,10 +3014,10 @@ async function seekSessionAudioToMs(absoluteMs, { autoplay = null, forceScroll =
   return true;
 }
 
-async function seekSessionAudioByDeltaMs(deltaMs) {
+async function seekSessionAudioByDeltaMs(deltaMs, { autoplay = true } = {}) {
   const currentPlaybackMs = getVisibleSessionPlaybackMs();
   const baseMs = currentPlaybackMs === null ? 0 : currentPlaybackMs;
-  return seekSessionAudioToMs(baseMs + Number(deltaMs || 0), { forceScroll: true });
+  return seekSessionAudioToMs(baseMs + Number(deltaMs || 0), { autoplay, forceScroll: true });
 }
 
 async function playReviewAudio() {
@@ -3030,6 +3041,28 @@ async function pauseReviewAudio() {
   state.reviewAudioFloatingActive = false;
   elements.reviewAudio?.pause();
   renderRecordingReview();
+}
+
+async function stopReviewAudio({ resetToStart = true } = {}) {
+  const audio = elements.reviewAudio;
+  audio?.pause();
+  state.reviewAudioFloatingActive = false;
+  state.sessionPlaybackSegmentId = '';
+  state.sessionPlaybackPreviewMs = null;
+
+  if (resetToStart) {
+    const firstClipIndex = findRecordingIndexForTime(0);
+    if (firstClipIndex !== -1) {
+      await loadRecordingClip(firstClipIndex, { autoplay: false, seekMs: 0, forceScroll: false });
+      audio?.pause();
+    } else {
+      resetSessionPlaybackState();
+      state.sessionPlaybackPreviewMs = 0;
+    }
+  }
+
+  renderRecordingReview();
+  updatePlaybackHighlight();
 }
 
 async function toggleReviewAudioPlayback() {
@@ -3078,6 +3111,10 @@ function renderRecordingReview() {
     elements.reviewPlayPauseButton.setAttribute('aria-label', playing ? 'Pause whole session audio' : 'Play whole session audio');
     elements.reviewPlayPauseButton.title = playing ? 'Pause whole session audio' : 'Play whole session audio';
   }
+  if (elements.reviewStopButton) {
+    const canStop = Boolean(count) && (playing || state.reviewAudioFloatingActive || (currentPlaybackMs || 0) > 0 || currentIndex > 0);
+    elements.reviewStopButton.disabled = !canStop;
+  }
   if (elements.reviewAudioTransport) {
     elements.reviewAudioTransport.classList.toggle('hidden', !count);
     elements.reviewAudioTransport.classList.toggle('review-audio-transport--floating', floatingPlayback && count > 0);
@@ -3098,6 +3135,7 @@ function renderRecordingReview() {
     elements.reviewProgressInput.max = String(durationMs || 0);
     elements.reviewProgressInput.value = String(currentPlaybackMs || 0);
     elements.reviewProgressInput.disabled = !count || durationMs <= 0;
+    setReviewProgressVisual(currentPlaybackMs || 0, durationMs || 0);
   }
 
   const canSeekBackward30 = count && (currentPlaybackMs || 0) > 0;
@@ -5703,6 +5741,10 @@ function bindNavigation() {
 
     const navButton = event.target.closest('[data-route]');
     if (navButton) {
+      if (navButton.dataset.route === 'setup' && state.currentSession && state.currentSession.status !== 'ended') {
+        await createFreshSessionFromLive();
+        return;
+      }
       setRoute(navButton.dataset.route);
       return;
     }
@@ -5770,25 +5812,38 @@ function bindEvents() {
   });
   window.addEventListener('resize', applyTranscriptView);
   elements.reviewPlayPauseButton?.addEventListener('click', toggleReviewAudioPlayback);
+  elements.reviewStopButton?.addEventListener('click', () => {
+    stopReviewAudio({ resetToStart: true }).catch((error) => console.warn('Unable to stop whole-session playback', error));
+  });
   elements.reviewProgressInput?.addEventListener('input', (event) => {
     const nextValue = Number(event.target.value || 0);
     setSessionPlaybackPreviewMs(nextValue);
   });
   elements.reviewProgressInput?.addEventListener('change', () => {
     const nextValue = Number(elements.reviewProgressInput?.value || 0);
-    seekSessionAudioToMs(nextValue, { forceScroll: true }).catch((error) => console.warn('Unable to seek whole-session playback', error));
+    seekSessionAudioToMs(nextValue, { autoplay: true, forceScroll: true }).catch((error) =>
+      console.warn('Unable to seek whole-session playback', error)
+    );
   });
   elements.reviewJumpBack5mButton?.addEventListener('click', () => {
-    seekSessionAudioByDeltaMs(-5 * 60 * 1000).catch((error) => console.warn('Unable to seek backward 5 minutes', error));
+    seekSessionAudioByDeltaMs(-5 * 60 * 1000, { autoplay: true }).catch((error) =>
+      console.warn('Unable to seek backward 5 minutes', error)
+    );
   });
   elements.reviewJumpBack30Button?.addEventListener('click', () => {
-    seekSessionAudioByDeltaMs(-30 * 1000).catch((error) => console.warn('Unable to seek backward 30 seconds', error));
+    seekSessionAudioByDeltaMs(-30 * 1000, { autoplay: true }).catch((error) =>
+      console.warn('Unable to seek backward 30 seconds', error)
+    );
   });
   elements.reviewJumpForward30Button?.addEventListener('click', () => {
-    seekSessionAudioByDeltaMs(30 * 1000).catch((error) => console.warn('Unable to seek forward 30 seconds', error));
+    seekSessionAudioByDeltaMs(30 * 1000, { autoplay: true }).catch((error) =>
+      console.warn('Unable to seek forward 30 seconds', error)
+    );
   });
   elements.reviewJumpForward5mButton?.addEventListener('click', () => {
-    seekSessionAudioByDeltaMs(5 * 60 * 1000).catch((error) => console.warn('Unable to seek forward 5 minutes', error));
+    seekSessionAudioByDeltaMs(5 * 60 * 1000, { autoplay: true }).catch((error) =>
+      console.warn('Unable to seek forward 5 minutes', error)
+    );
   });
   elements.reviewAudio?.addEventListener('timeupdate', () => {
     updatePlaybackHighlight({ shouldScroll: true });

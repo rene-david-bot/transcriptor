@@ -29,7 +29,7 @@
         </div>
 
         <nav class="sidebar__nav" aria-label="Primary">
-          <button type="button" class="nav-link" data-route="setup">Start / Setup</button>
+          <button type="button" class="nav-link" data-route="setup">New / Setup</button>
           <button type="button" class="nav-link" data-route="live">Current Session</button>
           <button type="button" class="nav-link" data-action="new-session">New Session</button>
           <button type="button" class="nav-link" data-route="history">Previous Sessions / History</button>
@@ -374,6 +374,13 @@
                             aria-label="Play whole session audio"
                             title="Play whole session audio"
                           >▶</button>
+                          <button
+                            type="button"
+                            class="button button--ghost button--small review-audio-transport__stop-button"
+                            id="reviewStopButton"
+                            aria-label="Stop whole session audio"
+                            title="Stop whole session audio"
+                          >Stop</button>
                           <button type="button" class="button button--ghost button--small" id="reviewJumpBack5mButton">-5m</button>
                           <button type="button" class="button button--ghost button--small" id="reviewJumpBack30Button">-30s</button>
                           <button type="button" class="button button--ghost button--small" id="reviewJumpForward30Button">+30s</button>
@@ -579,6 +586,6 @@
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-    <script type="module" src="./js/app.js?v=20260508-timing-summary-stop-fix"></script>
+    <script type="module" src="./js/app.js?v=20260508-player-session-batch-fix"></script>
   </body>
 </html>

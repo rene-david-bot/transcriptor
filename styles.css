@@ -2106,7 +2106,7 @@ strong {
 
 .review-audio-transport__controls {
   display: grid;
-  grid-template-columns: auto repeat(4, minmax(0, 1fr));
+  grid-template-columns: auto auto repeat(4, minmax(0, 1fr));
   gap: 0.6rem;
 }
 
@@ -2120,6 +2120,12 @@ strong {
   font-size: 1rem;
   font-weight: 800;
   font-variant-numeric: tabular-nums;
+}
+
+.review-audio-transport__stop-button {
+  min-width: 4rem;
+  padding-inline: 0.9rem;
+  font-weight: 700;
 }
 
 .review-audio-transport__play-toggle[data-state='pause'] {
@@ -2174,9 +2180,65 @@ strong {
 }
 
 .review-audio-transport__slider {
+  --range-progress: 0%;
   width: 100%;
   margin: 0;
-  accent-color: var(--primary-soft);
+  padding: 0;
+  border: 0;
+  height: 1.2rem;
+  background: transparent;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+.review-audio-transport__slider::-webkit-slider-runnable-track {
+  height: 0.42rem;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    var(--primary-soft) 0%,
+    var(--primary-soft) var(--range-progress),
+    rgba(148, 163, 184, 0.28) var(--range-progress),
+    rgba(148, 163, 184, 0.28) 100%
+  );
+}
+
+.review-audio-transport__slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 1rem;
+  height: 1rem;
+  margin-top: -0.29rem;
+  border: 2px solid var(--primary-soft);
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 2px 10px rgba(2, 6, 23, 0.32);
+}
+
+.review-audio-transport__slider::-moz-range-track {
+  height: 0.42rem;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.28);
+}
+
+.review-audio-transport__slider::-moz-range-progress {
+  height: 0.42rem;
+  border-radius: 999px;
+  background: var(--primary-soft);
+}
+
+.review-audio-transport__slider::-moz-range-thumb {
+  width: 1rem;
+  height: 1rem;
+  border: 2px solid var(--primary-soft);
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 2px 10px rgba(2, 6, 23, 0.32);
+}
+
+.review-audio-transport__slider:disabled {
+  opacity: 0.58;
 }
 
 .review-audio-transport--floating {
