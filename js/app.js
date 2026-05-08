@@ -294,6 +294,8 @@ const elements = {
   speakerChangeDock: $('#speakerChangeDock'),
   speakerChangeTimer: $('#speakerChangeTimer'),
   speakerChangeTimerState: $('#speakerChangeTimerState'),
+  speakerChangeCurrentLabel: $('#speakerChangeCurrentLabel'),
+  speakerChangePendingHint: $('#speakerChangePendingHint'),
   speakerChangeButton: $('#speakerChangeButton'),
   speakerChangePauseButton: $('#speakerChangePauseButton'),
   speakerChangeResetButton: $('#speakerChangeResetButton'),
@@ -3613,24 +3615,37 @@ function renderManualSpeakerControls() {
   const currentLabel = state.manualSpeakerCurrentLabel || options[0] || 'Speaker A';
   const timerRunning = isManualSpeakerTimerRunning();
   const manualRows = buildManualSpeakerRowsForDisplay();
+  const activeLabel = normalizeManualSpeakerName(state.manualSpeakerActiveLabel || currentLabel || options[0] || 'Speaker A');
+  const hasPendingSpeakerChange = Boolean(timerRunning && normalizeManualSpeakerName(currentLabel) && normalizeManualSpeakerName(currentLabel) !== activeLabel);
 
   state.manualSpeakerCurrentLabel = currentLabel;
   elements.speakerChangeDock?.setAttribute('data-manual-speaker-state', timerRunning ? 'running' : 'paused');
   elements.speakerChangeTimer.textContent = formatManualStopwatchTime(getManualSpeakerElapsedMs());
   if (elements.speakerChangeTimerState) {
     elements.speakerChangeTimerState.textContent = timerRunning
-      ? `${currentLabel} live`
+      ? `${activeLabel} live`
       : state.currentSession?.status === 'ended'
         ? 'Session ended'
         : state.currentSession?.status === 'active' || state.runtimeStatus === 'stopped' || state.currentSession?.status === 'paused'
           ? 'Stopped'
           : 'Ready';
   }
+  if (elements.speakerChangeCurrentLabel) {
+    elements.speakerChangeCurrentLabel.textContent = hasPendingSpeakerChange ? 'Next speaker on Mark' : 'Current speaker';
+  }
   if (elements.speakerChangeCurrentSelect) {
     elements.speakerChangeCurrentSelect.innerHTML = options
       .map((label) => `<option value="${escapeHtml(label)}" ${label === currentLabel ? 'selected' : ''}>${escapeHtml(label)}</option>`)
       .join('');
+    elements.speakerChangeCurrentSelect.setAttribute('aria-label', hasPendingSpeakerChange ? 'Next speaker on Mark' : 'Current speaker');
     elements.speakerChangeCurrentSelect.disabled = !state.currentSession || state.currentSession.status === 'ended';
+  }
+  if (elements.speakerChangePendingHint) {
+    elements.speakerChangePendingHint.textContent = hasPendingSpeakerChange
+      ? `Live now: ${activeLabel}. Mark will switch to ${currentLabel}.`
+      : timerRunning
+        ? ''
+        : 'Choose the speaker you want active when timing resumes.';
   }
   if (elements.speakerChangeCustomInput) {
     if (document.activeElement !== elements.speakerChangeCustomInput || elements.speakerChangeCustomInput.value !== state.manualSpeakerCustomNameDraft) {

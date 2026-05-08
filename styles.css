@@ -2318,6 +2318,12 @@ body[data-review-audio-floating='true'][data-route='live'] .transcript-list {
   width: 100%;
 }
 
+.speaker-change-dock__speaker-note {
+  min-height: 1.1rem;
+  color: var(--text-soft);
+  font-size: 0.78rem;
+}
+
 .speaker-change-dock__speaker-add-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
