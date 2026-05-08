@@ -1389,7 +1389,7 @@ function buildSpeakerSummary(segments) {
 
   const slotRollup = buildManualSpeakerSlotRollup(state.currentSession, segments);
   slotRollup.speakers.forEach((speaker) => {
-    const key = getSpeakerSummaryKey('', speaker.label);
+    const key = getSpeakerSummaryKeyForManualLabel(speaker.label, state.currentSession);
     const current = summaryMap.get(key) || {
       key,
       label: speaker.label,
@@ -1474,7 +1474,7 @@ function buildManualSpeakerSlotRollup(session = state.currentSession, segments =
   const speakerMap = new Map();
 
   slots.forEach((slot) => {
-    const key = normalizeTranscriptSpeakerKey(slot.label || 'Speaker');
+    const key = getSpeakerSummaryKeyForManualLabel(slot.label || 'Speaker', session);
     const current = speakerMap.get(key) || {
       key,
       label: slot.label || 'Speaker',
@@ -1596,6 +1596,13 @@ function getSpeakerSummaryKey(rawLabel = '', label = '') {
     return normalizedLabel;
   }
   return normalizeTranscriptSpeakerKey(rawLabel || label || '');
+}
+
+function getSpeakerSummaryKeyForManualLabel(label, session = state.currentSession) {
+  const normalizedLabel = String(label || '').trim();
+  if (!normalizedLabel) return getSpeakerSummaryKey('', label);
+  const rawLabel = getCanonicalRawSpeakerLabelForManualLabel(normalizedLabel, session, new Set());
+  return getSpeakerSummaryKey(rawLabel, normalizedLabel);
 }
 
 function getSpeakerSummaryKeyForSegment(segment) {
@@ -1805,7 +1812,7 @@ function buildSpeakerTimingSummaryRows(slotRollup, summary = []) {
 
   const rows = manualSlots
     .map((slot) => {
-      const speakerKey = getSpeakerSummaryKey('', slot.label || 'Speaker');
+      const speakerKey = getSpeakerSummaryKeyForManualLabel(slot.label || 'Speaker');
       manualKeys.add(speakerKey);
       const nextPart = (speakerPartIndex.get(speakerKey) || 0) + 1;
       speakerPartIndex.set(speakerKey, nextPart);
@@ -1846,6 +1853,9 @@ function renderSpeakerTimingSummary(slotRollup, summary, { final = false } = {})
   const rows = buildSpeakerTimingSummaryRows(slotRollup, summary);
   if (!rows.length) return '';
 
+  const totalAutoMs = rows.reduce((total, row) => total + Math.max(0, Number(row.autoMs || 0)), 0);
+  const renderedSpeakerKeys = new Set();
+
   return `
     <div class="speaker-timing-summary">
       <div class="speaker-timing-summary__totals">
@@ -1858,38 +1868,50 @@ function renderSpeakerTimingSummary(slotRollup, summary, { final = false } = {})
           <strong>${formatDuration(slotRollup?.totalSpeechMs || 0)}</strong>
         </div>
       </div>
-      <div class="speaker-timing-summary__table" role="table" aria-label="Speaker timing summary">
-        <div class="speaker-timing-summary__head" role="row">
-          <span role="columnheader">Speaker</span>
-          <span role="columnheader">Manual</span>
-          <span role="columnheader">Auto</span>
-          <span role="columnheader">Total</span>
+      <div class="speaker-timing-summary__table-wrap">
+        <div class="speaker-timing-summary__table" role="table" aria-label="Speaker timing summary">
+          <div class="speaker-timing-summary__head" role="row">
+            <span role="columnheader">Speaker</span>
+            <span role="columnheader">Part</span>
+            <span role="columnheader">Manual</span>
+            <span role="columnheader">Auto</span>
+            <span role="columnheader">Total</span>
+          </div>
+          ${rows
+            .map((row) => {
+              const firstRowForSpeaker = !renderedSpeakerKeys.has(row.speakerKey);
+              renderedSpeakerKeys.add(row.speakerKey);
+              return `
+                <div class="speaker-timing-summary__row" role="row">
+                  <button
+                    class="speaker-timing-summary__speaker"
+                    type="button"
+                    data-speaker-action="play-slot"
+                    data-start-ms="${Number(row.startMs || 0)}"
+                    aria-label="Play ${escapeHtml(row.label)} ${escapeHtml(row.note || 'segment')}"
+                  >
+                    <strong>${escapeHtml(row.label)}</strong>
+                  </button>
+                  <span class="speaker-timing-summary__part" role="cell">${escapeHtml(row.note || '')}</span>
+                  <span role="cell">${formatDuration(row.manualMs || 0)}</span>
+                  <span role="cell">${formatDuration(row.autoMs || 0)}</span>
+                  <span role="cell">${firstRowForSpeaker ? formatDuration(row.totalMs || 0) : '—'}</span>
+                </div>`;
+            })
+            .join('')}
+          <div class="speaker-timing-summary__foot" role="row">
+            <strong role="cell">All speakers</strong>
+            <span role="cell">Σ</span>
+            <span role="cell">${formatDuration(slotRollup?.totalWindowMs || 0)}</span>
+            <span role="cell">${formatDuration(totalAutoMs)}</span>
+            <span role="cell">${formatDuration(slotRollup?.totalWindowMs || 0)}</span>
+          </div>
         </div>
-        ${rows
-          .map(
-            (row) => `
-              <div class="speaker-timing-summary__row" role="row">
-                <button
-                  class="speaker-timing-summary__speaker"
-                  type="button"
-                  data-speaker-action="play-slot"
-                  data-start-ms="${Number(row.startMs || 0)}"
-                  aria-label="Play ${escapeHtml(row.label)} ${escapeHtml(row.note || 'segment')}"
-                >
-                  <strong>${escapeHtml(row.label)}</strong>
-                  <small>${escapeHtml(row.note || '')}</small>
-                </button>
-                <span role="cell" data-label="Manual">${formatDuration(row.manualMs || 0)}</span>
-                <span role="cell" data-label="Auto">${formatDuration(row.autoMs || 0)}</span>
-                <span role="cell" data-label="Total">${formatDuration(row.totalMs || 0)}</span>
-              </div>`
-          )
-          .join('')}
       </div>
       <small class="speaker-timing-summary__note">${escapeHtml(
         final
-          ? 'Manual shows the full segment you marked. Auto shows transcript speech found inside that segment after the final pass. Total repeats the summed manual stopwatch time across all marked parts for that speaker.'
-          : 'Manual shows the full segment you marked. Auto shows the transcript speech found inside that segment so far. Total repeats the summed manual stopwatch time across all marked parts for that speaker.'
+          ? 'Manual shows the full segment you marked. Auto shows transcript speech found inside that segment after the final pass. Total shows that speaker’s summed manual stopwatch time on the first row only, and the footer verifies the overall sum.'
+          : 'Manual shows the full segment you marked. Auto shows the transcript speech found inside that segment so far. Total shows that speaker’s summed manual stopwatch time on the first row only, and the footer verifies the overall sum.'
       )}</small>
     </div>
   `;
