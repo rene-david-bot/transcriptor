@@ -3909,13 +3909,47 @@ async function applyDiarizedRecordingPass(
   return applied;
 }
 
+function getRecordingDiarizeFilename(recording) {
+  const extension = recording?.mimeType?.includes('mp4') ? 'm4a' : recording?.mimeType?.includes('ogg') ? 'ogg' : 'webm';
+  return `session-recording-${recording?.startMs}.${extension}`;
+}
+
+async function normalizeRecordingClipForFinalSpeakerPass(recording) {
+  if (!recording?.blob) {
+    return {
+      audioBlob: null,
+      filename: getRecordingDiarizeFilename(recording),
+      normalized: false,
+    };
+  }
+
+  try {
+    const wavBlob = await mergeRecordingBatchToWav([recording]);
+    if (wavBlob?.size) {
+      return {
+        audioBlob: wavBlob,
+        filename: `session-recording-${recording.startMs}.wav`,
+        normalized: true,
+      };
+    }
+  } catch (error) {
+    console.warn('Unable to normalize saved speaker clip to WAV before diarization', error);
+  }
+
+  return {
+    audioBlob: recording.blob,
+    filename: getRecordingDiarizeFilename(recording),
+    normalized: false,
+  };
+}
+
 async function diarizeRecordingClip(recording, session = state.currentSession) {
   if (!recording?.blob || !session) return 0;
-  const extension = recording.mimeType?.includes('mp4') ? 'm4a' : recording.mimeType?.includes('ogg') ? 'ogg' : 'webm';
+  const prepared = await normalizeRecordingClipForFinalSpeakerPass(recording);
   return applyDiarizedRecordingPass(
     {
-      audioBlob: recording.blob,
-      filename: `session-recording-${recording.startMs}.${extension}`,
+      audioBlob: prepared.audioBlob,
+      filename: prepared.filename,
       chunkStartMs: Number(recording.startMs || 0),
       chunkEndMs: Number(recording.endMs || recording.startMs || 0),
       recordings: [recording],
