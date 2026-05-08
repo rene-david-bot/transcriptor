@@ -196,6 +196,7 @@ const state = {
   manualSpeakerElapsedMs: 0,
   manualSpeakerPaused: true,
   manualSpeakerCurrentLabel: '',
+  manualSpeakerPendingChangeAtMs: null,
   manualSpeakerCustomNameDraft: '',
   manualSpeakerEditingEventId: '',
   sessionPersistTimer: null,
@@ -1282,6 +1283,81 @@ function normalizeManualSpeakerName(value) {
     .trim();
 }
 
+function getResolvedManualSpeakerSelection(session = state.currentSession, { preferDom = true } = {}) {
+  const domValue = preferDom ? normalizeManualSpeakerName(elements.speakerChangeCurrentSelect?.value || '') : '';
+  const stateValue = normalizeManualSpeakerName(state.manualSpeakerCurrentLabel || session?.manualSpeakerCurrentLabel || '');
+  const fallbackValue = getSpeakerOptionsForManualControls(session)[0] || 'Speaker A';
+  const rawValue = domValue || stateValue || fallbackValue;
+  return findExistingManualSpeakerOption(rawValue, session) || rawValue;
+}
+
+function syncManualSpeakerSelectionFromUi(session = state.currentSession) {
+  const nextLabel = getResolvedManualSpeakerSelection(session);
+  state.manualSpeakerCurrentLabel = nextLabel;
+  if (session) {
+    session.manualSpeakerCurrentLabel = nextLabel;
+  }
+  return nextLabel;
+}
+
+function setPendingManualSpeakerChangeAtCurrentPosition(session = state.currentSession) {
+  if (!session || session.status !== 'active' || state.manualSpeakerPaused) {
+    state.manualSpeakerPendingChangeAtMs = null;
+    if (session) {
+      session.manualSpeakerPendingChangeAtMs = null;
+    }
+    return null;
+  }
+
+  const nextAtMs = Math.max(0, getManualSpeakerSessionPositionMs(session));
+  state.manualSpeakerPendingChangeAtMs = nextAtMs;
+  if (session) {
+    session.manualSpeakerPendingChangeAtMs = nextAtMs;
+  }
+  return nextAtMs;
+}
+
+function clearPendingManualSpeakerChange(session = state.currentSession) {
+  state.manualSpeakerPendingChangeAtMs = null;
+  if (session) {
+    session.manualSpeakerPendingChangeAtMs = null;
+  }
+}
+
+function maybeCommitPendingManualSpeakerChange({ atMs = null } = {}) {
+  if (!state.currentSession || !state.manualSpeakerEvents.length) {
+    clearPendingManualSpeakerChange();
+    return false;
+  }
+
+  const speakerLabel = syncManualSpeakerSelectionFromUi();
+  const previousEvent = state.manualSpeakerEvents[state.manualSpeakerEvents.length - 1];
+  if (!speakerLabel || !previousEvent || previousEvent.speakerLabel === speakerLabel) {
+    clearPendingManualSpeakerChange();
+    return false;
+  }
+
+  const currentPositionMs = Math.max(0, getManualSpeakerSessionPositionMs());
+  const rawAtMs = atMs === null || atMs === undefined ? state.manualSpeakerPendingChangeAtMs : atMs;
+  const normalizedAtMs = Math.max(Number(previousEvent.atMs || 0), Math.min(currentPositionMs, Math.round(Number(rawAtMs || currentPositionMs))));
+
+  if (normalizedAtMs <= Number(previousEvent.atMs || 0) + 20) {
+    clearPendingManualSpeakerChange();
+    return false;
+  }
+
+  state.manualSpeakerEvents = [
+    ...state.manualSpeakerEvents,
+    {
+      id: crypto.randomUUID(),
+      atMs: normalizedAtMs,
+      speakerLabel,
+    },
+  ].sort((a, b) => (a.atMs || 0) - (b.atMs || 0));
+  clearPendingManualSpeakerChange();
+  return true;
+}
+
 function findExistingManualSpeakerOption(value, session = state.currentSession) {
   const normalizedValue = normalizeManualSpeakerName(value).toLocaleLowerCase();
   if (!normalizedValue) return '';
@@ -1321,6 +1397,12 @@ async function useManualSpeakerCustomName(rawValue = state.manualSpeakerCustomNa
   state.manualSpeakerCurrentLabel = resolvedLabel;
   state.manualSpeakerCustomNameDraft = '';
 
+  if (state.currentSession?.status === 'active' && !state.manualSpeakerPaused) {
+    setPendingManualSpeakerChangeAtCurrentPosition();
+  } else {
+    clearPendingManualSpeakerChange();
+  }
+
   if (state.currentSession) {
     syncManualSpeakerStateToSession();
     await persistCurrentSessionNow();
@@ -1332,12 +1414,7 @@ async function useManualSpeakerCustomName(rawValue = state.manualSpeakerCustomNa
 }
 
 function getManualSpeakerLabelForSegment(segment, session = state.currentSession) {
-  const events =
-    session?.id && state.currentSession?.id === session.id
-      ? state.manualSpeakerEvents
-      : Array.isArray(session?.manualSpeakerEvents)
-        ? session.manualSpeakerEvents
-        : state.manualSpeakerEvents;
+  const events = getManualSpeakerEventsForSession(session);
   if (!events.length || !segment) return '';
   const segmentStartMs = Number(segment.startMs || 0);
   let activeEvent = null;
@@ -3594,6 +3671,7 @@ async function createSession({ sourceLanguage, targetLanguage, glossary, speaker
     manualSpeakerElapsedMs: 0,
     manualSpeakerPaused: true,
     manualSpeakerCurrentLabel: '',
+    manualSpeakerPendingChangeAtMs: null,
     speakerFinalizedAt: '',
   };
 
@@ -3619,6 +3697,7 @@ async function loadSession(sessionId) {
     : [];
   state.manualSpeakerBaseOffsetMs = Number(session.manualSpeakerBaseOffsetMs || 0);
   state.manualSpeakerCurrentLabel = String(session.manualSpeakerCurrentLabel || '').trim();
+  state.manualSpeakerPendingChangeAtMs = session.manualSpeakerPendingChangeAtMs === null ? null : Number(session.manualSpeakerPendingChangeAtMs || 0);
   state.manualSpeakerCustomNameDraft = '';
   state.manualSpeakerElapsedMs = Math.max(0, Number(session.manualSpeakerElapsedMs || 0));
   state.manualSpeakerPaused = session.manualSpeakerPaused !== false;
@@ -4712,6 +4791,7 @@ function syncManualSpeakerStateToSession(session = state.currentSession) {
   session.manualSpeakerBaseOffsetMs = Math.max(0, Number(state.manualSpeakerBaseOffsetMs || 0));
   session.manualSpeakerElapsedMs = Math.max(0, Number(state.manualSpeakerElapsedMs || 0));
   session.manualSpeakerPaused = Boolean(state.manualSpeakerPaused);
+  session.manualSpeakerPendingChangeAtMs = state.manualSpeakerPendingChangeAtMs === null ? null : Math.max(0, Number(state.manualSpeakerPendingChangeAtMs || 0));
 }
 
 async function persistManualSpeakerStateNow() {
@@ -4927,6 +5007,7 @@ async function handleStartFromSetup(event) {
   state.manualSpeakerBaseOffsetMs = 0;
   state.manualSpeakerElapsedMs = 0;
   state.manualSpeakerPaused = true;
+  state.manualSpeakerPendingChangeAtMs = null;
   state.speakerFinalizeProgress = null;
   state.manualSpeakerCurrentLabel = getSpeakerOptionsForManualControls(session)[0] || 'Speaker A';
   state.manualSpeakerCustomNameDraft = '';
@@ -5108,6 +5189,7 @@ async function pauseListening() {
   state.client = null;
   state.currentSession.status = 'paused';
   state.currentSession.runtimeStatus = 'paused';
+  await applyManualSpeakerEventsToCurrentSession();
   await persistCurrentSessionNow();
   await syncLastActiveSession();
   renderCurrentView();
@@ -5129,6 +5211,7 @@ async function stopListening() {
   if (state.currentSession) {
     state.currentSession.status = 'paused';
     state.currentSession.runtimeStatus = 'stopped';
+    await applyManualSpeakerEventsToCurrentSession();
     await persistCurrentSessionNow();
     await syncLastActiveSession();
     renderCurrentView();
@@ -5159,6 +5242,7 @@ async function endCurrentSession() {
   state.currentSession.updatedAt = nowIso();
   state.currentSession.draftSource = '';
   state.currentSession.draftTranslation = '';
+  await applyManualSpeakerEventsToCurrentSession();
   await persistCurrentSessionNow();
   await syncLastActiveSession();
   await refreshSessions();
@@ -5188,6 +5272,8 @@ async function pauseManualSpeakerTimer({ persist = true } = {}) {
     return;
   }
 
+  syncManualSpeakerSelectionFromUi();
+  maybeCommitPendingManualSpeakerChange();
   state.manualSpeakerElapsedMs = getManualSpeakerElapsedMs();
   state.manualSpeakerPaused = true;
   syncManualSpeakerStateToSession();
@@ -5205,8 +5291,10 @@ async function resumeManualSpeakerTimer({ persist = true, seedInitialSpeaker = t
     return;
   }
 
+  syncManualSpeakerSelectionFromUi();
   state.manualSpeakerPaused = false;
   state.manualSpeakerBaseOffsetMs = Math.max(0, getManualSpeakerSessionPositionMs() - Number(state.manualSpeakerElapsedMs || 0));
+  clearPendingManualSpeakerChange();
   syncManualSpeakerStateToSession();
 
   if (seedInitialSpeaker && !state.manualSpeakerEvents.length) {
@@ -5228,7 +5316,7 @@ async function markManualSpeakerChange({ atMs = getManualSpeakerSessionPositionM
   }
 
   const normalizedAtMs = Math.max(0, Math.round(Number(atMs || 0)));
-  const speakerLabel = String(state.manualSpeakerCurrentLabel || getSpeakerOptionsForManualControls()[0] || 'Speaker A').trim();
+  const speakerLabel = syncManualSpeakerSelectionFromUi();
   const previousEvent = state.manualSpeakerEvents[state.manualSpeakerEvents.length - 1];
 
   if (
@@ -5246,6 +5334,7 @@ async function markManualSpeakerChange({ atMs = getManualSpeakerSessionPositionM
     speakerLabel,
   };
   state.manualSpeakerEvents = [...state.manualSpeakerEvents, nextEvent].sort((a, b) => (a.atMs || 0) - (b.atMs || 0));
+  clearPendingManualSpeakerChange();
   await applyManualSpeakerEventsToCurrentSession();
   renderManualSpeakerControls();
 }
@@ -5254,6 +5343,7 @@ async function resetManualSpeakerChanges() {
   state.manualSpeakerEvents = [];
   state.manualSpeakerBaseOffsetMs = getManualSpeakerSessionPositionMs();
   state.manualSpeakerElapsedMs = 0;
+  clearPendingManualSpeakerChange();
   state.manualSpeakerEditingEventId = '';
   await applyManualSpeakerEventsToCurrentSession();
   renderManualSpeakerControls();
@@ -6048,6 +6138,11 @@ function bindEvents() {
   elements.speakerChangeCurrentSelect?.addEventListener('change', async () => {
     state.manualSpeakerCurrentLabel = elements.speakerChangeCurrentSelect.value;
     state.manualSpeakerCustomNameDraft = '';
+    if (state.currentSession?.status === 'active' && !state.manualSpeakerPaused) {
+      setPendingManualSpeakerChangeAtCurrentPosition();
+    } else {
+      clearPendingManualSpeakerChange();
+    }
     if (state.currentSession) {
       syncManualSpeakerStateToSession();
       await persistCurrentSessionNow();
@@ -6385,6 +6480,9 @@ function setDebugCurrentSession(partial = {}) {
   if (Object.prototype.hasOwnProperty.call(partial || {}, 'manualSpeakerCurrentLabel')) {
     state.manualSpeakerCurrentLabel = String(partial.manualSpeakerCurrentLabel || '').trim();
   }
+  if (Object.prototype.hasOwnProperty.call(partial || {}, 'manualSpeakerPendingChangeAtMs')) {
+    state.manualSpeakerPendingChangeAtMs = partial.manualSpeakerPendingChangeAtMs === null ? null : Number(partial.manualSpeakerPendingChangeAtMs || 0);
+  }
   renderCurrentView();
   return buildDebugSnapshot();
 }
@@ -6472,6 +6570,7 @@ async function createDebugSession({
     manualSpeakerElapsedMs: 0,
     manualSpeakerPaused: true,
     manualSpeakerCurrentLabel: '',
+    manualSpeakerPendingChangeAtMs: null,
     speakerFinalizedAt: '',
   };
   state.currentSession = session;
@@ -6482,6 +6581,7 @@ async function createDebugSession({
   state.manualSpeakerBaseOffsetMs = 0;
   state.manualSpeakerElapsedMs = 0;
   state.manualSpeakerPaused = true;
+  state.manualSpeakerPendingChangeAtMs = null;
   state.speakerFinalizeProgress = null;
   state.manualSpeakerCurrentLabel = getSpeakerOptionsForManualControls(session)[0] || 'Speaker A';
   state.manualSpeakerCustomNameDraft = '';
