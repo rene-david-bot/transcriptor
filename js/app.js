@@ -114,6 +114,8 @@ const SPEAKER_INITIAL_CHUNK_MS = 8000;
 const SPEAKER_MIN_CHUNK_BYTES = 4000;
 const SPEAKER_MATCH_MARGIN_MS = 3200;
 const SESSION_RECORDING_CHUNK_MS = 60000;
+const SPEAKER_FINALIZE_RETRY_DELAY_MS = 1200;
+const SPEAKER_FINALIZE_MAX_ATTEMPTS = 2;
 
 const state = {
   route: 'setup',
@@ -160,6 +162,7 @@ const state = {
   speakerTrackingSessionId: null,
   speakerTrackingStatus: 'Speaker detection is idle.',
   speakerFinalizeInProgress: false,
+  speakerFinalizeProgress: null,
   speakerSummaryExpandedKeys: new Set(),
   sessionRecordingSupported: typeof window !== 'undefined' && typeof MediaRecorder !== 'undefined',
   sessionRecorder: null,
@@ -341,6 +344,10 @@ function formatDurationShort(ms = 0) {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return `${pad(minutes)}:${pad(seconds)}`;
+}
+
+function wait(ms = 0) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 function recordingTimeToLocalOffset(recording, absoluteMs) {
@@ -1289,6 +1296,86 @@ function renderSpeakerSummaryCards(summary) {
   ].join('');
 }
 
+function hasRecordingBlob(recording) {
+  return Boolean(recording?.blob && Number(recording.blob.size || 0) > 0);
+}
+
+function getPendingRecordingPasses(sessionId = state.currentSession?.id) {
+  if (!sessionId) return [];
+  return state.sessionRecordings.filter(
+    (recording) => recording.sessionId === sessionId && !recording.diarizedAt && hasRecordingBlob(recording)
+  );
+}
+
+function setSpeakerFinalizeProgress(progress = null) {
+  state.speakerFinalizeProgress = progress
+    ? {
+        ...(state.speakerFinalizeProgress || {}),
+        ...progress,
+      }
+    : null;
+}
+
+function buildSpeakerProcessingCardState({ pendingSegments = 0, pendingRecordingPasses = 0, queueBusy = false } = {}) {
+  if (state.speakerFinalizeInProgress) {
+    const progress = state.speakerFinalizeProgress || {};
+    const total = Math.max(0, Number(progress.total || pendingRecordingPasses || 0));
+    const completed = Math.max(0, Number(progress.completed || 0));
+    const failed = Math.max(0, Number(progress.failed || 0));
+    const processed = Math.min(total || 0, completed + failed);
+    const currentIndex = total > 0 ? Math.min(total, Math.max(Number(progress.currentIndex || 0), processed || 1)) : 0;
+    const determinate = total > 0;
+    const ratio = determinate
+      ? Math.min(1, Math.max(processed / total, currentIndex ? ((currentIndex - 1) + 0.45) / total : 0))
+      : 0;
+    const retryCount = failed || 0;
+    const note = String(progress.note || '').trim() || 'This can take a moment after stopping the session.';
+    return {
+      title: 'Processing speaker timing',
+      meta: determinate
+        ? `${completed} of ${total} clip${total === 1 ? '' : 's'} done${retryCount ? `, ${retryCount} still queued` : ''}`
+        : 'Working through the queued speaker timing...',
+      note,
+      determinate,
+      ratio,
+    };
+  }
+
+  if (queueBusy) {
+    const activeChunks = Math.max(0, Number(state.speakerTrackingPendingChunks || 0)) + (state.speakerTrackingInFlight ? 1 : 0);
+    return {
+      title: 'Processing speaker timing',
+      meta: pendingSegments
+        ? `${pendingSegments} raw segment${pendingSegments === 1 ? '' : 's'} still being labeled`
+        : `${activeChunks} speaker chunk${activeChunks === 1 ? '' : 's'} in flight`,
+      note: 'The background summary can lag a little behind the live transcript.',
+      determinate: false,
+      ratio: 0,
+    };
+  }
+
+  return null;
+}
+
+function renderSpeakerProcessingCard(progress) {
+  if (!progress) return '';
+
+  const width = progress.determinate ? `${Math.max(6, Math.round(progress.ratio * 100))}%` : '42%';
+
+  return `
+    <div class="speaker-progress ${progress.determinate ? '' : 'speaker-progress--indeterminate'}" role="status" aria-live="polite">
+      <div class="speaker-progress__top">
+        <strong>${escapeHtml(progress.title)}</strong>
+        <span class="speaker-progress__meta">${escapeHtml(progress.meta || '')}</span>
+      </div>
+      <div class="speaker-progress__track" aria-hidden="true">
+        <span class="speaker-progress__fill" style="width: ${width}"></span>
+      </div>
+      ${progress.note ? `<small class="speaker-progress__note">${escapeHtml(progress.note)}</small>` : ''}
+    </div>
+  `;
+}
+
 function getPendingSpeakerSegmentCount(sessionId = state.currentSession?.id) {
   if (!sessionId) return 0;
   return state.currentSegments.filter((segment) => segment.sessionId === sessionId && segment.speakerStatus === 'pending').length;
@@ -1314,7 +1401,7 @@ function renderSpeakerFinalizeButton() {
   );
   const queueBusy = state.speakerTrackingPendingChunks > 0 || state.speakerTrackingInFlight;
   const pendingSegments = getPendingSpeakerSegmentCount(session?.id);
-  const pendingRecordingPasses = state.sessionRecordings.filter((recording) => recording.sessionId === session?.id && !recording.diarizedAt).length;
+  const pendingRecordingPasses = getPendingRecordingPasses(session?.id).length;
   const hasSummary = state.currentSegments.some((segment) => Boolean(getTranscriptSpeakerLabel(segment) || segment.speakerLabel));
   const canStartManually = canStartSpeakerTrackingManually(session) && !hasRecorder && !queueBusy && !pendingSegments;
   const canFinalize = Boolean(
@@ -1334,7 +1421,16 @@ function renderSpeakerFinalizeButton() {
   }
 
   if (state.speakerFinalizeInProgress) {
-    elements.finalizeSpeakerButton.textContent = hasRecorder || queueBusy || pendingSegments || pendingRecordingPasses ? 'Finalizing speaker timing…' : 'Starting speaker timing…';
+    const progress = state.speakerFinalizeProgress;
+    if (progress?.total > 0) {
+      const total = Math.max(1, Number(progress.total || 0));
+      const processed = Math.min(total, Number(progress.completed || 0) + Number(progress.failed || 0));
+      const current = Math.min(total, Math.max(Number(progress.currentIndex || 0), processed < total ? processed + 1 : processed, 1));
+      elements.finalizeSpeakerButton.textContent = `Finalizing speaker timing (${current}/${total})…`;
+    } else {
+      elements.finalizeSpeakerButton.textContent =
+        hasRecorder || queueBusy || pendingSegments || pendingRecordingPasses ? 'Finalizing speaker timing…' : 'Starting speaker timing…';
+    }
     return;
   }
 
@@ -1366,11 +1462,15 @@ function renderSpeakerInsights() {
 
   const session = state.currentSession;
   const pendingSegments = getPendingSpeakerSegmentCount(session?.id);
-  const pendingRecordingPasses = state.sessionRecordings.filter((recording) => recording.sessionId === session?.id && !recording.diarizedAt).length;
+  const pendingRecordingPasses = getPendingRecordingPasses(session?.id).length;
+  const queueBusy = state.speakerTrackingPendingChunks > 0 || state.speakerTrackingInFlight;
   const summary = buildSpeakerSummary(state.currentSegments);
   const sessionEnded = session?.status === 'ended';
   const stoppedSession = session && ['paused', 'ended'].includes(session.status);
   const canStartManually = canStartSpeakerTrackingManually(session);
+  const speakerProcessingCard = renderSpeakerProcessingCard(
+    buildSpeakerProcessingCardState({ pendingSegments, pendingRecordingPasses, queueBusy })
+  );
 
   if (!session) {
     elements.speakerStatusLine.textContent = 'Speaker timing will appear here during a live session.';
@@ -1388,7 +1488,9 @@ function renderSpeakerInsights() {
     return;
   }
 
-  if (pendingRecordingPasses) {
+  if (state.speakerFinalizeInProgress) {
+    elements.speakerStatusLine.textContent = state.speakerFinalizeProgress?.statusLine || state.speakerTrackingStatus;
+  } else if (pendingRecordingPasses) {
     elements.speakerStatusLine.textContent = `${state.speakerTrackingStatus} ${pendingRecordingPasses} saved recording clip${pendingRecordingPasses === 1 ? '' : 's'} ready for final speaker analysis.`;
   } else if (pendingSegments) {
     elements.speakerStatusLine.textContent = `${state.speakerTrackingStatus} ${pendingSegments} raw segment${pendingSegments === 1 ? '' : 's'} still processing.`;
@@ -1407,13 +1509,17 @@ function renderSpeakerInsights() {
   }
 
   if (!summary.length) {
-    elements.speakerSummary.innerHTML =
-      '<div class="note">Speaker timing runs quietly in the background and can lag a little behind the live text. Tap the button above to start it manually or force an explicit catch-up pass.</div>';
+    elements.speakerSummary.innerHTML = [
+      speakerProcessingCard,
+      '<div class="note">Speaker timing runs quietly in the background and can lag a little behind the live text. Tap the button above to start it manually or force an explicit catch-up pass.</div>',
+    ]
+      .filter(Boolean)
+      .join('');
     renderSpeakerFinalizeButton();
     return;
   }
 
-  elements.speakerSummary.innerHTML = renderSpeakerSummaryCards(summary);
+  elements.speakerSummary.innerHTML = [speakerProcessingCard, renderSpeakerSummaryCards(summary)].filter(Boolean).join('');
   renderSpeakerFinalizeButton();
 }
 
@@ -2453,6 +2559,7 @@ async function loadSession(sessionId) {
   state.currentSegments = await listSegmentsBySession(sessionId);
   state.sessionRecordings = await listRecordingsBySession(sessionId);
   state.speechActive = false;
+  state.speakerFinalizeProgress = null;
   clearLiveDraftCarry();
   state.manualSpeakerEvents = Array.isArray(session.manualSpeakerEvents) ? [...session.manualSpeakerEvents] : [];
   state.manualSpeakerCurrentLabel = String(session.manualSpeakerCurrentLabel || '').trim();
@@ -2596,6 +2703,34 @@ async function diarizeRecordingClip(recording, session = state.currentSession) {
     state.sessionRecordings = state.sessionRecordings.map((item) => (item.id === updatedRecording.id ? updatedRecording : item));
   }
   return applied;
+}
+
+async function diarizeRecordingClipWithRetry(recording, session = state.currentSession, { maxAttempts = SPEAKER_FINALIZE_MAX_ATTEMPTS, onRetry } = {}) {
+  let lastError = null;
+  const attempts = Math.max(1, Number(maxAttempts || 1));
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const applied = await diarizeRecordingClip(recording, session);
+      return {
+        ok: true,
+        applied,
+        attempts: attempt,
+      };
+    } catch (error) {
+      lastError = error;
+      if (attempt >= attempts) break;
+      onRetry?.(error, attempt + 1, attempts);
+      await wait(SPEAKER_FINALIZE_RETRY_DELAY_MS);
+    }
+  }
+
+  return {
+    ok: false,
+    applied: 0,
+    attempts,
+    error: lastError,
+  };
 }
 
 function stopSpeakerTracks(stream) {
@@ -2814,7 +2949,7 @@ async function finalizeSpeakerTiming() {
   );
   const hadQueuedWork = !isSpeakerAttributionIdle(sessionId);
   const recordings = state.sessionRecordings.length ? state.sessionRecordings : await refreshSessionRecordings(sessionId);
-  const pendingRecordingPasses = recordings.filter((recording) => !recording.diarizedAt && recording.blob?.size);
+  const pendingRecordingPasses = recordings.filter((recording) => !recording.diarizedAt && hasRecordingBlob(recording));
 
   if (!hasRecorder && !hadQueuedWork && !pendingRecordingPasses.length) {
     if (canStartSpeakerTrackingManually(state.currentSession)) {
@@ -2835,6 +2970,22 @@ async function finalizeSpeakerTiming() {
   }
 
   state.speakerFinalizeInProgress = true;
+  setSpeakerFinalizeProgress({
+    total: pendingRecordingPasses.length,
+    completed: 0,
+    failed: 0,
+    currentIndex: pendingRecordingPasses.length ? 1 : 0,
+    statusLine: pendingRecordingPasses.length
+      ? 'Finalizing speaker timing from the saved session recording...'
+      : hasRecorder
+        ? continueTracking
+          ? 'Capturing the current speaker chunk for an explicit catch-up pass...'
+          : 'Capturing the last speaker chunk...'
+        : 'Finishing queued speaker timing...',
+    note: pendingRecordingPasses.length
+      ? 'Working through the saved speaker clips now.'
+      : 'Working through the queued speaker timing now.',
+  });
   state.speakerTrackingStatus = pendingRecordingPasses.length
     ? 'Finalizing speaker timing from the saved session recording...'
     : hasRecorder
@@ -2852,8 +3003,65 @@ async function finalizeSpeakerTiming() {
 
     const refreshedRecordings = await refreshSessionRecordings(sessionId);
     const storedPasses = refreshedRecordings.filter((recording) => !recording.diarizedAt && recording.blob?.size);
-    for (const recording of storedPasses) {
-      await diarizeRecordingClip(recording, state.currentSession);
+    let completedPasses = 0;
+    let failedPasses = 0;
+
+    for (const [index, recording] of storedPasses.entries()) {
+      const totalPasses = storedPasses.length;
+      const clipRange = `${formatDurationShort(recording.startMs || 0)} to ${formatDurationShort(recording.endMs || recording.startMs || 0)}`;
+      setSpeakerFinalizeProgress({
+        total: totalPasses,
+        completed: completedPasses,
+        failed: failedPasses,
+        currentIndex: index + 1,
+        statusLine: `Analyzing saved speaker clip ${index + 1} of ${totalPasses}...`,
+        note: `Clip ${index + 1} of ${totalPasses} (${clipRange}).`,
+      });
+      state.speakerTrackingStatus = `Analyzing saved speaker clip ${index + 1} of ${totalPasses}...`;
+      renderSpeakerInsights();
+
+      const result = await diarizeRecordingClipWithRetry(recording, state.currentSession, {
+        onRetry: (error, nextAttempt, maxAttempts) => {
+          setSpeakerFinalizeProgress({
+            total: totalPasses,
+            completed: completedPasses,
+            failed: failedPasses,
+            currentIndex: index + 1,
+            statusLine: `Retrying saved speaker clip ${index + 1} of ${totalPasses}...`,
+            note: `Clip ${index + 1} of ${totalPasses} hit a temporary issue. Retrying ${nextAttempt}/${maxAttempts}...`,
+          });
+          state.speakerTrackingStatus = `Retrying saved speaker clip ${index + 1} of ${totalPasses}...`;
+          if (error?.message) {
+            console.warn('Retrying saved speaker clip after diarization error', error);
+          }
+          renderSpeakerInsights();
+        },
+      });
+
+      if (result.ok) {
+        completedPasses += 1;
+        setSpeakerFinalizeProgress({
+          total: totalPasses,
+          completed: completedPasses,
+          failed: failedPasses,
+          currentIndex: Math.min(totalPasses, index + 1),
+          statusLine: `Analyzing saved speaker clip ${index + 1} of ${totalPasses}...`,
+          note: `Finished clip ${index + 1} of ${totalPasses}.`,
+        });
+      } else {
+        failedPasses += 1;
+        console.warn('Saved speaker clip diarization failed', result.error);
+        setSpeakerFinalizeProgress({
+          total: totalPasses,
+          completed: completedPasses,
+          failed: failedPasses,
+          currentIndex: Math.min(totalPasses, index + 1),
+          statusLine: `Saved speaker clip ${index + 1} of ${totalPasses} will stay queued for another try.`,
+          note: `Clip ${index + 1} of ${totalPasses} could not be processed yet. It will stay queued for another try.`,
+        });
+      }
+
+      renderSpeakerInsights();
     }
 
     const finalized = await waitForSpeakerAttributionIdle({
@@ -2861,7 +3069,21 @@ async function finalizeSpeakerTiming() {
       timeoutMs: continueTracking ? 30000 : 120000,
     });
 
-    if (finalized) {
+    const latestRecordings = await refreshSessionRecordings(sessionId);
+    const remainingRecordingPasses = latestRecordings.filter((recording) => !recording.diarizedAt && hasRecordingBlob(recording)).length;
+
+    if (remainingRecordingPasses > 0) {
+      const processedPasses = Math.max(0, storedPasses.length - remainingRecordingPasses);
+      state.speakerTrackingStatus = processedPasses
+        ? `Speaker timing updated for ${processedPasses} clip${processedPasses === 1 ? '' : 's'}. ${remainingRecordingPasses} clip${remainingRecordingPasses === 1 ? '' : 's'} still need another try.`
+        : `Speaker timing hit a temporary issue. ${remainingRecordingPasses} clip${remainingRecordingPasses === 1 ? '' : 's'} still need another try.`;
+      showToast(
+        processedPasses
+          ? `Speaker timing updated for ${processedPasses}/${storedPasses.length || remainingRecordingPasses} clips. ${remainingRecordingPasses} still queued.`
+          : 'Speaker timing hit a temporary issue. The remaining clips stay queued for retry.',
+        5000
+      );
+    } else if (finalized) {
       state.speakerTrackingStatus = 'Speaker timing updated.';
       showToast('Speaker timing finalized.');
     } else {
@@ -2870,10 +3092,11 @@ async function finalizeSpeakerTiming() {
     }
   } catch (error) {
     console.warn('Unable to finalize speaker timing', error);
-    state.speakerTrackingStatus = 'Speaker timing is unavailable in this session.';
-    showToast('Speaker timing could not finish right now.', 4500);
+    state.speakerTrackingStatus = 'Speaker timing hit a temporary issue. The remaining clips stay queued for retry.';
+    showToast('Speaker timing hit a temporary issue. Try the remaining clips again in a moment.', 5000);
   } finally {
     state.speakerFinalizeInProgress = false;
+    setSpeakerFinalizeProgress(null);
     renderSpeakerInsights();
     renderRecordingReview();
   }
@@ -3249,6 +3472,7 @@ async function handleStartFromSetup(event) {
   state.manualSpeakerElapsedMs = 0;
   state.manualSpeakerTimerStartedAt = 0;
   state.manualSpeakerPaused = true;
+  state.speakerFinalizeProgress = null;
   state.manualSpeakerCurrentLabel = getSpeakerOptionsForManualControls(session)[0] || 'Speaker A';
   state.transcriptPinnedToBottom = true;
   clearLiveDraftCarry();
@@ -4379,6 +4603,7 @@ function buildDebugSnapshot() {
     segmentMetricMeta: elements.segmentCountMeta?.textContent || '',
     speakerStatusLine: elements.speakerStatusLine?.textContent || '',
     finalizeSpeakerButton: elements.finalizeSpeakerButton?.textContent || '',
+    speakerFinalizeProgress: state.speakerFinalizeProgress,
     speakerSummaryText: elements.speakerSummary?.innerText || '',
     transcriptText: transcriptListText,
     transcriptTail: transcriptListText.slice(-1600),
@@ -4480,6 +4705,7 @@ async function createDebugSession({
   state.manualSpeakerElapsedMs = 0;
   state.manualSpeakerTimerStartedAt = 0;
   state.manualSpeakerPaused = true;
+  state.speakerFinalizeProgress = null;
   state.manualSpeakerCurrentLabel = getSpeakerOptionsForManualControls(session)[0] || 'Speaker A';
   state.transcriptPinnedToBottom = true;
   clearLiveDraftCarry();
