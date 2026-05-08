@@ -197,7 +197,7 @@
                   <li>Keep the phone close to the speaker or PA source.</li>
                   <li>Add names, brands, acronyms, and product terms to the glossary.</li>
                   <li>Add speaker names up front if you already know who will talk.</li>
-                  <li>Pause whenever you do not need capture, to avoid extra API cost.</li>
+                  <li>Stop whenever you do not need capture, then Resume the same session when you are ready.</li>
                   <li>The last active session can be resumed after refresh or reopening.</li>
                 </ul>
                 <div class="note note--soft">
@@ -427,7 +427,7 @@
                     </div>
                   </div>
                   <ul class="checklist compact-list">
-                    <li>Pause closes the live connection and stops microphone sending.</li>
+                    <li>Stop closes the live connection and stops microphone sending for the current session.</li>
                     <li>Final transcript segments are saved locally after each completed turn.</li>
                     <li>After long listening sessions, the connection rolls over automatically.</li>
                     <li>Resume continues the same logical session and transcript history.</li>
@@ -599,6 +599,6 @@
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-    <script type="module" src="./js/app.js?v=20260508-single-clip-finalize-wav"></script>
+    <script type="module" src="./js/app.js?v=20260508-session-controls-speaker-bundle"></script>
   </body>
 </html>

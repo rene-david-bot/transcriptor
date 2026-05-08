@@ -192,6 +192,8 @@ const state = {
   wakeLockWanted: false,
   wakeLockMessage: '',
   manualSpeakerEvents: [],
+  manualSpeakerOpenStartMs: null,
+  manualSpeakerActiveLabel: '',
   manualSpeakerBaseOffsetMs: 0,
   manualSpeakerElapsedMs: 0,
   manualSpeakerPaused: true,
@@ -420,13 +422,68 @@ async function waitForPendingSessionRecordingWrites() {
   }
 }
 
+function getManualSpeakerEntryId(entry, index = 0) {
+  return String(entry?.id || `manual-speaker-${index}-${Number(entry?.startMs ?? entry?.atMs ?? 0)}`);
+}
+
+function normalizeManualSpeakerSegments(entries = [], session = state.currentSession) {
+  if (!Array.isArray(entries) || !entries.length) return [];
+
+  const hasSegmentShape = entries.some(
+    (entry) => entry && (Object.prototype.hasOwnProperty.call(entry, 'startMs') || Object.prototype.hasOwnProperty.call(entry, 'endMs'))
+  );
+
+  if (hasSegmentShape) {
+    return entries
+      .map((entry, index) => ({
+        ...entry,
+        id: getManualSpeakerEntryId(entry, index),
+        speakerLabel: String(entry?.speakerLabel || '').trim(),
+        startMs: Math.max(0, Number(entry?.startMs || 0)),
+        endMs: Math.max(0, Number(entry?.endMs || entry?.startMs || 0)),
+      }))
+      .filter((entry) => entry.speakerLabel && entry.endMs > entry.startMs)
+      .sort((left, right) => left.startMs - right.startMs || left.endMs - right.endMs);
+  }
+
+  const sessionDurationMs = getSessionRecordingDurationMs(
+    session?.id && session?.id === state.currentSession?.id ? state.sessionRecordings : [],
+    session
+  );
+  const legacyEvents = entries
+    .map((entry, index) => ({
+      ...entry,
+      id: getManualSpeakerEntryId(entry, index),
+      speakerLabel: String(entry?.speakerLabel || '').trim(),
+      atMs: Math.max(0, Number(entry?.atMs || 0)),
+    }))
+    .filter((entry) => entry.speakerLabel)
+    .sort((left, right) => left.atMs - right.atMs);
+
+  return legacyEvents
+    .map((entry, index) => {
+      const nextEntry = legacyEvents[index + 1];
+      const startMs = entry.atMs;
+      const endMs = nextEntry ? nextEntry.atMs : sessionDurationMs;
+      if (endMs <= startMs) return null;
+      return {
+        id: entry.id,
+        speakerLabel: entry.speakerLabel,
+        startMs,
+        endMs,
+      };
+    })
+    .filter(Boolean);
+}
+
 function getManualSpeakerEventsForSession(session = state.currentSession) {
   if (!session) return [];
-  return session?.id && state.currentSession?.id === session.id
+  const rawEntries = session?.id && state.currentSession?.id === session.id
     ? state.manualSpeakerEvents
     : Array.isArray(session?.manualSpeakerEvents)
       ? session.manualSpeakerEvents
       : [];
+  return normalizeManualSpeakerSegments(rawEntries, session);
 }
 
 function recordingTimeToLocalOffset(recording, absoluteMs) {
@@ -1301,7 +1358,7 @@ function syncManualSpeakerSelectionFromUi(session = state.currentSession) {
 }
 
 function setPendingManualSpeakerChangeAtCurrentPosition(session = state.currentSession) {
-  if (!session || session.status !== 'active' || state.manualSpeakerPaused) {
+  if (!session || session.status !== 'active' || state.manualSpeakerPaused || state.manualSpeakerOpenStartMs === null) {
     state.manualSpeakerPendingChangeAtMs = null;
     if (session) {
       session.manualSpeakerPendingChangeAtMs = null;
@@ -1324,38 +1381,107 @@ function clearPendingManualSpeakerChange(session = state.currentSession) {
   }
 }
 
-function maybeCommitPendingManualSpeakerChange({ atMs = null } = {}) {
-  if (!state.currentSession || !state.manualSpeakerEvents.length) {
-    clearPendingManualSpeakerChange();
-    return false;
+function updatePendingManualSpeakerChangeForCurrentLabel(session = state.currentSession) {
+  if (!session || session.status !== 'active' || state.manualSpeakerPaused || state.manualSpeakerOpenStartMs === null) {
+    clearPendingManualSpeakerChange(session);
+    return null;
   }
 
-  const speakerLabel = syncManualSpeakerSelectionFromUi();
-  const previousEvent = state.manualSpeakerEvents[state.manualSpeakerEvents.length - 1];
-  if (!speakerLabel || !previousEvent || previousEvent.speakerLabel === speakerLabel) {
-    clearPendingManualSpeakerChange();
-    return false;
+  const nextLabel = normalizeManualSpeakerName(state.manualSpeakerCurrentLabel || session?.manualSpeakerCurrentLabel || '');
+  const activeLabel = normalizeManualSpeakerName(state.manualSpeakerActiveLabel || nextLabel);
+
+  if (!nextLabel || nextLabel === activeLabel) {
+    clearPendingManualSpeakerChange(session);
+    return null;
   }
 
-  const currentPositionMs = Math.max(0, getManualSpeakerSessionPositionMs());
-  const rawAtMs = atMs === null || atMs === undefined ? state.manualSpeakerPendingChangeAtMs : atMs;
-  const normalizedAtMs = Math.max(Number(previousEvent.atMs || 0), Math.min(currentPositionMs, Math.round(Number(rawAtMs || currentPositionMs))));
+  return setPendingManualSpeakerChangeAtCurrentPosition(session);
+}
 
-  if (normalizedAtMs <= Number(previousEvent.atMs || 0) + 20) {
-    clearPendingManualSpeakerChange();
-    return false;
-  }
+function addManualSpeakerSegment(speakerLabel, startMs, endMs) {
+  const normalizedLabel = normalizeManualSpeakerName(speakerLabel);
+  const normalizedStartMs = Math.max(0, Math.round(Number(startMs || 0)));
+  const normalizedEndMs = Math.max(normalizedStartMs, Math.round(Number(endMs || 0)));
+  if (!normalizedLabel || normalizedEndMs <= normalizedStartMs) return false;
 
-  state.manualSpeakerEvents = [
-    ...state.manualSpeakerEvents,
-    {
-      id: crypto.randomUUID(),
-      atMs: normalizedAtMs,
-      speakerLabel,
-    },
-  ].sort((a, b) => (a.atMs || 0) - (b.atMs || 0));
-  clearPendingManualSpeakerChange();
+  state.manualSpeakerEvents = normalizeManualSpeakerSegments(
+    [
+      ...state.manualSpeakerEvents,
+      {
+        id: crypto.randomUUID(),
+        speakerLabel: normalizedLabel,
+        startMs: normalizedStartMs,
+        endMs: normalizedEndMs,
+      },
+    ],
+    state.currentSession
+  );
   return true;
+}
+
+async function splitManualSpeakerSpan({ atMs = getManualSpeakerSessionPositionMs(), persist = true } = {}) {
+  if (!state.currentSession || state.currentSession.status !== 'active' || state.manualSpeakerOpenStartMs === null) {
+    clearPendingManualSpeakerChange();
+    return false;
+  }
+
+  const absoluteAtMs = Math.max(0, Math.round(Number(atMs || 0)));
+  const nextLabel = syncManualSpeakerSelectionFromUi();
+  const activeLabel = normalizeManualSpeakerName(state.manualSpeakerActiveLabel || nextLabel);
+  const openStartMs = Math.max(0, Number(state.manualSpeakerOpenStartMs || 0));
+  const rawSplitAtMs = state.manualSpeakerPendingChangeAtMs === null ? absoluteAtMs : state.manualSpeakerPendingChangeAtMs;
+  const splitAtMs = Math.max(openStartMs, Math.min(absoluteAtMs, Math.round(Number(rawSplitAtMs || absoluteAtMs))));
+
+  const didAddSegment = addManualSpeakerSegment(activeLabel, openStartMs, splitAtMs);
+  state.manualSpeakerOpenStartMs = splitAtMs;
+  state.manualSpeakerActiveLabel = normalizeManualSpeakerName(nextLabel || activeLabel);
+  clearPendingManualSpeakerChange();
+  syncManualSpeakerStateToSession();
+
+  await applyManualSpeakerEventsToCurrentSession();
+  if (persist) {
+    await persistManualSpeakerStateNow();
+  }
+  renderManualSpeakerControls();
+  return didAddSegment;
+}
+
+async function commitCurrentManualSpeakerSpan({ atMs = getManualSpeakerSessionPositionMs(), persist = true } = {}) {
+  if (!state.currentSession || state.manualSpeakerOpenStartMs === null) {
+    clearPendingManualSpeakerChange();
+    return false;
+  }
+
+  const stopAtMs = Math.max(0, Math.round(Number(atMs || 0)));
+  const selectedLabel = syncManualSpeakerSelectionFromUi();
+  let activeLabel = normalizeManualSpeakerName(state.manualSpeakerActiveLabel || selectedLabel);
+  let openStartMs = Math.max(0, Number(state.manualSpeakerOpenStartMs || 0));
+  let changed = false;
+
+  if (
+    state.manualSpeakerPendingChangeAtMs !== null &&
+    selectedLabel &&
+    activeLabel &&
+    normalizeManualSpeakerName(selectedLabel) !== activeLabel
+  ) {
+    const splitAtMs = Math.max(openStartMs, Math.min(stopAtMs, Math.round(Number(state.manualSpeakerPendingChangeAtMs || stopAtMs))));
+    changed = addManualSpeakerSegment(activeLabel, openStartMs, splitAtMs) || changed;
+    openStartMs = splitAtMs;
+    activeLabel = normalizeManualSpeakerName(selectedLabel);
+  }
+
+  changed = addManualSpeakerSegment(activeLabel, openStartMs, stopAtMs) || changed;
+  state.manualSpeakerOpenStartMs = null;
+  state.manualSpeakerActiveLabel = '';
+  clearPendingManualSpeakerChange();
+  syncManualSpeakerStateToSession();
+
+  await applyManualSpeakerEventsToCurrentSession();
+  if (persist) {
+    await persistManualSpeakerStateNow();
+  }
+  renderManualSpeakerControls();
+  return changed;
 }
 
 function findExistingManualSpeakerOption(value, session = state.currentSession) {
@@ -1398,7 +1524,7 @@ async function useManualSpeakerCustomName(rawValue = state.manualSpeakerCustomNa
   state.manualSpeakerCustomNameDraft = '';
 
   if (state.currentSession?.status === 'active' && !state.manualSpeakerPaused) {
-    setPendingManualSpeakerChangeAtCurrentPosition();
+    updatePendingManualSpeakerChangeForCurrentLabel();
   } else {
     clearPendingManualSpeakerChange();
   }
@@ -1429,7 +1555,7 @@ async function applyManualSpeakerSelectionFromControl() {
   }
 
   if (state.currentSession?.status === 'active' && !state.manualSpeakerPaused) {
-    setPendingManualSpeakerChangeAtCurrentPosition();
+    updatePendingManualSpeakerChangeForCurrentLabel();
   } else {
     clearPendingManualSpeakerChange();
   }
@@ -1447,18 +1573,48 @@ async function applyManualSpeakerSelectionFromControl() {
 }
 
 function getManualSpeakerLabelForSegment(segment, session = state.currentSession) {
-  const events = getManualSpeakerEventsForSession(session);
-  if (!events.length || !segment) return '';
+  const segments = getManualSpeakerEventsForSession(session);
+  if (!segment) return '';
   const segmentStartMs = Number(segment.startMs || 0);
-  let activeEvent = null;
-  for (const event of events) {
-    if (Number(event.atMs || 0) <= segmentStartMs) {
-      activeEvent = event;
-    } else {
-      break;
+
+  for (const manualSegment of segments) {
+    if (segmentStartMs >= Number(manualSegment.startMs || 0) && segmentStartMs < Number(manualSegment.endMs || 0)) {
+      return String(manualSegment.speakerLabel || '').trim();
     }
   }
-  return String(activeEvent?.speakerLabel || '').trim();
+
+  if (
+    session?.id !== state.currentSession?.id ||
+    !state.currentSession ||
+    state.currentSession.status !== 'active' ||
+    state.manualSpeakerPaused ||
+    state.manualSpeakerOpenStartMs === null
+  ) {
+    return '';
+  }
+
+  const currentPositionMs = Math.max(0, getManualSpeakerSessionPositionMs(session));
+  const openStartMs = Math.max(0, Number(state.manualSpeakerOpenStartMs || 0));
+  const selectedLabel = normalizeManualSpeakerName(state.manualSpeakerCurrentLabel || '');
+  const activeLabel = normalizeManualSpeakerName(state.manualSpeakerActiveLabel || selectedLabel);
+
+  if (
+    state.manualSpeakerPendingChangeAtMs !== null &&
+    selectedLabel &&
+    activeLabel &&
+    selectedLabel !== activeLabel
+  ) {
+    const splitAtMs = Math.max(openStartMs, Math.min(currentPositionMs, Math.round(Number(state.manualSpeakerPendingChangeAtMs || currentPositionMs))));
+    if (segmentStartMs >= openStartMs && segmentStartMs < splitAtMs) {
+      return activeLabel;
+    }
+    if (segmentStartMs >= splitAtMs && segmentStartMs < currentPositionMs) {
+      return selectedLabel;
+    }
+    return '';
+  }
+
+  return segmentStartMs >= openStartMs && segmentStartMs < currentPositionMs ? activeLabel : '';
 }
 
 function buildSessionGlossary(session = state.currentSession) {
@@ -1551,25 +1707,23 @@ function buildSpeakerSummary(segments) {
 function buildManualSpeakerSlots(session = state.currentSession, segments = state.currentSegments) {
   if (!session) return [];
   const sessionEvents = getManualSpeakerEventsForSession(session);
-  const events = [...sessionEvents]
+  const slotSegments = [...sessionEvents]
     .map((event, index) => ({
       ...event,
-      id: String(event.id || `manual-speaker-${index}-${Number(event.atMs || 0)}`),
+      id: getManualSpeakerEntryId(event, index),
       speakerLabel: String(event.speakerLabel || '').trim(),
-      atMs: Math.max(0, Number(event.atMs || 0)),
+      startMs: Math.max(0, Number(event.startMs || 0)),
+      endMs: Math.max(0, Number(event.endMs || event.startMs || 0)),
     }))
-    .filter((event) => event.speakerLabel)
-    .sort((left, right) => left.atMs - right.atMs);
+    .filter((event) => event.speakerLabel && event.endMs > event.startMs)
+    .sort((left, right) => left.startMs - right.startMs || left.endMs - right.endMs);
 
-  const sessionDurationMs = getSessionRecordingDurationMs(session?.id === state.currentSession?.id ? state.sessionRecordings : [], session);
-  if (!events.length || sessionDurationMs <= 0) return [];
+  if (!slotSegments.length) return [];
 
-  return events
-    .map((event, index) => {
-      const startMs = Math.max(0, Number(event.atMs || 0));
-      const nextEvent = events[index + 1];
-      const endMs = clampSessionPlaybackMs(nextEvent ? nextEvent.atMs : sessionDurationMs, sessionDurationMs);
-      if (endMs <= startMs) return null;
+  return slotSegments
+    .map((event) => {
+      const startMs = Math.max(0, Number(event.startMs || 0));
+      const endMs = Math.max(startMs, Number(event.endMs || startMs));
 
       const overlappingSegments = segments.filter(
         (segment) => overlapMs(startMs, endMs, Number(segment.startMs || 0), Number(segment.speechEndMs || segment.endMs || segment.startMs || 0)) > 0
@@ -2155,6 +2309,7 @@ function renderSpeakerFinalizeButton() {
   if (!elements.finalizeSpeakerButton) return;
 
   const session = state.currentSession;
+  const activeCapture = Boolean(session && session.status === 'active' && ['connecting', 'listening', 'reconnecting'].includes(state.runtimeStatus));
   const hasRecorder = Boolean(
     session &&
       state.speakerTrackingSessionId === session.id &&
@@ -2168,8 +2323,10 @@ function renderSpeakerFinalizeButton() {
   const hasFinalSpeakerTiming = Boolean(session?.speakerFinalizedAt);
   const canStartManually = canStartSpeakerTrackingManually(session) && !hasRecorder && !queueBusy && !pendingSegments;
   const canFinalize = Boolean(
-    session && state.speakerTrackingSupported && (hasRecorder || queueBusy || pendingSegments || pendingRecordingPasses || canStartManually)
+    session && !activeCapture && state.speakerTrackingSupported && (hasRecorder || queueBusy || pendingSegments || pendingRecordingPasses || canStartManually)
   );
+
+  elements.finalizeSpeakerButton.classList.toggle('hidden', Boolean(activeCapture && !state.speakerFinalizeInProgress));
 
   elements.finalizeSpeakerButton.disabled = state.speakerFinalizeInProgress || !canFinalize;
 
@@ -2180,6 +2337,11 @@ function renderSpeakerFinalizeButton() {
 
   if (!state.speakerTrackingSupported) {
     elements.finalizeSpeakerButton.textContent = 'Speaker timing unavailable';
+    return;
+  }
+
+  if (activeCapture && !state.speakerFinalizeInProgress) {
+    elements.finalizeSpeakerButton.textContent = 'Available after stopping';
     return;
   }
 
@@ -2231,6 +2393,7 @@ function renderSpeakerInsights() {
   const slotRollup = buildManualSpeakerSlotRollup(session, state.currentSegments);
   const sessionEnded = session?.status === 'ended';
   const stoppedSession = session && ['paused', 'ended'].includes(session.status);
+  const activeCapture = Boolean(session && session.status === 'active' && ['connecting', 'listening', 'reconnecting'].includes(state.runtimeStatus));
   const canStartManually = canStartSpeakerTrackingManually(session);
   const hasFinalSpeakerTiming = Boolean(session?.speakerFinalizedAt);
   const speakerProcessingCard = renderSpeakerProcessingCard(
@@ -2265,7 +2428,7 @@ function renderSpeakerInsights() {
     elements.speakerStatusLine.textContent = `Showing provisional speaker hints. ${pendingSegments} raw segment${pendingSegments === 1 ? '' : 's'} ${
       pendingSegments === 1 ? 'is' : 'are'
     } still processing.`;
-  } else if (canStartManually && !state.speakerRecorder && !state.speakerTrackingInFlight) {
+  } else if (!activeCapture && canStartManually && !state.speakerRecorder && !state.speakerTrackingInFlight) {
     elements.speakerStatusLine.textContent = 'The final speaker pass is ready. Tap the button above to run it now.';
   } else if (sessionEnded && hasFinalSpeakerTiming) {
     elements.speakerStatusLine.textContent = 'Final speaker timing is ready. The summary below lines up each manual segment with the automatic match and the speaker total.';
@@ -2280,7 +2443,7 @@ function renderSpeakerInsights() {
   } else if (stoppedSession) {
     elements.speakerStatusLine.textContent = 'Capture stopped. No finalized speaker timing is available for this session.';
   } else if (summary.length) {
-    elements.speakerStatusLine.textContent = 'Showing provisional speaker hints while capture runs. Use the final speaker pass after the session for a full reconciliation.';
+    elements.speakerStatusLine.textContent = 'Showing provisional speaker hints while capture runs. Stop the session, then run the final speaker pass for a full reconciliation.';
   } else {
     elements.speakerStatusLine.textContent = state.speakerTrackingStatus;
   }
@@ -3416,43 +3579,24 @@ function renderRecordingReview() {
 }
 
 function buildManualSpeakerRowsForDisplay() {
-  const session = state.currentSession;
-  const baseOffsetMs = Number(state.manualSpeakerBaseOffsetMs || 0);
-  const stoppedSession = session && ['paused', 'ended'].includes(session.status) && !isManualSpeakerTimerRunning();
-  const slotRows = stoppedSession
-    ? buildManualSpeakerSlots(session, state.currentSegments)
-        .map((slot) => ({
-          id: String(slot.id || `manual-slot-${Number(slot.startMs || 0)}`),
-          speakerLabel: slot.label || 'Speaker',
-          changeMs: Math.max(0, Number(slot.windowMs || 0)),
-          overallMs: Math.max(0, Number(slot.endMs || 0) - baseOffsetMs),
-          playMs: Math.max(0, Number(slot.startMs || 0)),
-          displayMode: 'slot',
-        }))
-        .filter((slot) => slot.changeMs > 0)
-    : [];
-
-  if (slotRows.length) {
-    return {
-      headings: ['Speaker', 'Duration', 'Total'],
-      rows: slotRows.reverse(),
-      emptyMessage: 'No speaker segments yet. Resume capture and mark the speaker when it changes.',
-    };
-  }
-
-  const eventRows = [...state.manualSpeakerEvents]
-    .sort((left, right) => (left.atMs || 0) - (right.atMs || 0))
-    .map((event, index, events) => ({
-      ...event,
-      id: String(event.id || `manual-speaker-${index}-${Number(event.atMs || 0)}`),
-      speakerLabel: String(event.speakerLabel || '').trim() || 'Speaker',
-      changeMs: Math.max(0, Number(event.atMs || 0) - Number(index > 0 ? events[index - 1].atMs : baseOffsetMs)),
-      overallMs: Math.max(0, Number(event.atMs || 0) - baseOffsetMs),
-      playMs: Math.max(0, Number(event.atMs || 0)),
-      displayMode: 'event',
-      isBaseline: index === 0 && Math.abs(Number(event.atMs || 0) - baseOffsetMs) < 400,
-    }))
-    .reverse();
+  const segments = getManualSpeakerEventsForSession(state.currentSession);
+  let runningTotalMs = 0;
+  const eventRows = segments
+    .map((segment, index) => {
+      const durationMs = Math.max(0, Number(segment.endMs || 0) - Number(segment.startMs || 0));
+      runningTotalMs += durationMs;
+      return {
+        ...segment,
+        id: getManualSpeakerEntryId(segment, index),
+        speakerLabel: String(segment.speakerLabel || '').trim() || 'Speaker',
+        changeMs: durationMs,
+        overallMs: runningTotalMs,
+        playMs: Math.max(0, Number(segment.startMs || 0)),
+        displayMode: 'segment',
+        isBaseline: false,
+      };
+    })
+    .filter((segment) => segment.changeMs > 0);
 
   return {
     headings: ['Speaker', 'Change', 'Overall'],
@@ -3478,7 +3622,7 @@ function renderManualSpeakerControls() {
       ? `${currentLabel} live`
       : state.currentSession?.status === 'ended'
         ? 'Session ended'
-        : state.currentSession?.status === 'active'
+        : state.currentSession?.status === 'active' || state.runtimeStatus === 'stopped' || state.currentSession?.status === 'paused'
           ? 'Stopped'
           : 'Ready';
   }
@@ -3613,7 +3757,7 @@ function renderHistory() {
   elements.historyList.innerHTML = state.sessions
     .map((session) => {
       const duration = formatDuration(session.activeDurationMs || 0);
-      const status = session.status === 'ended' ? 'Ended' : session.status === 'paused' ? 'Paused' : 'Active';
+      const status = session.status === 'ended' ? 'Ended' : session.status === 'paused' ? 'Stopped' : 'Active';
       return `
         <article class="history-card" data-session-card-id="${session.id}">
           <div class="history-card__header">
@@ -3642,19 +3786,45 @@ function renderHistory() {
     .join('');
 }
 
+function hasSessionCaptureActivity(session = state.currentSession) {
+  if (!session) return false;
+  const recordings = session?.id === state.currentSession?.id ? state.sessionRecordings : [];
+  return Boolean(
+    Number(session.activeDurationMs || 0) > 0 ||
+      Number(session.segmentCount || 0) > 0 ||
+      getManualSpeakerEventsForSession(session).length > 0 ||
+      recordings.some((recording) => hasRecordingBlob(recording)) ||
+      ['listening', 'connecting', 'reconnecting', 'stopped', 'paused', 'error'].includes(String(session.runtimeStatus || ''))
+  );
+}
+
 function renderControls() {
   const session = state.currentSession;
   const runtime = state.runtimeStatus;
   const ended = !session || session.status === 'ended';
-  const canStart = session && !ended && !['connecting', 'listening', 'reconnecting'].includes(runtime);
-  const canPause = session && runtime === 'listening';
-  const canResume = session && !ended && ['paused', 'stopped', 'error'].includes(runtime);
-  const canStop = session && !ended && ['listening', 'connecting', 'reconnecting'].includes(runtime);
+  const hasActivity = hasSessionCaptureActivity(session);
+  let primaryMode = 'start';
+  let primaryLabel = 'Start';
+  let primaryClassName = 'button button--primary';
 
-  elements.startButton.classList.toggle('hidden', !canStart || runtime === 'paused');
-  elements.pauseButton.classList.toggle('hidden', !canPause);
-  elements.resumeButton.classList.toggle('hidden', !canResume);
-  elements.stopButton.classList.toggle('hidden', !canStop);
+  if (session && !ended) {
+    if (['listening', 'connecting', 'reconnecting'].includes(runtime)) {
+      primaryMode = 'stop';
+      primaryLabel = 'Stop';
+      primaryClassName = 'button button--danger';
+    } else if (['paused', 'stopped', 'error'].includes(runtime) || (runtime === 'idle' && hasActivity)) {
+      primaryMode = 'resume';
+      primaryLabel = 'Resume';
+    }
+  }
+
+  elements.startButton.className = primaryClassName;
+  elements.startButton.textContent = primaryLabel;
+  elements.startButton.dataset.mode = primaryMode;
+  elements.startButton.classList.toggle('hidden', !session || ended);
+  elements.pauseButton.classList.add('hidden');
+  elements.resumeButton.classList.add('hidden');
+  elements.stopButton.classList.add('hidden');
   elements.endSessionButton.disabled = !session || ended;
   elements.renameSessionButton.disabled = !session;
   elements.exportMarkdownButton.disabled = !session || !state.currentSegments.length;
@@ -3704,6 +3874,8 @@ async function createSession({ sourceLanguage, targetLanguage, glossary, speaker
     draftTranslation: '',
     lastSequence: 0,
     manualSpeakerEvents: [],
+    manualSpeakerOpenStartMs: null,
+    manualSpeakerActiveLabel: '',
     manualSpeakerBaseOffsetMs: 0,
     manualSpeakerElapsedMs: 0,
     manualSpeakerPaused: true,
@@ -3726,12 +3898,11 @@ async function loadSession(sessionId) {
   state.speechActive = false;
   state.speakerFinalizeProgress = null;
   clearLiveDraftCarry();
-  state.manualSpeakerEvents = Array.isArray(session.manualSpeakerEvents)
-    ? session.manualSpeakerEvents.map((event, index) => ({
-        ...event,
-        id: String(event.id || `manual-speaker-${index}-${Number(event.atMs || 0)}`),
-      }))
-    : [];
+  state.manualSpeakerEvents = normalizeManualSpeakerSegments(session.manualSpeakerEvents, session);
+  state.manualSpeakerOpenStartMs = session.manualSpeakerOpenStartMs === null || session.manualSpeakerOpenStartMs === undefined
+    ? null
+    : Math.max(0, Number(session.manualSpeakerOpenStartMs || 0));
+  state.manualSpeakerActiveLabel = String(session.manualSpeakerActiveLabel || '').trim();
   state.manualSpeakerBaseOffsetMs = Number(session.manualSpeakerBaseOffsetMs || 0);
   state.manualSpeakerCurrentLabel = String(session.manualSpeakerCurrentLabel || '').trim();
   state.manualSpeakerPendingChangeAtMs = session.manualSpeakerPendingChangeAtMs === null ? null : Number(session.manualSpeakerPendingChangeAtMs || 0);
@@ -3749,7 +3920,14 @@ async function loadSession(sessionId) {
   state.transcriptPinnedToBottom = true;
   flushListeningClock();
   flushSpeechClock();
-  setStatus(session.runtimeStatus || (session.status === 'ended' ? 'ended' : 'stopped'), session.status === 'ended' ? 'Session ended.' : 'Session loaded.');
+  setStatus(
+    session.runtimeStatus || (session.status === 'ended' ? 'ended' : 'stopped'),
+    session.status === 'ended'
+      ? 'Session ended.'
+      : ['paused', 'stopped'].includes(String(session.runtimeStatus || '')) || session.status === 'paused'
+        ? 'Stopped. Tap Resume to continue this session.'
+        : 'Session loaded.'
+  );
   renderCurrentView();
   return session;
 }
@@ -4852,12 +5030,12 @@ async function applyStoredSpeakerSpansToSegment(segment, session = state.current
 
 function syncManualSpeakerStateToSession(session = state.currentSession) {
   if (!session) return;
-  session.manualSpeakerEvents = [...state.manualSpeakerEvents]
-    .sort((a, b) => (a.atMs || 0) - (b.atMs || 0))
-    .map((event, index) => ({
-      ...event,
-      id: String(event.id || `manual-speaker-${index}-${Number(event.atMs || 0)}`),
-    }));
+  session.manualSpeakerEvents = normalizeManualSpeakerSegments(state.manualSpeakerEvents, session).map((event, index) => ({
+    ...event,
+    id: getManualSpeakerEntryId(event, index),
+  }));
+  session.manualSpeakerOpenStartMs = state.manualSpeakerOpenStartMs === null ? null : Math.max(0, Number(state.manualSpeakerOpenStartMs || 0));
+  session.manualSpeakerActiveLabel = String(state.manualSpeakerActiveLabel || '').trim();
   session.manualSpeakerCurrentLabel = String(state.manualSpeakerCurrentLabel || '').trim();
   session.manualSpeakerBaseOffsetMs = Math.max(0, Number(state.manualSpeakerBaseOffsetMs || 0));
   session.manualSpeakerElapsedMs = Math.max(0, Number(state.manualSpeakerElapsedMs || 0));
@@ -5075,6 +5253,8 @@ async function handleStartFromSetup(event) {
   state.sessionRecordings = [];
   resetSessionPlaybackState();
   state.manualSpeakerEvents = [];
+  state.manualSpeakerOpenStartMs = null;
+  state.manualSpeakerActiveLabel = '';
   state.manualSpeakerBaseOffsetMs = 0;
   state.manualSpeakerElapsedMs = 0;
   state.manualSpeakerPaused = true;
@@ -5088,7 +5268,7 @@ async function handleStartFromSetup(event) {
   state.currentSession.status = 'active';
   state.currentSession.runtimeStatus = 'connecting';
   state.currentSession.updatedAt = nowIso();
-  await resumeManualSpeakerTimer({ persist: false, seedInitialSpeaker: true });
+  await resumeManualSpeakerTimer({ persist: false });
   await persistCurrentSessionNow();
   await syncLastActiveSession();
   await refreshSessions();
@@ -5206,7 +5386,7 @@ async function startListening({ silent = false } = {}) {
   state.currentSession.speakerFinalizedAt = '';
   state.currentSession.updatedAt = nowIso();
   if (state.manualSpeakerPaused) {
-    await resumeManualSpeakerTimer({ persist: false, seedInitialSpeaker: true });
+    await resumeManualSpeakerTimer({ persist: false });
   }
   await persistCurrentSessionNow();
   await syncLastActiveSession();
@@ -5247,15 +5427,20 @@ async function startListening({ silent = false } = {}) {
 }
 
 async function pauseListening() {
-  if (!state.client) return;
+  if (!state.currentSession) return;
+  const pausedMessage = 'Paused. Microphone sending has stopped.';
   resetLiveCommitState();
   flushListeningClock();
   flushSpeechClock();
   state.speechActive = false;
-  await pauseManualSpeakerTimer({ persist: false });
+  if (!state.manualSpeakerPaused) {
+    await pauseManualSpeakerTimer({ persist: false });
+  }
   await stopSpeakerTracking({ statusMessage: 'Paused. Speaker timing may keep catching up briefly.' });
   await stopSessionRecording();
-  await state.client.disconnect({ nextStatus: 'paused', message: 'Paused. Microphone sending has stopped.' });
+  if (state.client) {
+    await state.client.disconnect({ nextStatus: 'paused', message: pausedMessage });
+  }
   await ensureScreenWakeLock(false);
   state.client = null;
   state.currentSession.status = 'paused';
@@ -5263,30 +5448,35 @@ async function pauseListening() {
   await applyManualSpeakerEventsToCurrentSession();
   await persistCurrentSessionNow();
   await syncLastActiveSession();
+  setStatus('paused', pausedMessage);
   renderCurrentView();
 }
 
 async function stopListening() {
-  if (state.client) {
-    resetLiveCommitState();
-    flushListeningClock();
-    flushSpeechClock();
-    state.speechActive = false;
+  if (!state.currentSession) return;
+  const stoppedMessage = 'Stopped. Tap Resume to continue this session.';
+  resetLiveCommitState();
+  flushListeningClock();
+  flushSpeechClock();
+  state.speechActive = false;
+  if (!state.manualSpeakerPaused) {
     await pauseManualSpeakerTimer({ persist: false });
-    await stopSpeakerTracking({ statusMessage: 'Stopped. Run the final speaker pass for the last buffered audio.' });
-    await stopSessionRecording();
-    await state.client.disconnect({ nextStatus: 'stopped', message: 'Stopped. You can start again in the same session.' });
+  }
+  await stopSpeakerTracking({ statusMessage: 'Stopped. Run the final speaker pass for the last buffered audio.' });
+  await stopSessionRecording();
+  if (state.client) {
+    await state.client.disconnect({ nextStatus: 'stopped', message: stoppedMessage });
     await ensureScreenWakeLock(false);
     state.client = null;
   }
-  if (state.currentSession) {
-    state.currentSession.status = 'paused';
-    state.currentSession.runtimeStatus = 'stopped';
-    await applyManualSpeakerEventsToCurrentSession();
-    await persistCurrentSessionNow();
-    await syncLastActiveSession();
-    renderCurrentView();
-  }
+  await ensureScreenWakeLock(false);
+  state.currentSession.status = 'paused';
+  state.currentSession.runtimeStatus = 'stopped';
+  await applyManualSpeakerEventsToCurrentSession();
+  await persistCurrentSessionNow();
+  await syncLastActiveSession();
+  setStatus('stopped', stoppedMessage);
+  renderCurrentView();
 }
 
 async function endCurrentSession() {
@@ -5294,18 +5484,21 @@ async function endCurrentSession() {
   const confirmed = window.confirm('End this session? The transcript stays in local history, but live capture will stop.');
   if (!confirmed) return;
 
-  if (state.client) {
-    resetLiveCommitState();
-    flushListeningClock();
-    flushSpeechClock();
-    state.speechActive = false;
+  resetLiveCommitState();
+  flushListeningClock();
+  flushSpeechClock();
+  state.speechActive = false;
+  if (!state.manualSpeakerPaused) {
     await pauseManualSpeakerTimer({ persist: false });
-    await stopSpeakerTracking({ statusMessage: 'Ending session. Run the final speaker pass for the last buffered audio.' });
-    await stopSessionRecording();
+  }
+  await stopSpeakerTracking({ statusMessage: 'Ending session. Run the final speaker pass for the last buffered audio.' });
+  await stopSessionRecording();
+  if (state.client) {
     await state.client.disconnect({ nextStatus: 'ended', message: 'Session ended.' });
     await ensureScreenWakeLock(false);
     state.client = null;
   }
+  await ensureScreenWakeLock(false);
 
   state.currentSession.status = 'ended';
   state.currentSession.runtimeStatus = 'ended';
@@ -5344,7 +5537,7 @@ async function pauseManualSpeakerTimer({ persist = true } = {}) {
   }
 
   syncManualSpeakerSelectionFromUi();
-  maybeCommitPendingManualSpeakerChange();
+  await commitCurrentManualSpeakerSpan({ atMs: getManualSpeakerSessionPositionMs(), persist: false });
   state.manualSpeakerElapsedMs = getManualSpeakerElapsedMs();
   state.manualSpeakerPaused = true;
   syncManualSpeakerStateToSession();
@@ -5356,7 +5549,7 @@ async function pauseManualSpeakerTimer({ persist = true } = {}) {
   renderManualSpeakerControls();
 }
 
-async function resumeManualSpeakerTimer({ persist = true, seedInitialSpeaker = true } = {}) {
+async function resumeManualSpeakerTimer({ persist = true } = {}) {
   if (!state.currentSession || state.currentSession.status !== 'active') {
     renderManualSpeakerControls();
     return;
@@ -5365,13 +5558,10 @@ async function resumeManualSpeakerTimer({ persist = true, seedInitialSpeaker = t
   syncManualSpeakerSelectionFromUi();
   state.manualSpeakerPaused = false;
   state.manualSpeakerBaseOffsetMs = Math.max(0, getManualSpeakerSessionPositionMs() - Number(state.manualSpeakerElapsedMs || 0));
+  state.manualSpeakerOpenStartMs = Math.max(0, getManualSpeakerSessionPositionMs());
+  state.manualSpeakerActiveLabel = normalizeManualSpeakerName(state.manualSpeakerCurrentLabel || getResolvedManualSpeakerSelection());
   clearPendingManualSpeakerChange();
   syncManualSpeakerStateToSession();
-
-  if (seedInitialSpeaker && !state.manualSpeakerEvents.length) {
-    await markManualSpeakerChange({ autoStart: false });
-    return;
-  }
 
   if (persist) {
     await persistManualSpeakerStateNow();
@@ -5383,35 +5573,15 @@ async function resumeManualSpeakerTimer({ persist = true, seedInitialSpeaker = t
 async function markManualSpeakerChange({ atMs = getManualSpeakerSessionPositionMs(), autoStart = true } = {}) {
   if (!state.currentSession || state.currentSession.status !== 'active') return;
   if (state.manualSpeakerPaused && autoStart) {
-    await resumeManualSpeakerTimer({ persist: false, seedInitialSpeaker: false });
+    await resumeManualSpeakerTimer({ persist: false });
   }
-
-  const normalizedAtMs = Math.max(0, Math.round(Number(atMs || 0)));
-  const speakerLabel = syncManualSpeakerSelectionFromUi();
-  const previousEvent = state.manualSpeakerEvents[state.manualSpeakerEvents.length - 1];
-
-  if (
-    previousEvent &&
-    previousEvent.speakerLabel === speakerLabel &&
-    Math.abs(Number(previousEvent.atMs || 0) - normalizedAtMs) < 400
-  ) {
-    renderManualSpeakerControls();
-    return;
-  }
-
-  const nextEvent = {
-    id: crypto.randomUUID(),
-    atMs: normalizedAtMs,
-    speakerLabel,
-  };
-  state.manualSpeakerEvents = [...state.manualSpeakerEvents, nextEvent].sort((a, b) => (a.atMs || 0) - (b.atMs || 0));
-  clearPendingManualSpeakerChange();
-  await applyManualSpeakerEventsToCurrentSession();
-  renderManualSpeakerControls();
+  await splitManualSpeakerSpan({ atMs, persist: false });
 }
 
 async function resetManualSpeakerChanges() {
   state.manualSpeakerEvents = [];
+  state.manualSpeakerOpenStartMs = null;
+  state.manualSpeakerActiveLabel = '';
   state.manualSpeakerBaseOffsetMs = getManualSpeakerSessionPositionMs();
   state.manualSpeakerElapsedMs = 0;
   clearPendingManualSpeakerChange();
@@ -6234,7 +6404,7 @@ function bindEvents() {
       const markerId = String(choiceButton.dataset.speakerMarkerChoiceId || '').trim();
       const nextSpeakerLabel = String(choiceButton.dataset.speakerLabel || '').trim();
       const index = state.manualSpeakerEvents.findIndex(
-        (item, itemIndex) => String(item.id || `manual-speaker-${itemIndex}-${Number(item.atMs || 0)}`) === markerId
+        (item, itemIndex) => getManualSpeakerEntryId(item, itemIndex) === markerId
       );
       if (!Number.isInteger(index) || index < 0 || !state.manualSpeakerEvents[index] || !nextSpeakerLabel) return;
       state.manualSpeakerEvents[index] = {
@@ -6266,7 +6436,11 @@ function bindEvents() {
       showToast('No saved audio clip covers that speaker mark yet.');
     }
   });
-  elements.startButton.addEventListener('click', () => startListening());
+  elements.startButton.addEventListener('click', () => {
+    const mode = elements.startButton?.dataset.mode || 'start';
+    const action = mode === 'stop' ? stopListening() : startListening();
+    action.catch((error) => console.warn('Unable to update session capture state', error));
+  });
   elements.pauseButton.addEventListener('click', pauseListening);
   elements.resumeButton.addEventListener('click', () => startListening());
   elements.stopButton.addEventListener('click', stopListening);
@@ -6523,12 +6697,13 @@ function setDebugCurrentSession(partial = {}) {
     ...(partial || {}),
   };
   if (Object.prototype.hasOwnProperty.call(partial || {}, 'manualSpeakerEvents')) {
-    state.manualSpeakerEvents = Array.isArray(partial.manualSpeakerEvents)
-      ? partial.manualSpeakerEvents.map((event, index) => ({
-          ...event,
-          id: String(event.id || `manual-speaker-${index}-${Number(event.atMs || 0)}`),
-        }))
-      : [];
+    state.manualSpeakerEvents = normalizeManualSpeakerSegments(partial.manualSpeakerEvents, state.currentSession);
+  }
+  if (Object.prototype.hasOwnProperty.call(partial || {}, 'manualSpeakerOpenStartMs')) {
+    state.manualSpeakerOpenStartMs = partial.manualSpeakerOpenStartMs === null ? null : Math.max(0, Number(partial.manualSpeakerOpenStartMs || 0));
+  }
+  if (Object.prototype.hasOwnProperty.call(partial || {}, 'manualSpeakerActiveLabel')) {
+    state.manualSpeakerActiveLabel = String(partial.manualSpeakerActiveLabel || '').trim();
   }
   if (Object.prototype.hasOwnProperty.call(partial || {}, 'manualSpeakerBaseOffsetMs')) {
     state.manualSpeakerBaseOffsetMs = Number(partial.manualSpeakerBaseOffsetMs || 0);
@@ -6628,6 +6803,8 @@ async function createDebugSession({
     draftTranslation: '',
     lastSequence: 0,
     manualSpeakerEvents: [],
+    manualSpeakerOpenStartMs: null,
+    manualSpeakerActiveLabel: '',
     manualSpeakerBaseOffsetMs: 0,
     manualSpeakerElapsedMs: 0,
     manualSpeakerPaused: true,
@@ -6640,6 +6817,8 @@ async function createDebugSession({
   state.currentSegments = [];
   state.sessionRecordings = [];
   state.manualSpeakerEvents = [];
+  state.manualSpeakerOpenStartMs = null;
+  state.manualSpeakerActiveLabel = '';
   state.manualSpeakerBaseOffsetMs = 0;
   state.manualSpeakerElapsedMs = 0;
   state.manualSpeakerPaused = true;
