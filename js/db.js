@@ -5,6 +5,7 @@ const LOCAL_SETTINGS_KEY = 'transcripto-ui-settings';
 const LOCAL_SETTINGS_FIELDS = [
   'sourceLanguage',
   'targetLanguage',
+  'realtimeTranscriptionModel',
   'glossary',
   'speakerNames',
   'microphoneDeviceId',

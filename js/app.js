@@ -67,6 +67,7 @@ const DEFAULT_SETTINGS = {
   apiKey: '',
   sourceLanguage: 'it',
   targetLanguage: 'en',
+  realtimeTranscriptionModel: 'gpt-4o-mini-transcribe',
   glossary: '',
   speakerNames: '',
   microphoneDeviceId: '',
@@ -215,6 +216,7 @@ const elements = {
   toggleApiKey: $('#toggleApiKey'),
   sourceLanguageInput: $('#sourceLanguageInput'),
   targetLanguageInput: $('#targetLanguageInput'),
+  realtimeTranscriptionModelInput: $('#realtimeTranscriptionModelInput'),
   micDeviceInput: $('#micDeviceInput'),
   refreshMicDevicesButton: $('#refreshMicDevicesButton'),
   echoCancellationInput: $('#echoCancellationInput'),
@@ -296,6 +298,7 @@ const elements = {
   settingsToggleApiKey: $('#settingsToggleApiKey'),
   settingsSourceLanguage: $('#settingsSourceLanguage'),
   settingsTargetLanguage: $('#settingsTargetLanguage'),
+  settingsRealtimeTranscriptionModelInput: $('#settingsRealtimeTranscriptionModelInput'),
   settingsMicDeviceInput: $('#settingsMicDeviceInput'),
   settingsRefreshMicDevicesButton: $('#settingsRefreshMicDevicesButton'),
   settingsEchoCancellationInput: $('#settingsEchoCancellationInput'),
@@ -319,6 +322,16 @@ const elements = {
 };
 
 const TRANSCRIPT_VIEW_MODES = new Set(['source', 'both', 'target']);
+const REALTIME_TRANSCRIPTION_MODELS = [
+  {
+    value: 'gpt-4o-mini-transcribe',
+    label: 'Balanced default, gpt-4o-mini-transcribe',
+  },
+  {
+    value: 'gpt-realtime-whisper',
+    label: 'Low-latency test, gpt-realtime-whisper',
+  },
+];
 let debugNoPersistence = false;
 
 function nowIso() {
@@ -493,6 +506,22 @@ function fillLanguageSelect(select) {
   ).join('');
 }
 
+function normalizeRealtimeTranscriptionModel(model) {
+  const nextModel = String(model || '').trim();
+  return REALTIME_TRANSCRIPTION_MODELS.some((option) => option.value === nextModel)
+    ? nextModel
+    : DEFAULT_SETTINGS.realtimeTranscriptionModel;
+}
+
+function populateRealtimeTranscriptionModelSelect(select, selectedModel = DEFAULT_SETTINGS.realtimeTranscriptionModel) {
+  if (!select) return;
+
+  select.innerHTML = REALTIME_TRANSCRIPTION_MODELS.map(
+    (option) => `<option value="${escapeHtml(option.value)}">${escapeHtml(option.label)}</option>`
+  ).join('');
+  select.value = normalizeRealtimeTranscriptionModel(selectedModel);
+}
+
 function normalizeAudioProcessingEnabled(value, fallback = true) {
   return value === undefined ? fallback : Boolean(value);
 }
@@ -571,6 +600,14 @@ function applySettingsToForms() {
   elements.targetLanguageInput.value = settings.targetLanguage;
   elements.settingsSourceLanguage.value = settings.sourceLanguage;
   elements.settingsTargetLanguage.value = settings.targetLanguage;
+  populateRealtimeTranscriptionModelSelect(
+    elements.realtimeTranscriptionModelInput,
+    normalizeRealtimeTranscriptionModel(settings.realtimeTranscriptionModel)
+  );
+  populateRealtimeTranscriptionModelSelect(
+    elements.settingsRealtimeTranscriptionModelInput,
+    normalizeRealtimeTranscriptionModel(settings.realtimeTranscriptionModel)
+  );
   populateMicrophoneSelect(elements.micDeviceInput, state.availableMicrophones, settings.microphoneDeviceId || '');
   populateMicrophoneSelect(elements.settingsMicDeviceInput, state.availableMicrophones, settings.microphoneDeviceId || '');
   if (elements.echoCancellationInput) {
@@ -997,6 +1034,7 @@ function collectSettingsFromSetupForm() {
     apiKey: elements.apiKeyInput.value.trim(),
     sourceLanguage: elements.sourceLanguageInput.value,
     targetLanguage: elements.targetLanguageInput.value,
+    realtimeTranscriptionModel: normalizeRealtimeTranscriptionModel(elements.realtimeTranscriptionModelInput?.value),
     microphoneDeviceId: elements.micDeviceInput?.value || '',
     echoCancellation: Boolean(elements.echoCancellationInput?.checked),
     noiseSuppression: Boolean(elements.noiseSuppressionInput?.checked),
@@ -1011,6 +1049,7 @@ function collectSettingsFromSettingsForm() {
     apiKey: elements.settingsApiKeyInput.value.trim(),
     sourceLanguage: elements.settingsSourceLanguage.value,
     targetLanguage: elements.settingsTargetLanguage.value,
+    realtimeTranscriptionModel: normalizeRealtimeTranscriptionModel(elements.settingsRealtimeTranscriptionModelInput?.value),
     microphoneDeviceId: elements.settingsMicDeviceInput?.value || '',
     echoCancellation: Boolean(elements.settingsEchoCancellationInput?.checked),
     noiseSuppression: Boolean(elements.settingsNoiseSuppressionInput?.checked),
@@ -4397,6 +4436,69 @@ async function handleStartFromSetup(event) {
   await startListening();
 }
 
+function buildRealtimeClientOptions() {
+  return {
+    apiKey: state.settings.apiKey,
+    sourceLanguage: state.currentSession.sourceLanguage,
+    sourceLanguageName: getLanguageName(state.currentSession.sourceLanguage),
+    targetLanguageName: getLanguageName(state.currentSession.targetLanguage),
+    glossary: buildSessionGlossary(state.currentSession),
+    transcriptionModel: normalizeRealtimeTranscriptionModel(state.settings.realtimeTranscriptionModel),
+    microphoneDeviceId: state.settings.microphoneDeviceId,
+    echoCancellation: normalizeAudioProcessingEnabled(state.settings.echoCancellation),
+    noiseSuppression: normalizeAudioProcessingEnabled(state.settings.noiseSuppression),
+    autoGainControl: normalizeAudioProcessingEnabled(state.settings.autoGainControl),
+    onEvent: handleRealtimeEvent,
+    onStreamAvailable: (stream) => {
+      startSessionRecording(stream.clone()).catch((error) => {
+        console.warn('Local session recording failed to start', error);
+      });
+      startSpeakerTracking(stream).catch((error) => {
+        console.warn('Background speaker tracking failed to start', error);
+      });
+    },
+    onStatus: (status, message) => {
+      if (status === 'listening') {
+        markListeningStart();
+      }
+      setStatus(status, message);
+      renderSessionSummary();
+    },
+    onError: async (message) => {
+      resetLiveCommitState();
+      state.speechActive = false;
+      await pauseManualSpeakerTimer({ persist: false });
+      await stopSpeakerTracking({ statusMessage: 'Speaker timing paused.' });
+      await stopSessionRecording();
+      await ensureScreenWakeLock(false);
+      flushListeningClock();
+      flushSpeechClock();
+      setStatus('error', message);
+      if (state.currentSession) {
+        state.currentSession.status = 'paused';
+        state.currentSession.runtimeStatus = 'error';
+      }
+      await persistCurrentSessionNow();
+      showToast(message, 5000);
+    },
+  };
+}
+
+function getRealtimeClientPreview() {
+  if (!state.currentSession) return null;
+  const options = buildRealtimeClientOptions();
+  return {
+    sourceLanguage: options.sourceLanguage,
+    sourceLanguageName: options.sourceLanguageName,
+    targetLanguageName: options.targetLanguageName,
+    transcriptionModel: options.transcriptionModel,
+    microphoneDeviceId: options.microphoneDeviceId,
+    echoCancellation: options.echoCancellation,
+    noiseSuppression: options.noiseSuppression,
+    autoGainControl: options.autoGainControl,
+  };
+}
+
 async function startListening({ silent = false } = {}) {
   if (!state.currentSession) {
     showToast('Create or open a session first.');
@@ -4435,50 +4537,7 @@ async function startListening({ silent = false } = {}) {
     scrollTranscriptToLive('auto');
   }
 
-  const client = new RealtimeTranscriptionClient({
-    apiKey: state.settings.apiKey,
-    sourceLanguage: state.currentSession.sourceLanguage,
-    sourceLanguageName: getLanguageName(state.currentSession.sourceLanguage),
-    targetLanguageName: getLanguageName(state.currentSession.targetLanguage),
-    glossary: buildSessionGlossary(state.currentSession),
-    microphoneDeviceId: state.settings.microphoneDeviceId,
-    echoCancellation: normalizeAudioProcessingEnabled(state.settings.echoCancellation),
-    noiseSuppression: normalizeAudioProcessingEnabled(state.settings.noiseSuppression),
-    autoGainControl: normalizeAudioProcessingEnabled(state.settings.autoGainControl),
-    onEvent: handleRealtimeEvent,
-    onStreamAvailable: (stream) => {
-      startSessionRecording(stream.clone()).catch((error) => {
-        console.warn('Local session recording failed to start', error);
-      });
-      startSpeakerTracking(stream).catch((error) => {
-        console.warn('Background speaker tracking failed to start', error);
-      });
-    },
-    onStatus: (status, message) => {
-      if (status === 'listening') {
-        markListeningStart();
-      }
-      setStatus(status, message);
-      renderSessionSummary();
-    },
-    onError: async (message) => {
-      resetLiveCommitState();
-      state.speechActive = false;
-      await pauseManualSpeakerTimer({ persist: false });
-      await stopSpeakerTracking({ statusMessage: 'Speaker timing paused.' });
-      await stopSessionRecording();
-      await ensureScreenWakeLock(false);
-      flushListeningClock();
-      flushSpeechClock();
-      setStatus('error', message);
-      if (state.currentSession) {
-        state.currentSession.status = 'paused';
-        state.currentSession.runtimeStatus = 'error';
-      }
-      await persistCurrentSessionNow();
-      showToast(message, 5000);
-    },
-  });
+  const client = new RealtimeTranscriptionClient(buildRealtimeClientOptions());
 
   state.client = client;
 
@@ -5265,14 +5324,15 @@ async function saveSettingsFromSettingsForm(event) {
     renderCurrentView();
   }
 
-  const microphoneSettingsChanged =
+  const captureRestartRequired =
+    previousSettings.realtimeTranscriptionModel !== values.realtimeTranscriptionModel ||
     previousSettings.microphoneDeviceId !== values.microphoneDeviceId ||
     normalizeAudioProcessingEnabled(previousSettings.echoCancellation) !== values.echoCancellation ||
     normalizeAudioProcessingEnabled(previousSettings.noiseSuppression) !== values.noiseSuppression ||
     normalizeAudioProcessingEnabled(previousSettings.autoGainControl) !== values.autoGainControl;
 
-  if (microphoneSettingsChanged && state.client) {
-    showToast('Mic settings saved. Stop and resume capture to apply them.', 4500);
+  if (captureRestartRequired && state.client) {
+    showToast('Live capture settings saved. Stop and resume capture to apply them.', 4500);
     return;
   }
 
@@ -5662,6 +5722,8 @@ function buildDebugSnapshot() {
     liveState: elements.transcriptLiveState?.textContent || '',
     route: state.route,
     runtimeStatus: state.runtimeStatus,
+    realtimeTranscriptionModel: state.settings.realtimeTranscriptionModel,
+    clientTranscriptionModel: state.client?.transcriptionModel || '',
     segmentCount: state.currentSegments.length,
     segmentMetricLabel: elements.segmentCountLabel?.textContent || '',
     segmentMetricValue: elements.segmentCountValue?.textContent || '',
@@ -5988,6 +6050,7 @@ function installDebugHooks() {
     setRecordingsForTest: setDebugRecordings,
     setDiarizeMockForTest: setDebugDiarizeMock,
     runFinalizeSpeakerTimingForTest: runDebugFinalizeSpeakerTiming,
+    getRealtimeClientPreviewForTest: getRealtimeClientPreview,
     getViewForTest: buildDebugSnapshot,
     snapshot: buildDebugSnapshot,
     setDraftTranslation: setDebugDraftTranslation,
@@ -6020,6 +6083,8 @@ async function init() {
   fillLanguageSelect(elements.targetLanguageInput);
   fillLanguageSelect(elements.settingsSourceLanguage);
   fillLanguageSelect(elements.settingsTargetLanguage);
+  populateRealtimeTranscriptionModelSelect(elements.realtimeTranscriptionModelInput);
+  populateRealtimeTranscriptionModelSelect(elements.settingsRealtimeTranscriptionModelInput);
   bindEvents();
   renderCurrentView();
   installDebugHooks();

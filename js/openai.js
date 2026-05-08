@@ -1,7 +1,8 @@
 const REALTIME_URL = 'https://api.openai.com/v1/realtime/calls';
 const RESPONSES_URL = 'https://api.openai.com/v1/responses';
 const AUDIO_TRANSCRIPTIONS_URL = 'https://api.openai.com/v1/audio/transcriptions';
-const REALTIME_TRANSCRIPTION_MODEL = 'gpt-4o-mini-transcribe';
+const DEFAULT_REALTIME_TRANSCRIPTION_MODEL = 'gpt-4o-mini-transcribe';
+const REALTIME_WHISPER_MODEL = 'gpt-realtime-whisper';
 const DRAFT_TRANSLATION_MODEL = 'gpt-4o-mini';
 const FINAL_TRANSLATION_MODEL = 'gpt-4.1-mini';
 const SPEAKER_DIARIZATION_MODEL = 'gpt-4o-transcribe-diarize';
@@ -21,6 +22,14 @@ function extractErrorMessage(payload, fallback = 'OpenAI request failed') {
 function normalizeLanguageCode(code) {
   if (!code) return '';
   return String(code).trim().toLowerCase();
+}
+
+function normalizeRealtimeTranscriptionModel(model) {
+  const nextModel = String(model || '').trim();
+  if ([DEFAULT_REALTIME_TRANSCRIPTION_MODEL, REALTIME_WHISPER_MODEL].includes(nextModel)) {
+    return nextModel;
+  }
+  return DEFAULT_REALTIME_TRANSCRIPTION_MODEL;
 }
 
 function estimateMaxOutputTokens(text, draft = false) {
@@ -73,6 +82,7 @@ export class RealtimeTranscriptionClient {
     sourceLanguageName,
     targetLanguageName,
     glossary,
+    transcriptionModel = DEFAULT_REALTIME_TRANSCRIPTION_MODEL,
     microphoneDeviceId,
     echoCancellation = true,
     noiseSuppression = true,
@@ -87,6 +97,7 @@ export class RealtimeTranscriptionClient {
     this.sourceLanguageName = sourceLanguageName;
     this.targetLanguageName = targetLanguageName;
     this.glossary = glossary || '';
+    this.transcriptionModel = normalizeRealtimeTranscriptionModel(transcriptionModel);
     this.microphoneDeviceId = String(microphoneDeviceId || '').trim();
     this.echoCancellation = echoCancellation !== false;
     this.noiseSuppression = noiseSuppression !== false;
@@ -223,13 +234,8 @@ export class RealtimeTranscriptionClient {
         audio: {
           input: {
             transcription: {
-              model: REALTIME_TRANSCRIPTION_MODEL,
+              model: this.transcriptionModel,
               language: this.sourceLanguage,
-              prompt: buildTranscriptionPrompt({
-                sourceLanguageName: this.sourceLanguageName,
-                targetLanguageName: this.targetLanguageName,
-                glossary: this.glossary,
-              }),
             },
             noise_reduction: { type: 'near_field' },
             turn_detection: {
@@ -242,6 +248,14 @@ export class RealtimeTranscriptionClient {
           },
         },
       };
+
+      if (this.transcriptionModel !== REALTIME_WHISPER_MODEL) {
+        sessionConfig.audio.input.transcription.prompt = buildTranscriptionPrompt({
+          sourceLanguageName: this.sourceLanguageName,
+          targetLanguageName: this.targetLanguageName,
+          glossary: this.glossary,
+        });
+      }
 
       const formData = new FormData();
       formData.set('sdp', offer.sdp || '');
