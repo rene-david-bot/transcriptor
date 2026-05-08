@@ -32,6 +32,121 @@ function normalizeRealtimeTranscriptionModel(model) {
   return DEFAULT_REALTIME_TRANSCRIPTION_MODEL;
 }
 
+function buildRealtimeTurnDetectionConfig({ conservative = false } = {}) {
+  return {
+    type: 'server_vad',
+    threshold: 0.5,
+    prefix_padding_ms: conservative ? 300 : 180,
+    silence_duration_ms: conservative ? 500 : 320,
+  };
+}
+
+function buildRealtimeTranscriptionSessionConfig({
+  transcriptionModel = DEFAULT_REALTIME_TRANSCRIPTION_MODEL,
+  sourceLanguage = '',
+  sourceLanguageName = 'Source',
+  targetLanguageName = 'Target',
+  glossary = '',
+  conservative = false,
+} = {}) {
+  const model = normalizeRealtimeTranscriptionModel(transcriptionModel);
+  const normalizedLanguage = normalizeLanguageCode(sourceLanguage);
+  const transcription = {
+    model,
+  };
+
+  if (normalizedLanguage) {
+    transcription.language = normalizedLanguage;
+  }
+
+  if (!conservative && model !== REALTIME_WHISPER_MODEL) {
+    transcription.prompt = buildTranscriptionPrompt({
+      sourceLanguageName,
+      targetLanguageName,
+      glossary,
+    });
+  }
+
+  const input = {
+    transcription,
+    turn_detection: buildRealtimeTurnDetectionConfig({ conservative }),
+  };
+
+  if (!conservative) {
+    input.noise_reduction = { type: 'near_field' };
+  }
+
+  return {
+    type: 'transcription',
+    audio: {
+      input,
+    },
+  };
+}
+
+function parseMaybeJson(text) {
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function shouldRetryRealtimeConnectionConservatively(error, model) {
+  if (normalizeRealtimeTranscriptionModel(model) !== REALTIME_WHISPER_MODEL) {
+    return false;
+  }
+
+  const status = Number(error?.status || 0);
+  if (![0, 400, 404, 409, 422].includes(status)) {
+    return false;
+  }
+
+  const message = String(error?.message || '').toLowerCase();
+  return [
+    'invalid',
+    'unsupported',
+    'unknown',
+    'turn_detection',
+    'noise_reduction',
+    'prompt',
+    'transcription',
+    'session',
+    'audio.input',
+  ].some((token) => message.includes(token));
+}
+
+async function createRealtimeAnswerSdp({ apiKey, offerSdp, sessionConfig }) {
+  const formData = new FormData();
+  formData.set('sdp', offerSdp || '');
+  formData.set('session', JSON.stringify(sessionConfig));
+
+  const response = await fetch(REALTIME_URL, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    const payload = parseMaybeJson(text);
+    const error = new Error(extractErrorMessage(payload, text || `Realtime connection failed (${response.status})`));
+    error.status = response.status;
+    error.payload = payload;
+    error.responseText = text;
+    throw error;
+  }
+
+  return response.text();
+}
+
+export function buildRealtimeTranscriptionSessionPreview(options = {}) {
+  return buildRealtimeTranscriptionSessionConfig(options);
+}
+
 function estimateMaxOutputTokens(text, draft = false) {
   const roughTokens = Math.ceil(String(text || '').length / 3);
   const floor = draft ? 48 : 96;
@@ -229,52 +344,40 @@ export class RealtimeTranscriptionClient {
       const offer = await this.peerConnection.createOffer();
       await this.peerConnection.setLocalDescription(offer);
 
-      const sessionConfig = {
-        type: 'transcription',
-        audio: {
-          input: {
-            transcription: {
-              model: this.transcriptionModel,
-              language: this.sourceLanguage,
-            },
-            noise_reduction: { type: 'near_field' },
-            turn_detection: {
-              type: 'server_vad',
-              threshold: 0.5,
-              prefix_padding_ms: 180,
-              silence_duration_ms: 320,
-              create_response: false,
-            },
-          },
-        },
-      };
+      let answerSdp;
+      try {
+        answerSdp = await createRealtimeAnswerSdp({
+          apiKey: this.apiKey,
+          offerSdp: offer.sdp || '',
+          sessionConfig: buildRealtimeTranscriptionSessionConfig({
+            transcriptionModel: this.transcriptionModel,
+            sourceLanguage: this.sourceLanguage,
+            sourceLanguageName: this.sourceLanguageName,
+            targetLanguageName: this.targetLanguageName,
+            glossary: this.glossary,
+            conservative: false,
+          }),
+        });
+      } catch (error) {
+        if (!shouldRetryRealtimeConnectionConservatively(error, this.transcriptionModel)) {
+          throw error;
+        }
 
-      if (this.transcriptionModel !== REALTIME_WHISPER_MODEL) {
-        sessionConfig.audio.input.transcription.prompt = buildTranscriptionPrompt({
-          sourceLanguageName: this.sourceLanguageName,
-          targetLanguageName: this.targetLanguageName,
-          glossary: this.glossary,
+        this.onStatus?.('connecting', 'Retrying the experimental realtime model with a compatibility session setup...');
+        answerSdp = await createRealtimeAnswerSdp({
+          apiKey: this.apiKey,
+          offerSdp: offer.sdp || '',
+          sessionConfig: buildRealtimeTranscriptionSessionConfig({
+            transcriptionModel: this.transcriptionModel,
+            sourceLanguage: this.sourceLanguage,
+            sourceLanguageName: this.sourceLanguageName,
+            targetLanguageName: this.targetLanguageName,
+            glossary: this.glossary,
+            conservative: true,
+          }),
         });
       }
 
-      const formData = new FormData();
-      formData.set('sdp', offer.sdp || '');
-      formData.set('session', JSON.stringify(sessionConfig));
-
-      const response = await fetch(REALTIME_URL, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${this.apiKey}`,
-        },
-        body: formData,
-      });
-
-      if (!response.ok) {
-        const text = await response.text();
-        throw new Error(text || `Realtime connection failed (${response.status})`);
-      }
-
-      const answerSdp = await response.text();
       await this.peerConnection.setRemoteDescription({ type: 'answer', sdp: answerSdp });
       this.scheduleRollover();
       return { connectionId: this.connectionId };

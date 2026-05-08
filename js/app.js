@@ -18,7 +18,12 @@ import {
   upsertSession,
 } from './db.js';
 import { exportSessionJson, exportSessionMarkdown, exportSessionTxt } from './exporters.js';
-import { diarizeAudioChunk, RealtimeTranscriptionClient, translateText } from './openai.js';
+import {
+  buildRealtimeTranscriptionSessionPreview,
+  diarizeAudioChunk,
+  RealtimeTranscriptionClient,
+  translateText,
+} from './openai.js';
 
 const LANGUAGES = [
   ['ar', 'Arabic'],
@@ -269,8 +274,7 @@ const elements = {
   reviewAudio: $('#reviewAudio'),
   reviewAudioTransport: $('#reviewAudioTransport'),
   reviewAudioStatus: $('#reviewAudioStatus'),
-  reviewPlayButton: $('#reviewPlayButton'),
-  reviewPauseButton: $('#reviewPauseButton'),
+  reviewPlayPauseButton: $('#reviewPlayPauseButton'),
   reviewProgressInput: $('#reviewProgressInput'),
   reviewCurrentTime: $('#reviewCurrentTime'),
   reviewTotalTime: $('#reviewTotalTime'),
@@ -2704,6 +2708,12 @@ function ensureReviewAudioPlaybackDefaults() {
   if (audio.playbackRate !== 1) audio.playbackRate = 1;
 }
 
+function isReviewAudioPlaying() {
+  return Boolean(
+    elements.reviewAudio && !elements.reviewAudio.paused && !elements.reviewAudio.ended && state.sessionPlaybackPreviewMs === null
+  );
+}
+
 function getCurrentPlaybackAbsoluteMs() {
   const audio = elements.reviewAudio;
   const recording = state.sessionRecordings[state.sessionPlaybackClipIndex];
@@ -2885,6 +2895,15 @@ async function pauseReviewAudio() {
   renderRecordingReview();
 }
 
+async function toggleReviewAudioPlayback() {
+  if (isReviewAudioPlaying()) {
+    await pauseReviewAudio();
+    return;
+  }
+
+  await playReviewAudio();
+}
+
 function renderRecordingReview() {
   const count = state.sessionRecordings.length;
   const durationMs = getSessionRecordingDurationMs();
@@ -2892,7 +2911,7 @@ function renderRecordingReview() {
   const currentIndex = state.sessionPlaybackClipIndex;
   const currentClip = currentIndex >= 0 ? state.sessionRecordings[currentIndex] : null;
   const currentPlaybackMs = getVisibleSessionPlaybackMs();
-  const playing = Boolean(elements.reviewAudio && !elements.reviewAudio.paused && !elements.reviewAudio.ended && state.sessionPlaybackPreviewMs === null);
+  const playing = isReviewAudioPlaying();
 
   if (elements.reviewAudioStatus) {
     const parts = [];
@@ -2906,11 +2925,12 @@ function renderRecordingReview() {
     elements.reviewAudioStatus.textContent = parts.join(' • ') || 'Local session recording will appear here while capture runs.';
   }
 
-  if (elements.reviewPlayButton) {
-    elements.reviewPlayButton.disabled = !count;
-  }
-  if (elements.reviewPauseButton) {
-    elements.reviewPauseButton.disabled = !elements.reviewAudio || elements.reviewAudio.paused;
+  if (elements.reviewPlayPauseButton) {
+    elements.reviewPlayPauseButton.disabled = !count;
+    elements.reviewPlayPauseButton.dataset.state = playing ? 'pause' : 'play';
+    elements.reviewPlayPauseButton.textContent = playing ? '❚❚' : '▶';
+    elements.reviewPlayPauseButton.setAttribute('aria-label', playing ? 'Pause whole session audio' : 'Play whole session audio');
+    elements.reviewPlayPauseButton.title = playing ? 'Pause whole session audio' : 'Play whole session audio';
   }
   if (elements.reviewAudioTransport) {
     elements.reviewAudioTransport.classList.toggle('hidden', !count);
@@ -2967,6 +2987,7 @@ function renderManualSpeakerControls() {
       id: String(event.id || `manual-speaker-${index}-${Number(event.atMs || 0)}`),
       splitMs: Math.max(0, Number(event.atMs || 0) - Number(index > 0 ? events[index - 1].atMs : baseOffsetMs)),
       overallMs: Math.max(0, Number(event.atMs || 0) - baseOffsetMs),
+      isBaseline: index === 0 && Math.abs(Number(event.atMs || 0) - baseOffsetMs) < 400,
     }))
     .reverse();
 
@@ -3014,7 +3035,7 @@ function renderManualSpeakerControls() {
       )}</div>`;
     } else {
       elements.speakerChangeMarkers.innerHTML = [
-        '<div class="speaker-change-marker-headings"><span>Speaker</span><span>Split</span><span>Overall</span></div>',
+        '<div class="speaker-change-marker-headings"><span>Speaker</span><span>Change</span><span>Overall</span></div>',
         manualEvents
           .map(
             (event) => `
@@ -3029,7 +3050,9 @@ function renderManualSpeakerControls() {
                   <span class="speaker-change-marker-row__speaker">${escapeHtml(event.speakerLabel || 'Speaker')}</span>
                   <span class="speaker-change-marker-row__speaker-chevron" aria-hidden="true">${state.manualSpeakerEditingEventId === event.id ? '▾' : '▸'}</span>
                 </button>
-                <span class="speaker-change-marker-row__split">${escapeHtml(formatManualStopwatchTime(event.splitMs || 0))}</span>
+                <span class="speaker-change-marker-row__split ${event.isBaseline ? 'speaker-change-marker-row__split--start' : ''}">${escapeHtml(
+                  event.isBaseline ? 'Start' : formatManualStopwatchTime(event.splitMs || 0)
+                )}</span>
                 <button
                   class="speaker-change-marker-row__overall"
                   type="button"
@@ -3538,6 +3561,9 @@ function buildSpeakerFinalizeBatches(recordings = []) {
 
 async function diarizeRecordingBatch(batch, session = state.currentSession) {
   if (!batch?.recordings?.length || !session) return 0;
+  if (batch.recordings.length === 1) {
+    return diarizeRecordingClip(batch.recordings[0], session);
+  }
   const mergedAudio = await mergeRecordingBatchToWav(batch.recordings);
   const diarized = await runDiarizeAudioChunk({
     apiKey: state.settings.apiKey,
@@ -3601,7 +3627,79 @@ async function diarizeRecordingClipWithRetry(recording, session = state.currentS
   };
 }
 
+async function diarizeRecordingBatchIndividually(
+  batch,
+  session = state.currentSession,
+  { maxAttempts = SPEAKER_FINALIZE_MAX_ATTEMPTS, onRetry, onRecordingProgress } = {}
+) {
+  if (!batch?.recordings?.length || !session) {
+    return {
+      ok: true,
+      applied: 0,
+      attempts: 0,
+      mode: 'fallback-individual',
+      completedRecordings: 0,
+      failedRecordings: 0,
+      partial: false,
+      lastError: null,
+    };
+  }
+
+  let applied = 0;
+  let completedRecordings = 0;
+  let failedRecordings = 0;
+  let lastError = null;
+
+  for (const [index, recording] of batch.recordings.entries()) {
+    onRecordingProgress?.({
+      index,
+      total: batch.recordings.length,
+      recording,
+      completedRecordings,
+      failedRecordings,
+    });
+
+    const result = await diarizeRecordingClipWithRetry(recording, session, {
+      maxAttempts,
+      onRetry: (error, nextAttempt, totalAttempts) => {
+        lastError = error;
+        onRetry?.(error, nextAttempt, totalAttempts, recording, index, batch.recordings.length);
+      },
+    });
+
+    if (result.ok) {
+      applied += Number(result.applied || 0);
+      completedRecordings += 1;
+    } else {
+      failedRecordings += 1;
+      lastError = result.error || lastError;
+    }
+  }
+
+  return {
+    ok: failedRecordings === 0,
+    applied,
+    attempts: Math.max(1, Number(maxAttempts || 1)),
+    error: lastError,
+    mode: 'fallback-individual',
+    completedRecordings,
+    failedRecordings,
+    partial: completedRecordings > 0 && failedRecordings > 0,
+  };
+}
+
 async function diarizeRecordingBatchWithRetry(batch, session = state.currentSession, { maxAttempts = SPEAKER_FINALIZE_MAX_ATTEMPTS, onRetry } = {}) {
+  if (batch?.recordings?.length === 1) {
+    const result = await diarizeRecordingClipWithRetry(batch.recordings[0], session, { maxAttempts, onRetry });
+    return {
+      ...result,
+      mode: 'single',
+      completedRecordings: result.ok ? 1 : 0,
+      failedRecordings: result.ok ? 0 : 1,
+      partial: false,
+    };
+  }
+
   let lastError = null;
   const attempts = Math.max(1, Number(maxAttempts || 1));
 
@@ -3612,6 +3710,10 @@ async function diarizeRecordingBatchWithRetry(batch, session = state.currentSess
         ok: true,
         applied,
         attempts: attempt,
+        mode: 'batch',
+        completedRecordings: batch?.recordings?.length || 0,
+        failedRecordings: 0,
+        partial: false,
       };
     } catch (error) {
       lastError = error;
@@ -3621,12 +3723,12 @@ async function diarizeRecordingBatchWithRetry(batch, session = state.currentSess
     }
   }
 
-  return {
-    ok: false,
-    applied: 0,
-    attempts,
-    error: lastError,
-  };
+  return diarizeRecordingBatchIndividually(batch, session, {
+    maxAttempts,
+    onRetry: (error, nextAttempt, totalAttempts, recording, index, totalRecordings) => {
+      onRetry?.(error, nextAttempt, totalAttempts, recording, index, totalRecordings, true);
+    },
+  });
 }
 
 function stopSpeakerTracks(stream) {
@@ -3879,7 +3981,7 @@ async function finalizeSpeakerTiming() {
           : 'Capturing the last speaker chunk...'
         : 'Finishing queued speaker timing...',
     note: pendingRecordingPasses.length
-      ? 'Merging saved clips into larger final speaker batches now.'
+      ? 'Preparing the saved clips for the final speaker pass now.'
       : 'Working through the queued speaker timing now.',
   });
   state.speakerTrackingStatus = pendingRecordingPasses.length
@@ -3925,16 +4027,24 @@ async function finalizeSpeakerTiming() {
       renderSpeakerInsights();
 
       const result = await diarizeRecordingBatchWithRetry(batch, state.currentSession, {
-        onRetry: (error, nextAttempt, maxAttempts) => {
+        onRetry: (error, nextAttempt, maxAttempts, recording, recordingIndex, totalRecordings, usingClipFallback = false) => {
           setSpeakerFinalizeProgress({
             total: totalPasses,
             completed: completedPasses,
             failed: failedPasses,
             currentIndex: index + 1,
-            statusLine: `Retrying final speaker batch ${index + 1} of ${totalPasses}...`,
-            note: `Batch ${index + 1} of ${totalPasses} hit a temporary issue. Retrying ${nextAttempt}/${maxAttempts}...`,
+            statusLine: usingClipFallback
+              ? `Retrying clip ${Number(recordingIndex || 0) + 1} of ${Number(totalRecordings || clipCount)} inside final batch ${index + 1}...`
+              : `Retrying final speaker batch ${index + 1} of ${totalPasses}...`,
+            note: usingClipFallback
+              ? `The merged final pass fell back to individual clips. Retrying clip ${Number(recordingIndex || 0) + 1}/${Number(
+                  totalRecordings || clipCount
+                )}, attempt ${nextAttempt}/${maxAttempts}${recording?.startMs !== undefined ? ` (${formatDurationShort(recording.startMs || 0)})` : ''}.`
+              : `Batch ${index + 1} of ${totalPasses} hit a temporary issue. Retrying ${nextAttempt}/${maxAttempts}...`,
           });
-          state.speakerTrackingStatus = `Retrying final speaker batch ${index + 1} of ${totalPasses}...`;
+          state.speakerTrackingStatus = usingClipFallback
+            ? `Retrying saved clip ${Number(recordingIndex || 0) + 1} of ${Number(totalRecordings || clipCount)}...`
+            : `Retrying final speaker batch ${index + 1} of ${totalPasses}...`;
           if (error?.message) {
             console.warn('Retrying final speaker batch after diarization error', error);
           }
@@ -3950,7 +4060,10 @@ async function finalizeSpeakerTiming() {
           failed: failedPasses,
           currentIndex: Math.min(totalPasses, index + 1),
           statusLine: `Analyzing final speaker batch ${index + 1} of ${totalPasses}...`,
-          note: `Finished batch ${index + 1} of ${totalPasses}.`,
+          note:
+            result.mode === 'fallback-individual'
+              ? `Finished batch ${index + 1} of ${totalPasses} with clip-by-clip recovery.`
+              : `Finished batch ${index + 1} of ${totalPasses}.`,
         });
       } else {
         failedPasses += 1;
@@ -3960,8 +4073,16 @@ async function finalizeSpeakerTiming() {
           completed: completedPasses,
           failed: failedPasses,
           currentIndex: Math.min(totalPasses, index + 1),
-          statusLine: `Final speaker batch ${index + 1} of ${totalPasses} will stay queued for another try.`,
-          note: `Batch ${index + 1} of ${totalPasses} could not be processed yet. It will stay queued for another try.`,
+          statusLine:
+            result.partial || result.mode === 'fallback-individual'
+              ? `Final batch ${index + 1} of ${totalPasses} only finished partly. The remaining clips stay queued.`
+              : `Final speaker batch ${index + 1} of ${totalPasses} will stay queued for another try.`,
+          note:
+            result.partial || result.mode === 'fallback-individual'
+              ? `Batch ${index + 1} of ${totalPasses} recovered ${Number(result.completedRecordings || 0)} clip${
+                  Number(result.completedRecordings || 0) === 1 ? '' : 's'
+                }, while ${Number(result.failedRecordings || clipCount)} clip${Number(result.failedRecordings || clipCount) === 1 ? '' : 's'} still need another try.`
+              : `Batch ${index + 1} of ${totalPasses} could not be processed yet. It will stay queued for another try.`,
         });
       }
 
@@ -4496,6 +4617,22 @@ function getRealtimeClientPreview() {
     echoCancellation: options.echoCancellation,
     noiseSuppression: options.noiseSuppression,
     autoGainControl: options.autoGainControl,
+    sessionConfigPreview: buildRealtimeTranscriptionSessionPreview({
+      transcriptionModel: options.transcriptionModel,
+      sourceLanguage: options.sourceLanguage,
+      sourceLanguageName: options.sourceLanguageName,
+      targetLanguageName: options.targetLanguageName,
+      glossary: state.currentSession?.glossary || state.settings.glossary || '',
+      conservative: false,
+    }),
+    conservativeSessionConfigPreview: buildRealtimeTranscriptionSessionPreview({
+      transcriptionModel: options.transcriptionModel,
+      sourceLanguage: options.sourceLanguage,
+      sourceLanguageName: options.sourceLanguageName,
+      targetLanguageName: options.targetLanguageName,
+      glossary: state.currentSession?.glossary || state.settings.glossary || '',
+      conservative: true,
+    }),
   };
 }
 
@@ -5437,8 +5574,7 @@ function bindEvents() {
     }
   });
   window.addEventListener('resize', applyTranscriptView);
-  elements.reviewPlayButton?.addEventListener('click', playReviewAudio);
-  elements.reviewPauseButton?.addEventListener('click', pauseReviewAudio);
+  elements.reviewPlayPauseButton?.addEventListener('click', toggleReviewAudioPlayback);
   elements.reviewProgressInput?.addEventListener('input', (event) => {
     const nextValue = Number(event.target.value || 0);
     setSessionPlaybackPreviewMs(nextValue);
