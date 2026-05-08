@@ -25,15 +25,15 @@
             <p class="eyebrow">Local-first PWA</p>
             <h1>Transcripto</h1>
           </div>
-          <button class="icon-button sidebar-close" id="sidebarClose" aria-label="Close menu">✕</button>
+          <button type="button" class="icon-button sidebar-close" id="sidebarClose" aria-label="Close menu">✕</button>
         </div>
 
         <nav class="sidebar__nav" aria-label="Primary">
-          <button class="nav-link" data-route="setup">Start / Setup</button>
-          <button class="nav-link" data-route="live">Current Session</button>
-          <button class="nav-link" data-action="new-session">New Session</button>
-          <button class="nav-link" data-route="history">Previous Sessions / History</button>
-          <button class="nav-link" data-route="settings">Settings</button>
+          <button type="button" class="nav-link" data-route="setup">Start / Setup</button>
+          <button type="button" class="nav-link" data-route="live">Current Session</button>
+          <button type="button" class="nav-link" data-action="new-session">New Session</button>
+          <button type="button" class="nav-link" data-route="history">Previous Sessions / History</button>
+          <button type="button" class="nav-link" data-route="settings">Settings</button>
         </nav>
 
         <div class="sidebar__footer">
@@ -54,7 +54,7 @@
       <div class="app-main">
         <header class="topbar">
           <div class="topbar__left">
-            <button class="icon-button" id="menuButton" aria-label="Open menu">☰</button>
+            <button type="button" class="icon-button" id="menuButton" aria-label="Open menu">☰</button>
             <div>
               <p class="eyebrow" id="topbarEyebrow">Ready</p>
               <h2 class="topbar__title">Transcripto</h2>
@@ -256,7 +256,7 @@
                   </div>
 
                   <div class="button-row button-row--wrap control-secondary-actions">
-                    <button class="button button--secondary button--small" id="finalizeSpeakerButton" type="button">Finalize speaker timing</button>
+                    <button class="button button--secondary button--small" id="finalizeSpeakerButton" type="button">Run final speaker timing</button>
                     <button class="button button--ghost button--small" id="openMicSettingsButton" type="button">Mic settings</button>
                   </div>
                 </section>
@@ -362,7 +362,29 @@
                         <button type="button" class="button button--ghost button--small" id="reviewPauseButton">Pause</button>
                       </div>
                     </div>
-                    <audio class="hidden" id="reviewAudio" controls preload="metadata"></audio>
+                    <div class="review-audio-transport hidden" id="reviewAudioTransport">
+                      <div class="review-audio-transport__timeline">
+                        <span class="review-audio-transport__time" id="reviewCurrentTime">00:00</span>
+                        <input
+                          type="range"
+                          class="review-audio-transport__slider"
+                          id="reviewProgressInput"
+                          min="0"
+                          max="0"
+                          step="1000"
+                          value="0"
+                          aria-label="Whole session playback position"
+                        />
+                        <span class="review-audio-transport__time" id="reviewTotalTime">00:00</span>
+                      </div>
+                      <div class="button-row button-row--wrap review-audio-transport__jumps">
+                        <button type="button" class="button button--ghost button--small" id="reviewJumpBack5mButton">-5m</button>
+                        <button type="button" class="button button--ghost button--small" id="reviewJumpBack30Button">-30s</button>
+                        <button type="button" class="button button--ghost button--small" id="reviewJumpForward30Button">+30s</button>
+                        <button type="button" class="button button--ghost button--small" id="reviewJumpForward5mButton">+5m</button>
+                      </div>
+                    </div>
+                    <audio class="hidden" id="reviewAudio" preload="metadata"></audio>
                   </div>
                 </section>
 
@@ -540,6 +562,6 @@
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-    <script type="module" src="./js/app.js?v=20260508-speaker-review-stopwatch"></script>
+    <script type="module" src="./js/app.js?v=20260508-final-speaker-pass"></script>
   </body>
 </html>

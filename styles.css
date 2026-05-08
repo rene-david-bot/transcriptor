@@ -768,6 +768,101 @@ strong {
   color: var(--muted);
 }
 
+.speaker-total--manual {
+  border-color: rgba(94, 234, 212, 0.18);
+  background: rgba(20, 184, 166, 0.1);
+}
+
+.speaker-slot-summary {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.speaker-slot-summary__card {
+  display: grid;
+  gap: 0.45rem;
+  padding: 0.85rem 0.95rem;
+  border-radius: 18px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: rgba(15, 23, 42, 0.42);
+}
+
+.speaker-slot-summary__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.speaker-slot-summary__header span {
+  font-weight: 700;
+  color: var(--text);
+}
+
+.speaker-slot-summary__card small,
+.speaker-slot-row__meta small {
+  color: var(--muted);
+}
+
+.speaker-slot-summary__chips,
+.speaker-slot-list {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.speaker-slot-summary__chip,
+.speaker-slot-row__play {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  width: fit-content;
+  max-width: 100%;
+  padding: 0.5rem 0.7rem;
+  border-radius: 999px;
+  border: 1px solid rgba(96, 165, 250, 0.18);
+  background: rgba(30, 41, 59, 0.68);
+  color: var(--primary-soft);
+  font-size: 0.84rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.speaker-slot-summary__chip:hover,
+.speaker-slot-summary__chip:focus-visible,
+.speaker-slot-row__play:hover,
+.speaker-slot-row__play:focus-visible {
+  border-color: rgba(96, 165, 250, 0.32);
+  background: rgba(37, 99, 235, 0.12);
+}
+
+.speaker-slot-row {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0.6rem 0.7rem;
+  border-radius: 14px;
+  background: rgba(30, 41, 59, 0.54);
+}
+
+.speaker-slot-row__play {
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.speaker-slot-row__meta {
+  display: grid;
+  justify-items: end;
+  gap: 0.15rem;
+  min-width: 0;
+  text-align: right;
+}
+
+.speaker-slot-row__meta strong {
+  color: var(--text);
+}
+
 .speaker-stat {
   display: grid;
   gap: 0.7rem;
@@ -1879,6 +1974,11 @@ strong {
   gap: 0.8rem;
 }
 
+.review-audio-transport {
+  display: grid;
+  gap: 0.75rem;
+}
+
 .review-audio-panel__top,
 .speaker-change-dock__top,
 .speaker-change-marker-row,
@@ -1908,6 +2008,36 @@ strong {
 
 .review-audio-panel audio {
   width: 100%;
+}
+
+.review-audio-transport__timeline {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.85rem;
+}
+
+.review-audio-transport__time {
+  color: var(--text);
+  font-size: 0.82rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.review-audio-transport__slider {
+  width: 100%;
+  margin: 0;
+  accent-color: var(--primary-soft);
+}
+
+.review-audio-transport__jumps {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.6rem;
+}
+
+.review-audio-transport__jumps .button {
+  min-height: 44px;
 }
 
 .speaker-change-dock {
@@ -2004,7 +2134,30 @@ strong {
 }
 
 .speaker-change-marker-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr) minmax(0, 0.9fr);
+  align-items: center;
   padding: 0.18rem 0.1rem;
+}
+
+.speaker-change-marker-row--editing {
+  background: rgba(15, 23, 42, 0.16);
+  border-radius: 14px;
+  padding: 0.6rem 0.75rem;
+}
+
+.speaker-change-marker-row__speaker-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.55rem;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
 }
 
 .speaker-change-marker-row__speaker {
@@ -2012,10 +2165,19 @@ strong {
   font-weight: 600;
 }
 
+.speaker-change-marker-row__speaker-chevron {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
 .speaker-change-marker-row span {
   color: var(--muted);
   font-size: 0.82rem;
   font-variant-numeric: tabular-nums;
+}
+
+.speaker-change-marker-row__split {
+  text-align: center;
 }
 
 .speaker-change-marker-row__overall {
@@ -2028,6 +2190,15 @@ strong {
   text-align: right;
   cursor: pointer;
   font-variant-numeric: tabular-nums;
+}
+
+.speaker-change-marker-row__editor {
+  grid-column: 1 / -1;
+  margin-top: 0.55rem;
+}
+
+.speaker-change-marker-row__editor select {
+  width: 100%;
 }
 
 @media (max-width: 720px) {
@@ -2057,12 +2228,25 @@ strong {
     flex-wrap: wrap;
   }
 
+  .review-audio-transport__timeline,
+  .review-audio-transport__jumps {
+    grid-template-columns: 1fr;
+  }
+
+  .review-audio-transport__timeline {
+    gap: 0.5rem;
+  }
+
+  .review-audio-transport__time {
+    display: flex;
+    justify-content: space-between;
+  }
+
   .speaker-change-marker-headings {
     display: none;
   }
 
   .speaker-change-marker-row {
-    display: grid;
     grid-template-columns: minmax(0, 1.1fr) repeat(2, minmax(0, 0.9fr));
     gap: 0.55rem;
   }
@@ -2268,7 +2452,8 @@ body[data-theme='light'][data-route='live'] .speaker-progress {
 }
 
 body[data-theme='light'][data-route='live'] .speaker-total,
-body[data-theme='light'][data-route='live'] .speaker-stat {
+body[data-theme='light'][data-route='live'] .speaker-stat,
+body[data-theme='light'][data-route='live'] .speaker-slot-summary__card {
   padding: 0.72rem 0.82rem;
   border-radius: 16px;
   border-color: rgba(226, 232, 240, 0.92);
@@ -2276,10 +2461,24 @@ body[data-theme='light'][data-route='live'] .speaker-stat {
   box-shadow: none;
 }
 
+body[data-theme='light'][data-route='live'] .speaker-total--manual {
+  background: rgba(240, 253, 250, 0.96);
+  border-color: rgba(153, 246, 228, 0.72);
+}
+
+body[data-theme='light'][data-route='live'] .speaker-slot-summary__chip,
+body[data-theme='light'][data-route='live'] .speaker-slot-row {
+  background: rgba(248, 250, 252, 0.96);
+  border-color: rgba(191, 219, 254, 0.86);
+}
+
 body[data-theme='light'][data-route='live'] .speaker-total strong,
 body[data-theme='light'][data-route='live'] .speaker-stat__header-row strong,
+body[data-theme='light'][data-route='live'] .speaker-slot-summary__header strong,
 body[data-theme='light'][data-route='live'] .speaker-total span,
-body[data-theme='light'][data-route='live'] .speaker-stat span {
+body[data-theme='light'][data-route='live'] .speaker-stat span,
+body[data-theme='light'][data-route='live'] .speaker-slot-summary__header span,
+body[data-theme='light'][data-route='live'] .speaker-slot-row__meta strong {
   color: #0f172a;
 }
 
