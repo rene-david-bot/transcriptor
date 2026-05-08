@@ -178,6 +178,7 @@ const state = {
   sessionRecordingMimeType: '',
   sessionRecordingChunkStartMs: 0,
   sessionRecordingSessionId: null,
+  sessionRecordingPersistTasks: new Set(),
   sessionRecordings: [],
   sessionPlaybackClipIndex: -1,
   sessionPlaybackObjectUrl: '',
@@ -400,6 +401,31 @@ function formatManualStopwatchTime(ms = 0) {
 
 function wait(ms = 0) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function trackPendingSessionRecordingWrite(task) {
+  if (!task || typeof task.finally !== 'function') return task;
+  state.sessionRecordingPersistTasks.add(task);
+  task.finally(() => {
+    state.sessionRecordingPersistTasks.delete(task);
+  });
+  return task;
+}
+
+async function waitForPendingSessionRecordingWrites() {
+  while (state.sessionRecordingPersistTasks.size) {
+    const pending = [...state.sessionRecordingPersistTasks];
+    await Promise.allSettled(pending);
+  }
+}
+
+function getManualSpeakerEventsForSession(session = state.currentSession) {
+  if (!session) return [];
+  return session?.id && state.currentSession?.id === session.id
+    ? state.manualSpeakerEvents
+    : Array.isArray(session?.manualSpeakerEvents)
+      ? session.manualSpeakerEvents
+      : [];
 }
 
 function recordingTimeToLocalOffset(recording, absoluteMs) {
@@ -1414,12 +1440,7 @@ function buildSpeakerSummary(segments) {
 
 function buildManualSpeakerSlots(session = state.currentSession, segments = state.currentSegments) {
   if (!session) return [];
-  const sessionEvents =
-    session?.id && state.currentSession?.id === session.id
-      ? state.manualSpeakerEvents
-      : Array.isArray(session?.manualSpeakerEvents)
-        ? session.manualSpeakerEvents
-        : [];
+  const sessionEvents = getManualSpeakerEventsForSession(session);
   const events = [...sessionEvents]
     .map((event, index) => ({
       ...event,
@@ -1510,6 +1531,17 @@ function buildManualLabelToCanonicalRawMap(session = state.currentSession) {
     if (!rawLabel || !label) return;
     map.set(normalizeTranscriptSpeakerKey(label), String(rawLabel).trim());
   });
+
+  const usedRawLabels = new Set([...map.values()].filter(Boolean));
+  getManualSpeakerEventsForSession(session).forEach((event) => {
+    const normalizedLabel = normalizeTranscriptSpeakerKey(event?.speakerLabel || '');
+    if (!normalizedLabel || map.has(normalizedLabel)) return;
+    map.set(
+      normalizedLabel,
+      getNextUnusedCanonicalRawLabel(usedRawLabels, parseSpeakerNames(session?.speakerNames || state.settings.speakerNames || '').length)
+    );
+  });
+
   return map;
 }
 
@@ -1807,13 +1839,11 @@ function buildSpeakerTimingSummaryRows(slotRollup, summary = []) {
   const manualTotalByKey = new Map(
     (Array.isArray(slotRollup?.speakers) ? slotRollup.speakers : []).map((speaker) => [speaker.key, Math.max(0, Number(speaker.windowMs || 0))])
   );
-  const manualKeys = new Set();
   const speakerPartIndex = new Map();
 
   const rows = manualSlots
     .map((slot) => {
       const speakerKey = getSpeakerSummaryKeyForManualLabel(slot.label || 'Speaker');
-      manualKeys.add(speakerKey);
       const nextPart = (speakerPartIndex.get(speakerKey) || 0) + 1;
       speakerPartIndex.set(speakerKey, nextPart);
       const totalMs = Math.max(0, Number(manualTotalByKey.get(speakerKey) ?? slot.windowMs ?? 0));
@@ -1829,22 +1859,6 @@ function buildSpeakerTimingSummaryRows(slotRollup, summary = []) {
       };
     })
     .sort((left, right) => left.startMs - right.startMs);
-
-  summary
-    .filter((speaker) => speaker && !manualKeys.has(speaker.key))
-    .sort((left, right) => Number(left.startMs || 0) - Number(right.startMs || 0))
-    .forEach((speaker) => {
-      rows.push({
-        key: `automatic:${speaker.key}`,
-        speakerKey: speaker.key,
-        label: speaker.label || speaker.defaultLabel || 'Speaker',
-        note: 'Automatic only',
-        manualMs: 0,
-        autoMs: Math.max(0, Number(speaker.durationMs || 0)),
-        totalMs: Math.max(0, Number(manualTotalByKey.get(speaker.key) || 0)),
-        startMs: Math.max(0, Number(speaker.startMs || 0)),
-      });
-    });
 
   return rows;
 }
@@ -3023,7 +3037,7 @@ function findRecordingIndexForTime(absoluteMs) {
   return state.sessionRecordings.findIndex((recording) => hasRecordingBlob(recording));
 }
 
-async function loadRecordingClip(index, { autoplay = false, seekMs = null, forceScroll = false } = {}) {
+async function loadRecordingClip(index, { autoplay = false, seekMs = null, forceScroll = false, userGesture = false } = {}) {
   const audio = elements.reviewAudio;
   const recording = state.sessionRecordings[index];
   if (!audio || !recording?.blob) return false;
@@ -3048,6 +3062,18 @@ async function loadRecordingClip(index, { autoplay = false, seekMs = null, force
   state.sessionPlaybackClipIndex = index;
   audio.src = objectUrl;
   audio.load();
+
+  if (autoplay && userGesture) {
+    try {
+      const playAttempt = audio.play();
+      if (playAttempt && typeof playAttempt.catch === 'function') {
+        playAttempt.catch(() => {});
+      }
+    } catch {
+      // ignore user-gesture priming failures
+    }
+  }
+
   await new Promise((resolve) => {
     audio.addEventListener('loadedmetadata', resolve, { once: true });
   }).catch(() => {});
@@ -3067,11 +3093,11 @@ async function loadRecordingClip(index, { autoplay = false, seekMs = null, force
   return true;
 }
 
-async function playSessionAudioAtMs(absoluteMs, { autoplay = true } = {}) {
+async function playSessionAudioAtMs(absoluteMs, { autoplay = true, userGesture = false } = {}) {
   const targetMs = clampSessionPlaybackMs(absoluteMs);
   const clipIndex = findRecordingIndexForTime(targetMs);
   if (clipIndex === -1) return false;
-  return loadRecordingClip(clipIndex, { autoplay, seekMs: targetMs, forceScroll: true });
+  return loadRecordingClip(clipIndex, { autoplay, seekMs: targetMs, forceScroll: true, userGesture });
 }
 
 function primeReviewAudioPlaybackForUserGesture(targetMs = null) {
@@ -3116,11 +3142,8 @@ function setSessionPlaybackPreviewMs(absoluteMs) {
 async function seekSessionAudioToMs(absoluteMs, { autoplay = null, forceScroll = true, userGesture = false } = {}) {
   const targetMs = clampSessionPlaybackMs(absoluteMs);
   const shouldAutoplay = autoplay === null ? true : Boolean(autoplay);
-  if (userGesture && shouldAutoplay) {
-    primeReviewAudioPlaybackForUserGesture(targetMs);
-  }
   state.sessionPlaybackPreviewMs = null;
-  const played = await playSessionAudioAtMs(targetMs, { autoplay: shouldAutoplay });
+  const played = await playSessionAudioAtMs(targetMs, { autoplay: shouldAutoplay, userGesture });
   if (!played) return false;
   renderRecordingReview();
   updatePlaybackHighlight({ shouldScroll: true, forceScroll });
@@ -3133,18 +3156,18 @@ async function seekSessionAudioByDeltaMs(deltaMs, { autoplay = true, userGesture
   return seekSessionAudioToMs(baseMs + Number(deltaMs || 0), { autoplay, forceScroll: true, userGesture });
 }
 
-async function playReviewAudio() {
+async function playReviewAudio({ userGesture = false } = {}) {
   const audio = elements.reviewAudio;
   if (!audio || !state.sessionRecordings.length) return;
   ensureReviewAudioPlaybackDefaults();
   if (state.sessionPlaybackClipIndex < 0) {
     const initialPlaybackMs = getVisibleSessionPlaybackMs() || 0;
     const initialIndex = Math.max(0, findRecordingIndexForTime(initialPlaybackMs));
-    await loadRecordingClip(initialIndex, { autoplay: true, seekMs: initialPlaybackMs, forceScroll: true });
+    await loadRecordingClip(initialIndex, { autoplay: true, seekMs: initialPlaybackMs, forceScroll: true, userGesture });
     return;
   }
   if (audio.ended && state.sessionPlaybackClipIndex >= state.sessionRecordings.length - 1) {
-    await loadRecordingClip(0, { autoplay: true, seekMs: 0, forceScroll: true });
+    await loadRecordingClip(0, { autoplay: true, seekMs: 0, forceScroll: true, userGesture });
     return;
   }
   await audio.play().catch(() => {});
@@ -3184,7 +3207,12 @@ async function toggleReviewAudioPlayback() {
     return;
   }
 
-  await playReviewAudio();
+  await playReviewAudio({ userGesture: true });
+}
+
+function commitReviewAudioSeekFromControl({ userGesture = false } = {}) {
+  const nextValue = Number(elements.reviewProgressInput?.value || 0);
+  return seekSessionAudioToMs(nextValue, { autoplay: true, forceScroll: true, userGesture });
 }
 
 function renderRecordingReview() {
@@ -4139,6 +4167,8 @@ async function stopSessionRecording() {
     }).catch(() => {});
   }
 
+  await waitForPendingSessionRecordingWrites();
+
   stopSpeakerTracks(state.sessionRecordingStream);
   state.sessionRecorder = null;
   state.sessionRecordingStream = null;
@@ -4177,7 +4207,7 @@ async function startSessionRecording(stream) {
       chunkStartMs = chunkEndMs;
       state.sessionRecordingChunkStartMs = chunkEndMs;
       if (chunkEndMs <= startMs) return;
-      persistRecordingClip({
+      const persistTask = persistRecordingClip({
         sessionId,
         blob,
         startMs,
@@ -4186,6 +4216,7 @@ async function startSessionRecording(stream) {
       }).catch((error) => {
         console.warn('Unable to persist session recording clip', error);
       });
+      trackPendingSessionRecordingWrite(persistTask);
     });
 
     recorder.addEventListener(
@@ -4300,6 +4331,7 @@ async function finalizeSpeakerTiming() {
     state.speakerTrackingSessionId === sessionId && state.speakerRecorder && state.speakerRecorder.state !== 'inactive'
   );
   const hadQueuedWork = !isSpeakerAttributionIdle(sessionId);
+  await waitForPendingSessionRecordingWrites();
   const recordings = state.sessionRecordings.length ? state.sessionRecordings : await refreshSessionRecordings(sessionId);
   const pendingRecordingPasses = recordings.filter((recording) => !recording.diarizedAt && hasRecordingBlob(recording));
 
@@ -4353,6 +4385,7 @@ async function finalizeSpeakerTiming() {
       await flushSpeakerRecorderChunk({ continueTracking });
     }
 
+    await waitForPendingSessionRecordingWrites();
     const refreshedRecordings = await refreshSessionRecordings(sessionId);
     const storedPasses = refreshedRecordings.filter((recording) => !recording.diarizedAt && recording.blob?.size);
     const finalBatches = buildSpeakerFinalizeBatches(storedPasses);
@@ -5932,7 +5965,7 @@ function bindEvents() {
     const row = event.target.closest('.transcript-pair[data-start-ms]');
     if (!row) return;
     const startMs = Number(row.dataset.startMs || 0);
-    const played = await playSessionAudioAtMs(startMs);
+    const played = await playSessionAudioAtMs(startMs, { userGesture: true });
     if (!played) {
       showToast('No saved audio clip covers that part yet.');
     }
@@ -5947,10 +5980,10 @@ function bindEvents() {
     setSessionPlaybackPreviewMs(nextValue);
   });
   elements.reviewProgressInput?.addEventListener('change', () => {
-    const nextValue = Number(elements.reviewProgressInput?.value || 0);
-    seekSessionAudioToMs(nextValue, { autoplay: true, forceScroll: true, userGesture: true }).catch((error) =>
-      console.warn('Unable to seek whole-session playback', error)
-    );
+    commitReviewAudioSeekFromControl({ userGesture: true }).catch((error) => console.warn('Unable to seek whole-session playback', error));
+  });
+  elements.reviewProgressInput?.addEventListener('pointerup', () => {
+    commitReviewAudioSeekFromControl({ userGesture: true }).catch((error) => console.warn('Unable to seek whole-session playback', error));
   });
   elements.reviewJumpBack5mButton?.addEventListener('click', () => {
     seekSessionAudioByDeltaMs(-5 * 60 * 1000, { autoplay: true, userGesture: true }).catch((error) =>
