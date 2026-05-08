@@ -2299,6 +2299,20 @@ body[data-review-audio-floating='true'][data-route='live'] .transcript-list {
   width: 100%;
 }
 
+.speaker-change-dock__speaker-add-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.55rem;
+}
+
+.speaker-change-dock__speaker-add-row .input {
+  min-width: 0;
+}
+
+.speaker-change-dock__speaker-add-row .button {
+  min-width: 4.4rem;
+}
+
 .speaker-change-dock__actions {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

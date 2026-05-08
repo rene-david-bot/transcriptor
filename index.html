@@ -318,6 +318,19 @@
                       <div class="speaker-change-dock__speaker-row">
                         <span class="speaker-change-dock__speaker-label">Current speaker</span>
                         <select id="speakerChangeCurrentSelect" aria-label="Current speaker"></select>
+                        <div class="speaker-change-dock__speaker-add-row">
+                          <input
+                            type="text"
+                            id="speakerChangeCustomInput"
+                            class="input"
+                            placeholder="Type a new speaker name"
+                            aria-label="New speaker name"
+                            autocomplete="off"
+                            autocapitalize="words"
+                            spellcheck="false"
+                          />
+                          <button type="button" class="button button--ghost button--small" id="speakerChangeCustomUseButton">Use</button>
+                        </div>
                       </div>
                       <div class="speaker-change-dock__actions">
                         <button type="button" class="button speaker-change-action" id="speakerChangeButton">👥 Mark</button>
@@ -586,6 +599,6 @@
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-    <script type="module" src="./js/app.js?v=20260508-player-session-batch-fix-2"></script>
+    <script type="module" src="./js/app.js?v=20260508-manual-speaker-inline-add"></script>
   </body>
 </html>

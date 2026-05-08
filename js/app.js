@@ -195,6 +195,7 @@ const state = {
   manualSpeakerElapsedMs: 0,
   manualSpeakerPaused: true,
   manualSpeakerCurrentLabel: '',
+  manualSpeakerCustomNameDraft: '',
   manualSpeakerEditingEventId: '',
   sessionPersistTimer: null,
   clockTimer: null,
@@ -293,6 +294,8 @@ const elements = {
   speakerChangePauseButton: $('#speakerChangePauseButton'),
   speakerChangeResetButton: $('#speakerChangeResetButton'),
   speakerChangeCurrentSelect: $('#speakerChangeCurrentSelect'),
+  speakerChangeCustomInput: $('#speakerChangeCustomInput'),
+  speakerChangeCustomUseButton: $('#speakerChangeCustomUseButton'),
   speakerChangeMarkers: $('#speakerChangeMarkers'),
   transcriptLiveBand: $('#transcriptLiveBand'),
   exportMarkdownButton: $('#exportMarkdownButton'),
@@ -1245,6 +1248,61 @@ function getSpeakerOptionsForManualControls(session = state.currentSession) {
   const seeded = getSpeakerNamesForContext(session);
   const fallback = ['Speaker A', 'Speaker B', 'Speaker C'];
   return [...new Set([...seeded, ...fallback])].filter(Boolean).slice(0, 8);
+}
+
+function normalizeManualSpeakerName(value) {
+  return String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function findExistingManualSpeakerOption(value, session = state.currentSession) {
+  const normalizedValue = normalizeManualSpeakerName(value).toLocaleLowerCase();
+  if (!normalizedValue) return '';
+  return (
+    getSpeakerOptionsForManualControls(session).find(
+      (label) => normalizeManualSpeakerName(label).toLocaleLowerCase() === normalizedValue
+    ) || ''
+  );
+}
+
+async function useManualSpeakerCustomName(rawValue = state.manualSpeakerCustomNameDraft) {
+  const nextLabel = normalizeManualSpeakerName(rawValue);
+  if (!nextLabel) {
+    showToast('Type a speaker name first.');
+    elements.speakerChangeCustomInput?.focus();
+    return false;
+  }
+
+  const existingLabel = findExistingManualSpeakerOption(nextLabel);
+  const resolvedLabel = existingLabel || nextLabel;
+
+  if (state.currentSession) {
+    const currentSpeakerNames = parseSpeakerNames(state.currentSession.speakerNames || '');
+    const hasSeededName = currentSpeakerNames.some(
+      (label) => normalizeManualSpeakerName(label).toLocaleLowerCase() === resolvedLabel.toLocaleLowerCase()
+    );
+
+    if (!existingLabel && !hasSeededName) {
+      if (currentSpeakerNames.length >= 8) {
+        showToast('This session already has 8 speaker names. Reuse one or edit the saved list first.', 4500);
+        return false;
+      }
+      state.currentSession.speakerNames = normalizeSpeakerNamesInput([...currentSpeakerNames, resolvedLabel].join(', '));
+    }
+  }
+
+  state.manualSpeakerCurrentLabel = resolvedLabel;
+  state.manualSpeakerCustomNameDraft = '';
+
+  if (state.currentSession) {
+    syncManualSpeakerStateToSession();
+    await persistCurrentSessionNow();
+  }
+
+  renderManualSpeakerControls();
+  showToast(existingLabel ? `${resolvedLabel} selected.` : `${resolvedLabel} added for this session.`);
+  return true;
 }
 
 function getManualSpeakerLabelForSegment(segment, session = state.currentSession) {
@@ -3266,6 +3324,18 @@ function renderManualSpeakerControls() {
       .join('');
     elements.speakerChangeCurrentSelect.disabled = !state.currentSession || state.currentSession.status === 'ended';
   }
+  if (elements.speakerChangeCustomInput) {
+    if (document.activeElement !== elements.speakerChangeCustomInput || elements.speakerChangeCustomInput.value !== state.manualSpeakerCustomNameDraft) {
+      elements.speakerChangeCustomInput.value = state.manualSpeakerCustomNameDraft;
+    }
+    elements.speakerChangeCustomInput.disabled = !state.currentSession || state.currentSession.status === 'ended';
+  }
+  if (elements.speakerChangeCustomUseButton) {
+    elements.speakerChangeCustomUseButton.disabled =
+      !state.currentSession ||
+      state.currentSession.status === 'ended' ||
+      !normalizeManualSpeakerName(state.manualSpeakerCustomNameDraft);
+  }
   if (elements.speakerChangeButton) {
     elements.speakerChangeButton.textContent = timerRunning ? '👥 Mark' : 'Reset';
     elements.speakerChangeButton.disabled = timerRunning
@@ -3499,6 +3569,7 @@ async function loadSession(sessionId) {
     : [];
   state.manualSpeakerBaseOffsetMs = Number(session.manualSpeakerBaseOffsetMs || 0);
   state.manualSpeakerCurrentLabel = String(session.manualSpeakerCurrentLabel || '').trim();
+  state.manualSpeakerCustomNameDraft = '';
   state.manualSpeakerElapsedMs = Math.max(0, Number(session.manualSpeakerElapsedMs || 0));
   state.manualSpeakerPaused = session.manualSpeakerPaused !== false;
   state.manualSpeakerEditingEventId = '';
@@ -4803,6 +4874,7 @@ async function handleStartFromSetup(event) {
   state.manualSpeakerPaused = true;
   state.speakerFinalizeProgress = null;
   state.manualSpeakerCurrentLabel = getSpeakerOptionsForManualControls(session)[0] || 'Speaker A';
+  state.manualSpeakerCustomNameDraft = '';
   state.manualSpeakerEditingEventId = '';
   state.transcriptPinnedToBottom = true;
   clearLiveDraftCarry();
@@ -5920,11 +5992,29 @@ function bindEvents() {
   });
   elements.speakerChangeCurrentSelect?.addEventListener('change', async () => {
     state.manualSpeakerCurrentLabel = elements.speakerChangeCurrentSelect.value;
+    state.manualSpeakerCustomNameDraft = '';
     if (state.currentSession) {
       syncManualSpeakerStateToSession();
       await persistCurrentSessionNow();
     }
     renderManualSpeakerControls();
+  });
+  elements.speakerChangeCustomInput?.addEventListener('input', () => {
+    state.manualSpeakerCustomNameDraft = elements.speakerChangeCustomInput.value;
+    if (elements.speakerChangeCustomUseButton) {
+      elements.speakerChangeCustomUseButton.disabled =
+        !state.currentSession ||
+        state.currentSession.status === 'ended' ||
+        !normalizeManualSpeakerName(state.manualSpeakerCustomNameDraft);
+    }
+  });
+  elements.speakerChangeCustomInput?.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    useManualSpeakerCustomName().catch((error) => console.warn('Unable to use custom speaker name', error));
+  });
+  elements.speakerChangeCustomUseButton?.addEventListener('click', () => {
+    useManualSpeakerCustomName().catch((error) => console.warn('Unable to use custom speaker name', error));
   });
   elements.speakerChangeMarkers?.addEventListener('click', async (event) => {
     const choiceButton = event.target.closest('[data-speaker-marker-choice-id]');
@@ -6339,6 +6429,7 @@ async function createDebugSession({
   state.manualSpeakerPaused = true;
   state.speakerFinalizeProgress = null;
   state.manualSpeakerCurrentLabel = getSpeakerOptionsForManualControls(session)[0] || 'Speaker A';
+  state.manualSpeakerCustomNameDraft = '';
   state.transcriptPinnedToBottom = true;
   clearLiveDraftCarry();
   await syncLastActiveSession();
