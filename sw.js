@@ -1,10 +1,10 @@
-const CACHE_NAME = 'transcripto-shell-v32';
+const CACHE_NAME = 'transcripto-shell-v33';
 const APP_SHELL = [
   './',
   './index.html',
   './styles.css',
   './manifest.webmanifest',
-  './js/app.js?v=20260508-summary-floating-editor-fixes',
+  './js/app.js?v=20260508-timing-summary-stop-fix',
   './js/db.js',
   './js/exporters.js',
   './js/openai.js',

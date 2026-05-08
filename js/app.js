@@ -184,6 +184,7 @@ const state = {
   sessionPlaybackSegmentId: '',
   sessionPlaybackAutoScroll: true,
   sessionPlaybackPreviewMs: null,
+  reviewAudioFloatingActive: false,
   screenWakeLock: null,
   wakeLockSupported: typeof navigator !== 'undefined' && 'wakeLock' in navigator,
   wakeLockActive: false,
@@ -215,6 +216,7 @@ const elements = {
   statusLine: $('#statusLine'),
   openMicSettingsButton: $('#openMicSettingsButton'),
   topbarEyebrow: $('#topbarEyebrow'),
+  topbarTitle: $('#topbarTitle'),
   toast: $('#toast'),
   startForm: $('#startForm'),
   apiKeyInput: $('#apiKeyInput'),
@@ -272,6 +274,7 @@ const elements = {
   speakerSummary: $('#speakerSummary'),
   transcriptList: $('#transcriptList'),
   reviewAudio: $('#reviewAudio'),
+  reviewAudioTransportDock: $('#reviewAudioTransportDock'),
   reviewAudioTransport: $('#reviewAudioTransport'),
   reviewAudioStatus: $('#reviewAudioStatus'),
   reviewPlayPauseButton: $('#reviewPlayPauseButton'),
@@ -480,13 +483,67 @@ function showToast(message, timeout = 3200) {
   }, timeout);
 }
 
+function getTopbarEyebrowText() {
+  if (state.runtimeStatus === 'listening') return 'Live capture';
+  if (['connecting', 'reconnecting'].includes(state.runtimeStatus)) return 'Connecting';
+  if (state.route === 'live') return 'Current session';
+  if (state.route === 'history') return 'Session history';
+  if (state.route === 'settings') return 'Settings';
+  return 'Ready';
+}
+
+function getTopbarTitleText() {
+  if (state.route === 'live') {
+    const session = state.currentSession;
+    if (session?.sourceLanguage || session?.targetLanguage) {
+      return `${getLanguageName(session?.sourceLanguage || '')} → ${getLanguageName(session?.targetLanguage || '')}`;
+    }
+    return 'Live transcript';
+  }
+  if (state.route === 'history') return 'History';
+  if (state.route === 'settings') return 'Preferences';
+  return 'Transcripto';
+}
+
+function renderTopbarEyebrow() {
+  if (!elements.topbarEyebrow) return;
+  elements.topbarEyebrow.textContent = getTopbarEyebrowText();
+}
+
+function renderTopbarTitle() {
+  if (!elements.topbarTitle) return;
+  elements.topbarTitle.textContent = getTopbarTitleText();
+}
+
+function renderTopbarChrome() {
+  renderTopbarEyebrow();
+  renderTopbarTitle();
+}
+
+function syncReviewAudioTransportMount({ floatingPlayback = false } = {}) {
+  const transport = elements.reviewAudioTransport;
+  const dock = elements.reviewAudioTransportDock;
+  if (!transport || !dock || typeof document === 'undefined' || !document.body) return;
+
+  if (floatingPlayback) {
+    if (transport.parentElement !== document.body) {
+      document.body.appendChild(transport);
+    }
+    return;
+  }
+
+  if (transport.parentElement !== dock) {
+    dock.appendChild(transport);
+  }
+}
+
 function setStatus(status, message) {
   state.runtimeStatus = status;
   state.runtimeMessage = message;
   elements.statusPill.textContent = STATUS_COPY[status] || status;
   elements.statusPill.className = `status-pill status-pill--${status}`;
   elements.statusLine.textContent = `Status: ${message}`;
-  elements.topbarEyebrow.textContent = status === 'listening' ? 'Live capture' : 'Transcripto';
+  renderTopbarChrome();
 
   if (state.currentSession) {
     state.currentSession.runtimeStatus = status;
@@ -1030,6 +1087,7 @@ function setRoute(route) {
   $$('.page').forEach((page) => {
     page.classList.toggle('page--active', page.dataset.page === route);
   });
+  renderTopbarChrome();
   closeSidebar();
 }
 
@@ -1574,7 +1632,7 @@ function toggleSpeakerSummaryExpansion(key) {
   renderSpeakerInsights();
 }
 
-function renderSpeakerSummaryCards(summary) {
+function renderSpeakerSummaryCards(summary, { includeTotalCard = true } = {}) {
   if (!summary.length) {
     state.speakerSummaryExpandedKeys = new Set();
     return '';
@@ -1588,13 +1646,15 @@ function renderSpeakerSummaryCards(summary) {
   const speakerPlaybackEnabled = state.sessionRecordings.some((recording) => hasRecordingBlob(recording));
 
   return [
-    `
+    includeTotalCard
+      ? `
       <div class="speaker-total">
         <strong>Automatic diarized speaker time</strong>
         <span>${formatDuration(totalDurationMs)}</span>
         <small>From speaker identification across diarized transcript segments.</small>
       </div>
-    `,
+    `
+      : '',
     ...summary.map(
       (speaker) => {
         const expanded = state.speakerSummaryExpandedKeys.has(speaker.key);
@@ -1662,62 +1722,119 @@ function renderSpeakerSummaryCards(summary) {
       `;
       }
     ),
-  ].join('');
+  ]
+    .filter(Boolean)
+    .join('');
 }
 
-function renderManualSpeakerSlotSummary(slotRollup, { final = false } = {}) {
-  if (!slotRollup?.speakers?.length) return '';
+function buildSpeakerTimingSummaryRows(slotRollup, summary = []) {
+  const manualSlots = Array.isArray(slotRollup?.slots) ? slotRollup.slots : [];
+  const summaryByKey = new Map(summary.map((speaker) => [speaker.key, speaker]));
+  const manualKeys = new Set();
+  const speakerPartIndex = new Map();
+
+  const rows = manualSlots
+    .map((slot) => {
+      const speakerKey = getSpeakerSummaryKey('', slot.label || 'Speaker');
+      manualKeys.add(speakerKey);
+      const nextPart = (speakerPartIndex.get(speakerKey) || 0) + 1;
+      speakerPartIndex.set(speakerKey, nextPart);
+      const totalMs = Math.max(0, Number(summaryByKey.get(speakerKey)?.durationMs ?? slot.speechMs ?? 0));
+      return {
+        key: `${speakerKey}:${slot.id}:${nextPart}`,
+        speakerKey,
+        label: slot.label || 'Speaker',
+        note: `Part ${nextPart}`,
+        manualMs: Math.max(0, Number(slot.windowMs || 0)),
+        autoMs: Math.max(0, Number(slot.speechMs || 0)),
+        totalMs,
+        startMs: Math.max(0, Number(slot.startMs || 0)),
+      };
+    })
+    .sort((left, right) => left.startMs - right.startMs);
+
+  summary
+    .filter((speaker) => speaker && !manualKeys.has(speaker.key))
+    .sort((left, right) => Number(left.startMs || 0) - Number(right.startMs || 0))
+    .forEach((speaker) => {
+      rows.push({
+        key: `automatic:${speaker.key}`,
+        speakerKey: speaker.key,
+        label: speaker.label || speaker.defaultLabel || 'Speaker',
+        note: 'Automatic only',
+        manualMs: 0,
+        autoMs: Math.max(0, Number(speaker.durationMs || 0)),
+        totalMs: Math.max(0, Number(speaker.durationMs || 0)),
+        startMs: Math.max(0, Number(speaker.startMs || 0)),
+      });
+    });
+
+  return rows;
+}
+
+function renderSpeakerTimingSummary(slotRollup, summary, { final = false } = {}) {
+  const rows = buildSpeakerTimingSummaryRows(slotRollup, summary);
+  if (!rows.length) return '';
 
   return `
-    <div class="speaker-slot-summary">
-      <div class="speaker-total speaker-total--manual-window">
-        <strong>Manual stopwatch time</strong>
-        <span>${formatDuration(slotRollup.totalWindowMs || 0)}</span>
-        <small>Raw time from the speaker slots you tapped manually.</small>
+    <div class="speaker-timing-summary">
+      <div class="speaker-timing-summary__totals">
+        <div class="speaker-timing-summary__total speaker-timing-summary__total--manual">
+          <span>Manual stopwatch</span>
+          <strong>${formatDuration(slotRollup?.totalWindowMs || 0)}</strong>
+        </div>
+        <div class="speaker-timing-summary__total speaker-timing-summary__total--auto">
+          <span>${final ? 'Auto matched speech' : 'Auto matched speech'}</span>
+          <strong>${formatDuration(slotRollup?.totalSpeechMs || 0)}</strong>
+        </div>
       </div>
-      <div class="speaker-total speaker-total--manual">
-        <strong>${final ? 'Matched speech inside manual slots' : 'Matched speech in manual slots'}</strong>
-        <span>${formatDuration(slotRollup.totalSpeechMs || 0)}</span>
-        <small>${escapeHtml(
-          final
-            ? 'Transcript speech found inside your manual speaker slots after the final pass.'
-            : 'Best effort from transcript rows that overlap your manual speaker slots so far.'
-        )}</small>
+      <div class="speaker-timing-summary__table" role="table" aria-label="Speaker timing summary">
+        <div class="speaker-timing-summary__head" role="row">
+          <span role="columnheader">Speaker</span>
+          <span role="columnheader">Manual</span>
+          <span role="columnheader">Auto</span>
+          <span role="columnheader">Total</span>
+        </div>
+        ${rows
+          .map(
+            (row) => `
+              <div class="speaker-timing-summary__row" role="row">
+                <button
+                  class="speaker-timing-summary__speaker"
+                  type="button"
+                  data-speaker-action="play-slot"
+                  data-start-ms="${Number(row.startMs || 0)}"
+                  aria-label="Play ${escapeHtml(row.label)} ${escapeHtml(row.note || 'segment')}"
+                >
+                  <strong>${escapeHtml(row.label)}</strong>
+                  <small>${escapeHtml(row.note || '')}</small>
+                </button>
+                <span role="cell" data-label="Manual">${formatDuration(row.manualMs || 0)}</span>
+                <span role="cell" data-label="Auto">${formatDuration(row.autoMs || 0)}</span>
+                <span role="cell" data-label="Total">${formatDuration(row.totalMs || 0)}</span>
+              </div>`
+          )
+          .join('')}
       </div>
-      ${slotRollup.speakers
-        .map(
-          (speaker) => `
-            <div class="speaker-slot-summary__card">
-              <div class="speaker-slot-summary__header">
-                <strong>${escapeHtml(speaker.label)}</strong>
-              </div>
-              <small>${escapeHtml(
-                `${speaker.slotCount} slot${speaker.slotCount === 1 ? '' : 's'} • manual ${formatDuration(speaker.windowMs || 0)} • matched ${formatDuration(
-                  speaker.speechMs || 0
-                )}`
-              )}</small>
-              <div class="speaker-slot-summary__chips">
-                ${speaker.slots
-                  .map(
-                    (slot) => `
-                      <button
-                        class="speaker-slot-summary__chip"
-                        type="button"
-                        data-speaker-action="play-slot"
-                        data-start-ms="${Number(slot.startMs || 0)}"
-                        aria-label="Play ${escapeHtml(speaker.label)} slot"
-                      >${escapeHtml(
-                        `${formatDuration(slot.startMs || 0)} → ${formatDuration(slot.endMs || 0)} • manual ${formatDuration(
-                          slot.windowMs || 0
-                        )} • matched ${formatDuration(slot.speechMs || 0)}`
-                      )}</button>`
-                  )
-                  .join('')}
-              </div>
-            </div>`
-        )
-        .join('')}
+      <small class="speaker-timing-summary__note">${escapeHtml(
+        final
+          ? 'Manual shows the full segment you marked. Auto shows transcript speech found inside that segment after the final pass. Total repeats the automatic speaker total across the whole session.'
+          : 'Manual shows the full segment you marked. Auto shows the transcript speech found inside that segment so far. Total repeats the automatic speaker total across the whole session.'
+      )}</small>
     </div>
+  `;
+}
+
+function renderSpeakerSummaryDetailsDisclosure(summary) {
+  if (!summary.length) return '';
+
+  return `
+    <details class="speaker-details-disclosure">
+      <summary>Detailed transcript by speaker</summary>
+      <div class="speaker-details-disclosure__body">
+        ${renderSpeakerSummaryCards(summary, { includeTotalCard: false })}
+      </div>
+    </details>
   `;
 }
 
@@ -1910,7 +2027,9 @@ function renderSpeakerInsights() {
   if (!state.speakerTrackingSupported) {
     elements.speakerStatusLine.textContent = 'This browser does not support background speaker detection.';
     elements.speakerSummary.innerHTML = summary.length
-      ? renderSpeakerSummaryCards(summary)
+      ? [renderSpeakerTimingSummary(slotRollup, summary, { final: hasFinalSpeakerTiming }), renderSpeakerSummaryDetailsDisclosure(summary)]
+          .filter(Boolean)
+          .join('')
       : '<div class="note">Speaker timing is unavailable in this browser.</div>';
     renderSpeakerFinalizeButton();
     return;
@@ -1929,13 +2048,13 @@ function renderSpeakerInsights() {
   } else if (canStartManually && !state.speakerRecorder && !state.speakerTrackingInFlight) {
     elements.speakerStatusLine.textContent = 'The final speaker pass is ready. Tap the button above to run it now.';
   } else if (sessionEnded && hasFinalSpeakerTiming) {
-    elements.speakerStatusLine.textContent = 'Final speaker timing is ready. The totals below separate manual stopwatch time, matched manual-slot speech, and automatic diarized totals.';
+    elements.speakerStatusLine.textContent = 'Final speaker timing is ready. The summary below lines up each manual segment with the automatic match and the speaker total.';
   } else if (sessionEnded && summary.length) {
     elements.speakerStatusLine.textContent = 'Session ended. The speaker view below is still provisional until you run the final speaker pass.';
   } else if (sessionEnded) {
     elements.speakerStatusLine.textContent = 'Session ended. No finalized speaker timing is available for this session.';
   } else if (stoppedSession && hasFinalSpeakerTiming) {
-    elements.speakerStatusLine.textContent = 'Final speaker timing is ready. You can compare manual stopwatch time, matched manual-slot speech, and automatic diarized totals below.';
+    elements.speakerStatusLine.textContent = 'Final speaker timing is ready. The summary below lines up each manual segment with the automatic match and the speaker total.';
   } else if (stoppedSession && summary.length) {
     elements.speakerStatusLine.textContent = 'Capture stopped. The speaker view below is provisional until you run the final speaker pass.';
   } else if (stoppedSession) {
@@ -1946,15 +2065,13 @@ function renderSpeakerInsights() {
     elements.speakerStatusLine.textContent = state.speakerTrackingStatus;
   }
 
-  const slotSummaryMarkup =
-    slotRollup.speakers.length && (stoppedSession || hasFinalSpeakerTiming)
-      ? renderManualSpeakerSlotSummary(slotRollup, { final: hasFinalSpeakerTiming })
-      : '';
+  const speakerTimingSummaryMarkup = renderSpeakerTimingSummary(slotRollup, summary, { final: hasFinalSpeakerTiming });
+  const speakerDetailsMarkup = renderSpeakerSummaryDetailsDisclosure(summary);
 
   if (!summary.length) {
     elements.speakerSummary.innerHTML = [
       speakerProcessingCard,
-      slotSummaryMarkup,
+      speakerTimingSummaryMarkup,
       '<div class="note">Speaker timing runs quietly in the background and can lag a little behind the live text. Tap the button above to start the full post-session speaker pass when you are done recording.</div>',
     ]
       .filter(Boolean)
@@ -1963,7 +2080,7 @@ function renderSpeakerInsights() {
     return;
   }
 
-  elements.speakerSummary.innerHTML = [slotSummaryMarkup, speakerProcessingCard, renderSpeakerSummaryCards(summary)].filter(Boolean).join('');
+  elements.speakerSummary.innerHTML = [speakerProcessingCard, speakerTimingSummaryMarkup, speakerDetailsMarkup].filter(Boolean).join('');
   updateSpeakerPlaybackIndicator();
   renderSpeakerFinalizeButton();
 }
@@ -2004,6 +2121,7 @@ function renderSessionSummary() {
     if (elements.segmentCountLabel) elements.segmentCountLabel.textContent = 'Rows shown';
     elements.segmentCountValue.textContent = '0';
     if (elements.segmentCountMeta) elements.segmentCountMeta.textContent = '0 saved segments';
+    renderTopbarTitle();
     return;
   }
 
@@ -2018,6 +2136,7 @@ function renderSessionSummary() {
   if (elements.segmentCountMeta) {
     elements.segmentCountMeta.textContent = `${counts.savedSegments} saved segment${counts.savedSegments === 1 ? '' : 's'}`;
   }
+  renderTopbarTitle();
 }
 
 function buildLiveTranscriptState() {
@@ -2764,6 +2883,7 @@ function resetSessionPlaybackState() {
   state.sessionPlaybackObjectUrl = '';
   state.sessionPlaybackSegmentId = '';
   state.sessionPlaybackPreviewMs = null;
+  state.reviewAudioFloatingActive = false;
 }
 
 function updatePlaybackHighlight({ shouldScroll = false, forceScroll = false } = {}) {
@@ -2907,6 +3027,7 @@ async function playReviewAudio() {
 }
 
 async function pauseReviewAudio() {
+  state.reviewAudioFloatingActive = false;
   elements.reviewAudio?.pause();
   renderRecordingReview();
 }
@@ -2928,7 +3049,11 @@ function renderRecordingReview() {
   const currentClip = currentIndex >= 0 ? state.sessionRecordings[currentIndex] : null;
   const currentPlaybackMs = getVisibleSessionPlaybackMs();
   const playing = isReviewAudioPlaying();
-  const floatingPlayback = playing && state.route === 'live';
+  const floatingPlayback = count > 0 && (playing || state.reviewAudioFloatingActive);
+
+  if (!count) {
+    state.reviewAudioFloatingActive = false;
+  }
 
   if (typeof document !== 'undefined' && document.body) {
     document.body.dataset.reviewAudioFloating = floatingPlayback ? 'true' : 'false';
@@ -2957,6 +3082,7 @@ function renderRecordingReview() {
     elements.reviewAudioTransport.classList.toggle('hidden', !count);
     elements.reviewAudioTransport.classList.toggle('review-audio-transport--floating', floatingPlayback && count > 0);
   }
+  syncReviewAudioTransportMount({ floatingPlayback: floatingPlayback && count > 0 });
   if (elements.reviewAudio) {
     elements.reviewAudio.classList.add('hidden');
     elements.reviewAudio.dataset.clipLabel = currentClip ? `${formatDurationShort(currentClip.startMs || 0)}-${formatDurationShort(currentClip.endMs || 0)}` : '';
@@ -2996,22 +3122,60 @@ function renderRecordingReview() {
   }
 }
 
+function buildManualSpeakerRowsForDisplay() {
+  const session = state.currentSession;
+  const baseOffsetMs = Number(state.manualSpeakerBaseOffsetMs || 0);
+  const stoppedSession = session && ['paused', 'ended'].includes(session.status) && !isManualSpeakerTimerRunning();
+  const slotRows = stoppedSession
+    ? buildManualSpeakerSlots(session, state.currentSegments)
+        .map((slot) => ({
+          id: String(slot.id || `manual-slot-${Number(slot.startMs || 0)}`),
+          speakerLabel: slot.label || 'Speaker',
+          changeMs: Math.max(0, Number(slot.windowMs || 0)),
+          overallMs: Math.max(0, Number(slot.endMs || 0) - baseOffsetMs),
+          playMs: Math.max(0, Number(slot.startMs || 0)),
+          displayMode: 'slot',
+        }))
+        .filter((slot) => slot.changeMs > 0)
+    : [];
+
+  if (slotRows.length) {
+    return {
+      headings: ['Speaker', 'Duration', 'Total'],
+      rows: slotRows.reverse(),
+      emptyMessage: 'No speaker segments yet. Resume capture and mark the speaker when it changes.',
+    };
+  }
+
+  const eventRows = [...state.manualSpeakerEvents]
+    .sort((left, right) => (left.atMs || 0) - (right.atMs || 0))
+    .map((event, index, events) => ({
+      ...event,
+      id: String(event.id || `manual-speaker-${index}-${Number(event.atMs || 0)}`),
+      speakerLabel: String(event.speakerLabel || '').trim() || 'Speaker',
+      changeMs: Math.max(0, Number(event.atMs || 0) - Number(index > 0 ? events[index - 1].atMs : baseOffsetMs)),
+      overallMs: Math.max(0, Number(event.atMs || 0) - baseOffsetMs),
+      playMs: Math.max(0, Number(event.atMs || 0)),
+      displayMode: 'event',
+      isBaseline: index === 0 && Math.abs(Number(event.atMs || 0) - baseOffsetMs) < 400,
+    }))
+    .reverse();
+
+  return {
+    headings: ['Speaker', 'Change', 'Overall'],
+    rows: eventRows,
+    emptyMessage: isManualSpeakerTimerRunning()
+      ? 'Speaker timing is running. Tap 👥 when the speaker changes.'
+      : 'No speaker marks yet. Tap Resume to start, then use 👥 when the speaker changes.',
+  };
+}
+
 function renderManualSpeakerControls() {
   if (!elements.speakerChangeTimer) return;
   const options = getSpeakerOptionsForManualControls();
   const currentLabel = state.manualSpeakerCurrentLabel || options[0] || 'Speaker A';
   const timerRunning = isManualSpeakerTimerRunning();
-  const baseOffsetMs = Number(state.manualSpeakerBaseOffsetMs || 0);
-  const manualEvents = [...state.manualSpeakerEvents]
-    .sort((left, right) => (left.atMs || 0) - (right.atMs || 0))
-    .map((event, index, events) => ({
-      ...event,
-      id: String(event.id || `manual-speaker-${index}-${Number(event.atMs || 0)}`),
-      splitMs: Math.max(0, Number(event.atMs || 0) - Number(index > 0 ? events[index - 1].atMs : baseOffsetMs)),
-      overallMs: Math.max(0, Number(event.atMs || 0) - baseOffsetMs),
-      isBaseline: index === 0 && Math.abs(Number(event.atMs || 0) - baseOffsetMs) < 400,
-    }))
-    .reverse();
+  const manualRows = buildManualSpeakerRowsForDisplay();
 
   state.manualSpeakerCurrentLabel = currentLabel;
   elements.speakerChangeDock?.setAttribute('data-manual-speaker-state', timerRunning ? 'running' : 'paused');
@@ -3035,7 +3199,7 @@ function renderManualSpeakerControls() {
     elements.speakerChangeButton.textContent = timerRunning ? '👥 Mark' : 'Reset';
     elements.speakerChangeButton.disabled = timerRunning
       ? !state.currentSession || state.currentSession.status === 'ended'
-      : !state.currentSession || (manualEvents.length === 0 && getManualSpeakerElapsedMs() === 0);
+      : !state.currentSession || (manualRows.rows.length === 0 && getManualSpeakerElapsedMs() === 0);
     elements.speakerChangeButton.dataset.mode = timerRunning ? 'mark' : 'reset';
     elements.speakerChangeButton.classList.toggle('speaker-change-action--mark', timerRunning);
     elements.speakerChangeButton.classList.toggle('speaker-change-action--reset', !timerRunning);
@@ -3049,53 +3213,51 @@ function renderManualSpeakerControls() {
     elements.speakerChangePauseButton.classList.toggle('speaker-change-action--resume', !timerRunning);
   }
   if (elements.speakerChangeMarkers) {
-    if (!manualEvents.length) {
-      elements.speakerChangeMarkers.innerHTML = `<div class="speaker-change-marker-empty">${escapeHtml(
-        timerRunning
-          ? 'Speaker timing is running. Tap 👥 when the speaker changes.'
-          : 'No speaker marks yet. Tap Resume to start, then use 👥 when the speaker changes.'
-      )}</div>`;
+    if (!manualRows.rows.length) {
+      elements.speakerChangeMarkers.innerHTML = `<div class="speaker-change-marker-empty">${escapeHtml(manualRows.emptyMessage)}</div>`;
     } else {
       elements.speakerChangeMarkers.innerHTML = [
-        '<div class="speaker-change-marker-headings"><span>Speaker</span><span>Change</span><span>Overall</span></div>',
-        manualEvents
+        `<div class="speaker-change-marker-headings"><span>${escapeHtml(manualRows.headings[0])}</span><span>${escapeHtml(
+          manualRows.headings[1]
+        )}</span><span>${escapeHtml(manualRows.headings[2])}</span></div>`,
+        manualRows.rows
           .map(
-            (event) => `
-              <div class="speaker-change-marker-row ${state.manualSpeakerEditingEventId === event.id ? 'speaker-change-marker-row--editing' : ''}">
+            (row) => `
+              <div class="speaker-change-marker-row ${state.manualSpeakerEditingEventId === row.id ? 'speaker-change-marker-row--editing' : ''}">
                 <button
                   class="speaker-change-marker-row__speaker-button"
                   type="button"
-                  data-speaker-marker-toggle-id="${escapeHtml(event.id)}"
-                  aria-expanded="${state.manualSpeakerEditingEventId === event.id ? 'true' : 'false'}"
-                  aria-label="Change speaker for ${escapeHtml(event.speakerLabel || 'speaker')}"
+                  data-speaker-marker-toggle-id="${escapeHtml(row.id)}"
+                  aria-expanded="${state.manualSpeakerEditingEventId === row.id ? 'true' : 'false'}"
+                  aria-label="Change speaker for ${escapeHtml(row.speakerLabel || 'speaker')}"
                 >
-                  <span class="speaker-change-marker-row__speaker">${escapeHtml(event.speakerLabel || 'Speaker')}</span>
-                  <span class="speaker-change-marker-row__speaker-chevron" aria-hidden="true">${state.manualSpeakerEditingEventId === event.id ? '▾' : '▸'}</span>
+                  <span class="speaker-change-marker-row__speaker">${escapeHtml(row.speakerLabel || 'Speaker')}</span>
+                  <span class="speaker-change-marker-row__speaker-chevron" aria-hidden="true">${state.manualSpeakerEditingEventId === row.id ? '▾' : '▸'}</span>
                 </button>
-                <span class="speaker-change-marker-row__split ${event.isBaseline ? 'speaker-change-marker-row__split--start' : ''}">${escapeHtml(
-                  event.isBaseline ? 'Start' : formatManualStopwatchTime(event.splitMs || 0)
+                <span class="speaker-change-marker-row__split ${row.isBaseline ? 'speaker-change-marker-row__split--start' : ''}">${escapeHtml(
+                  row.isBaseline ? 'Start' : formatManualStopwatchTime(row.changeMs || 0)
                 )}</span>
                 <button
                   class="speaker-change-marker-row__overall"
                   type="button"
-                  data-speaker-marker-play-ms="${Number(event.atMs || 0)}"
-                  aria-label="Play from ${escapeHtml(formatManualStopwatchTime(event.overallMs || 0))}"
-                >${escapeHtml(formatManualStopwatchTime(event.overallMs || 0))}</button>
+                  data-speaker-marker-play-ms="${Number(row.playMs || 0)}"
+                  aria-label="Play from ${escapeHtml(formatManualStopwatchTime(row.playMs || 0))}"
+                >${escapeHtml(formatManualStopwatchTime(row.overallMs || 0))}</button>
                 ${
-                  state.manualSpeakerEditingEventId === event.id
+                  state.manualSpeakerEditingEventId === row.id
                     ? `<div class="speaker-change-marker-row__editor">
                         <div class="speaker-change-marker-row__editor-options" role="group" aria-label="Choose speaker for ${escapeHtml(
-                          event.speakerLabel || 'speaker'
+                          row.speakerLabel || 'speaker'
                         )}">
                           ${options
                             .map(
                               (label) => `
                                 <button
-                                  class="speaker-change-marker-row__editor-option ${label === event.speakerLabel ? 'speaker-change-marker-row__editor-option--active' : ''}"
+                                  class="speaker-change-marker-row__editor-option ${label === row.speakerLabel ? 'speaker-change-marker-row__editor-option--active' : ''}"
                                   type="button"
-                                  data-speaker-marker-choice-id="${escapeHtml(event.id)}"
+                                  data-speaker-marker-choice-id="${escapeHtml(row.id)}"
                                   data-speaker-label="${escapeHtml(label)}"
-                                  aria-pressed="${label === event.speakerLabel ? 'true' : 'false'}"
+                                  aria-pressed="${label === row.speakerLabel ? 'true' : 'false'}"
                                 >${escapeHtml(label)}</button>`
                             )
                             .join('')}
@@ -5263,6 +5425,11 @@ async function handleRealtimeEvent(event) {
     return;
   }
 
+  if (event.type === 'transcripto.realtime_model_fallback') {
+    showToast('gpt-realtime-whisper timed out at OpenAI, so this session switched back to the balanced default model.', 5200);
+    return;
+  }
+
   if (event.type === 'conversation.item.input_audio_transcription.delta') {
     updateDraft(event.item_id, event.delta || '');
     return;
@@ -5629,15 +5796,18 @@ function bindEvents() {
   });
   elements.reviewAudio?.addEventListener('play', () => {
     state.sessionPlaybackPreviewMs = null;
+    state.reviewAudioFloatingActive = true;
     renderRecordingReview();
     updateSpeakerPlaybackIndicator();
   });
   elements.reviewAudio?.addEventListener('pause', () => {
+    state.reviewAudioFloatingActive = false;
     renderRecordingReview();
     updateSpeakerPlaybackIndicator();
   });
   elements.reviewAudio?.addEventListener('ended', async () => {
     state.sessionPlaybackPreviewMs = null;
+    state.reviewAudioFloatingActive = false;
     const nextIndex = state.sessionPlaybackClipIndex + 1;
     if (nextIndex < state.sessionRecordings.length) {
       await loadRecordingClip(nextIndex, { autoplay: true });

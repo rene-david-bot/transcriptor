@@ -3,6 +3,7 @@ const RESPONSES_URL = 'https://api.openai.com/v1/responses';
 const AUDIO_TRANSCRIPTIONS_URL = 'https://api.openai.com/v1/audio/transcriptions';
 const DEFAULT_REALTIME_TRANSCRIPTION_MODEL = 'gpt-4o-mini-transcribe';
 const REALTIME_WHISPER_MODEL = 'gpt-realtime-whisper';
+const REALTIME_CALL_TIMEOUT_MS = 15000;
 const DRAFT_TRANSLATION_MODEL = 'gpt-4o-mini';
 const FINAL_TRANSLATION_MODEL = 'gpt-4.1-mini';
 const SPEAKER_DIARIZATION_MODEL = 'gpt-4o-transcribe-diarize';
@@ -117,18 +118,56 @@ function shouldRetryRealtimeConnectionConservatively(error, model) {
   ].some((token) => message.includes(token));
 }
 
-async function createRealtimeAnswerSdp({ apiKey, offerSdp, sessionConfig }) {
+function shouldFallbackToDefaultRealtimeTranscription(error, model) {
+  if (normalizeRealtimeTranscriptionModel(model) !== REALTIME_WHISPER_MODEL) {
+    return false;
+  }
+
+  const status = Number(error?.status || 0);
+  if ([0, 408, 500, 502, 503, 504, 520, 522, 524].includes(status)) {
+    return true;
+  }
+
+  const message = String(error?.message || '').toLowerCase();
+  return [
+    'failed to fetch',
+    'networkerror',
+    'gateway time-out',
+    'gateway timeout',
+    'timed out',
+    'timeout',
+  ].some((token) => message.includes(token));
+}
+
+async function createRealtimeAnswerSdp({ apiKey, offerSdp, sessionConfig, timeoutMs = REALTIME_CALL_TIMEOUT_MS }) {
   const formData = new FormData();
   formData.set('sdp', offerSdp || '');
   formData.set('session', JSON.stringify(sessionConfig));
 
-  const response = await fetch(REALTIME_URL, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: formData,
-  });
+  const controller = new AbortController();
+  const timer = globalThis.setTimeout(() => controller.abort(), timeoutMs);
+  let response;
+
+  try {
+    response = await fetch(REALTIME_URL, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: formData,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      const timeoutError = new Error(`Realtime connection timed out after ${Math.round(timeoutMs / 1000)}s`);
+      timeoutError.status = 408;
+      timeoutError.cause = error;
+      throw timeoutError;
+    }
+    throw error;
+  } finally {
+    globalThis.clearTimeout(timer);
+  }
 
   if (!response.ok) {
     const text = await response.text();
@@ -230,6 +269,38 @@ export class RealtimeTranscriptionClient {
     this.disposed = false;
     this.reconnectAttempt = 0;
     this.lastManualCommitAt = 0;
+  }
+
+  async createAnswerSdpForModel({ offerSdp, transcriptionModel, conservative = false }) {
+    return createRealtimeAnswerSdp({
+      apiKey: this.apiKey,
+      offerSdp,
+      sessionConfig: buildRealtimeTranscriptionSessionConfig({
+        transcriptionModel,
+        sourceLanguage: this.sourceLanguage,
+        sourceLanguageName: this.sourceLanguageName,
+        targetLanguageName: this.targetLanguageName,
+        glossary: this.glossary,
+        conservative,
+      }),
+      timeoutMs: transcriptionModel === REALTIME_WHISPER_MODEL ? REALTIME_CALL_TIMEOUT_MS : REALTIME_CALL_TIMEOUT_MS,
+    });
+  }
+
+  async fallbackToDefaultTranscriptionModel({ offerSdp, reason }) {
+    this.onStatus?.('connecting', 'gpt-realtime-whisper timed out at OpenAI, retrying with the balanced default model...');
+    this.onEvent?.({
+      type: 'transcripto.realtime_model_fallback',
+      fromModel: REALTIME_WHISPER_MODEL,
+      toModel: DEFAULT_REALTIME_TRANSCRIPTION_MODEL,
+      reason: extractErrorMessage(reason, 'Realtime Whisper could not connect.'),
+    });
+    this.transcriptionModel = DEFAULT_REALTIME_TRANSCRIPTION_MODEL;
+    return this.createAnswerSdpForModel({
+      offerSdp,
+      transcriptionModel: DEFAULT_REALTIME_TRANSCRIPTION_MODEL,
+      conservative: false,
+    });
   }
 
   buildAudioConstraints({ includeDeviceId = true } = {}) {
@@ -345,37 +416,39 @@ export class RealtimeTranscriptionClient {
       await this.peerConnection.setLocalDescription(offer);
 
       let answerSdp;
+      const requestedTranscriptionModel = this.transcriptionModel;
       try {
-        answerSdp = await createRealtimeAnswerSdp({
-          apiKey: this.apiKey,
+        answerSdp = await this.createAnswerSdpForModel({
           offerSdp: offer.sdp || '',
-          sessionConfig: buildRealtimeTranscriptionSessionConfig({
-            transcriptionModel: this.transcriptionModel,
-            sourceLanguage: this.sourceLanguage,
-            sourceLanguageName: this.sourceLanguageName,
-            targetLanguageName: this.targetLanguageName,
-            glossary: this.glossary,
-            conservative: false,
-          }),
+          transcriptionModel: requestedTranscriptionModel,
+          conservative: false,
         });
       } catch (error) {
-        if (!shouldRetryRealtimeConnectionConservatively(error, this.transcriptionModel)) {
+        if (shouldRetryRealtimeConnectionConservatively(error, requestedTranscriptionModel)) {
+          this.onStatus?.('connecting', 'Retrying the experimental realtime model with a compatibility session setup...');
+          try {
+            answerSdp = await this.createAnswerSdpForModel({
+              offerSdp: offer.sdp || '',
+              transcriptionModel: requestedTranscriptionModel,
+              conservative: true,
+            });
+          } catch (compatibilityError) {
+            if (!shouldFallbackToDefaultRealtimeTranscription(compatibilityError, requestedTranscriptionModel)) {
+              throw compatibilityError;
+            }
+            answerSdp = await this.fallbackToDefaultTranscriptionModel({
+              offerSdp: offer.sdp || '',
+              reason: compatibilityError,
+            });
+          }
+        } else if (shouldFallbackToDefaultRealtimeTranscription(error, requestedTranscriptionModel)) {
+          answerSdp = await this.fallbackToDefaultTranscriptionModel({
+            offerSdp: offer.sdp || '',
+            reason: error,
+          });
+        } else {
           throw error;
         }
-
-        this.onStatus?.('connecting', 'Retrying the experimental realtime model with a compatibility session setup...');
-        answerSdp = await createRealtimeAnswerSdp({
-          apiKey: this.apiKey,
-          offerSdp: offer.sdp || '',
-          sessionConfig: buildRealtimeTranscriptionSessionConfig({
-            transcriptionModel: this.transcriptionModel,
-            sourceLanguage: this.sourceLanguage,
-            sourceLanguageName: this.sourceLanguageName,
-            targetLanguageName: this.targetLanguageName,
-            glossary: this.glossary,
-            conservative: true,
-          }),
-        });
       }
 
       await this.peerConnection.setRemoteDescription({ type: 'answer', sdp: answerSdp });

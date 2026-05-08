@@ -778,6 +778,127 @@ strong {
   background: rgba(51, 65, 85, 0.24);
 }
 
+.speaker-timing-summary {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.speaker-timing-summary__totals {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+
+.speaker-timing-summary__total {
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.8rem 0.9rem;
+  border-radius: 16px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: rgba(15, 23, 42, 0.42);
+}
+
+.speaker-timing-summary__total span {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.speaker-timing-summary__total strong {
+  color: var(--text);
+  font-size: 1rem;
+}
+
+.speaker-timing-summary__total--manual {
+  border-color: rgba(148, 163, 184, 0.18);
+  background: rgba(51, 65, 85, 0.24);
+}
+
+.speaker-timing-summary__total--auto {
+  border-color: rgba(94, 234, 212, 0.18);
+  background: rgba(20, 184, 166, 0.1);
+}
+
+.speaker-timing-summary__table {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.speaker-timing-summary__head,
+.speaker-timing-summary__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.7fr) repeat(3, minmax(58px, 0.6fr));
+  gap: 0.65rem;
+  align-items: center;
+}
+
+.speaker-timing-summary__head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 0 0.2rem;
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.speaker-timing-summary__row {
+  padding: 0.68rem 0.72rem;
+  border-radius: 16px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: rgba(15, 23, 42, 0.52);
+}
+
+.speaker-timing-summary__speaker {
+  display: grid;
+  gap: 0.15rem;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.speaker-timing-summary__speaker strong {
+  color: var(--text);
+}
+
+.speaker-timing-summary__speaker small,
+.speaker-timing-summary__note {
+  color: var(--muted);
+}
+
+.speaker-timing-summary__row span {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.speaker-timing-summary__speaker:hover strong,
+.speaker-timing-summary__speaker:focus-visible strong {
+  color: var(--primary-soft);
+}
+
+.speaker-details-disclosure {
+  border-top: 1px solid rgba(148, 163, 184, 0.14);
+  padding-top: 0.7rem;
+}
+
+.speaker-details-disclosure summary {
+  cursor: pointer;
+  color: var(--muted-strong);
+  font-weight: 600;
+}
+
+.speaker-details-disclosure__body {
+  display: grid;
+  gap: 0.65rem;
+  margin-top: 0.7rem;
+}
+
 .speaker-slot-summary {
   display: grid;
   gap: 0.65rem;
@@ -1974,6 +2095,10 @@ strong {
   gap: 0.8rem;
 }
 
+.review-audio-transport-dock {
+  display: grid;
+}
+
 .review-audio-transport {
   display: grid;
   gap: 0.75rem;
@@ -2290,6 +2415,36 @@ body[data-review-audio-floating='true'][data-route='live'] .transcript-list {
     flex-wrap: wrap;
   }
 
+  .speaker-timing-summary__totals,
+  .speaker-timing-summary__head,
+  .speaker-timing-summary__row {
+    grid-template-columns: 1fr;
+  }
+
+  .speaker-timing-summary__head {
+    display: none;
+  }
+
+  .speaker-timing-summary__row {
+    gap: 0.35rem;
+  }
+
+  .speaker-timing-summary__row span {
+    text-align: left;
+  }
+
+  .speaker-timing-summary__row span::before {
+    content: attr(data-label);
+    display: inline-block;
+    min-width: 4.25rem;
+    margin-right: 0.45rem;
+    color: var(--muted);
+    font-size: 0.76rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
   .review-audio-transport__controls {
     gap: 0.45rem;
   }
@@ -2513,7 +2668,9 @@ body[data-theme='light'][data-route='live'] .speaker-progress {
 
 body[data-theme='light'][data-route='live'] .speaker-total,
 body[data-theme='light'][data-route='live'] .speaker-stat,
-body[data-theme='light'][data-route='live'] .speaker-slot-summary__card {
+body[data-theme='light'][data-route='live'] .speaker-slot-summary__card,
+body[data-theme='light'][data-route='live'] .speaker-timing-summary__total,
+body[data-theme='light'][data-route='live'] .speaker-timing-summary__row {
   padding: 0.72rem 0.82rem;
   border-radius: 16px;
   border-color: rgba(226, 232, 240, 0.92);
@@ -2526,15 +2683,28 @@ body[data-theme='light'][data-route='live'] .speaker-total--manual {
   border-color: rgba(153, 246, 228, 0.72);
 }
 
-body[data-theme='light'][data-route='live'] .speaker-total--manual-window {
+body[data-theme='light'][data-route='live'] .speaker-total--manual-window,
+body[data-theme='light'][data-route='live'] .speaker-timing-summary__total--manual {
   background: rgba(248, 250, 252, 0.98);
   border-color: rgba(226, 232, 240, 0.94);
+}
+
+body[data-theme='light'][data-route='live'] .speaker-timing-summary__total--auto {
+  background: rgba(240, 253, 250, 0.96);
+  border-color: rgba(153, 246, 228, 0.72);
 }
 
 body[data-theme='light'][data-route='live'] .speaker-slot-summary__chip,
 body[data-theme='light'][data-route='live'] .speaker-slot-row {
   background: rgba(248, 250, 252, 0.96);
   border-color: rgba(191, 219, 254, 0.86);
+}
+
+body[data-theme='light'][data-route='live'] .speaker-timing-summary__head,
+body[data-theme='light'][data-route='live'] .speaker-timing-summary__total span,
+body[data-theme='light'][data-route='live'] .speaker-timing-summary__note,
+body[data-theme='light'][data-route='live'] .speaker-details-disclosure summary {
+  color: #64748b;
 }
 
 body[data-theme='light'][data-route='live'] .review-audio-transport--floating {
@@ -2561,7 +2731,10 @@ body[data-theme='light'][data-route='live'] .speaker-slot-summary__header strong
 body[data-theme='light'][data-route='live'] .speaker-total span,
 body[data-theme='light'][data-route='live'] .speaker-stat span,
 body[data-theme='light'][data-route='live'] .speaker-slot-summary__header span,
-body[data-theme='light'][data-route='live'] .speaker-slot-row__meta strong {
+body[data-theme='light'][data-route='live'] .speaker-slot-row__meta strong,
+body[data-theme='light'][data-route='live'] .speaker-timing-summary__speaker strong,
+body[data-theme='light'][data-route='live'] .speaker-timing-summary__row span,
+body[data-theme='light'][data-route='live'] .speaker-timing-summary__total strong {
   color: #0f172a;
 }
 

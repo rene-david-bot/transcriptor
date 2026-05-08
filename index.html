@@ -57,7 +57,7 @@
             <button type="button" class="icon-button" id="menuButton" aria-label="Open menu">☰</button>
             <div>
               <p class="eyebrow" id="topbarEyebrow">Ready</p>
-              <h2 class="topbar__title">Transcripto</h2>
+              <h2 class="topbar__title" id="topbarTitle">Transcripto</h2>
             </div>
           </div>
           <div class="topbar__right">
@@ -348,7 +348,7 @@
                   <div class="panel__header">
                     <div>
                       <p class="eyebrow">Speaker timing</p>
-                      <h3>Background summary</h3>
+                      <h3>Speaker timing summary</h3>
                     </div>
                   </div>
                   <div class="status-line" id="speakerStatusLine">
@@ -364,33 +364,35 @@
                         <span id="reviewAudioStatus">Local session recording will appear here while capture runs.</span>
                       </div>
                     </div>
-                    <div class="review-audio-transport hidden" id="reviewAudioTransport">
-                      <div class="review-audio-transport__controls">
-                        <button
-                          type="button"
-                          class="button button--ghost button--small review-audio-transport__play-toggle"
-                          id="reviewPlayPauseButton"
-                          aria-label="Play whole session audio"
-                          title="Play whole session audio"
-                        >▶</button>
-                        <button type="button" class="button button--ghost button--small" id="reviewJumpBack5mButton">-5m</button>
-                        <button type="button" class="button button--ghost button--small" id="reviewJumpBack30Button">-30s</button>
-                        <button type="button" class="button button--ghost button--small" id="reviewJumpForward30Button">+30s</button>
-                        <button type="button" class="button button--ghost button--small" id="reviewJumpForward5mButton">+5m</button>
-                      </div>
-                      <div class="review-audio-transport__timeline">
-                        <span class="review-audio-transport__time" id="reviewCurrentTime">00:00</span>
-                        <input
-                          type="range"
-                          class="review-audio-transport__slider"
-                          id="reviewProgressInput"
-                          min="0"
-                          max="0"
-                          step="1000"
-                          value="0"
-                          aria-label="Whole session playback position"
-                        />
-                        <span class="review-audio-transport__time" id="reviewTotalTime">00:00</span>
+                    <div class="review-audio-transport-dock" id="reviewAudioTransportDock">
+                      <div class="review-audio-transport hidden" id="reviewAudioTransport">
+                        <div class="review-audio-transport__controls">
+                          <button
+                            type="button"
+                            class="button button--ghost button--small review-audio-transport__play-toggle"
+                            id="reviewPlayPauseButton"
+                            aria-label="Play whole session audio"
+                            title="Play whole session audio"
+                          >▶</button>
+                          <button type="button" class="button button--ghost button--small" id="reviewJumpBack5mButton">-5m</button>
+                          <button type="button" class="button button--ghost button--small" id="reviewJumpBack30Button">-30s</button>
+                          <button type="button" class="button button--ghost button--small" id="reviewJumpForward30Button">+30s</button>
+                          <button type="button" class="button button--ghost button--small" id="reviewJumpForward5mButton">+5m</button>
+                        </div>
+                        <div class="review-audio-transport__timeline">
+                          <span class="review-audio-transport__time" id="reviewCurrentTime">00:00</span>
+                          <input
+                            type="range"
+                            class="review-audio-transport__slider"
+                            id="reviewProgressInput"
+                            min="0"
+                            max="0"
+                            step="1000"
+                            value="0"
+                            aria-label="Whole session playback position"
+                          />
+                          <span class="review-audio-transport__time" id="reviewTotalTime">00:00</span>
+                        </div>
                       </div>
                     </div>
                     <audio class="hidden" id="reviewAudio" preload="metadata"></audio>
@@ -577,6 +579,6 @@
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-    <script type="module" src="./js/app.js?v=20260508-summary-floating-editor-fixes"></script>
+    <script type="module" src="./js/app.js?v=20260508-timing-summary-stop-fix"></script>
   </body>
 </html>
