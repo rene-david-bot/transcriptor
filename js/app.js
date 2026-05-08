@@ -2994,6 +2994,36 @@ async function playSessionAudioAtMs(absoluteMs, { autoplay = true } = {}) {
   return loadRecordingClip(clipIndex, { autoplay, seekMs: targetMs, forceScroll: true });
 }
 
+function primeReviewAudioPlaybackForUserGesture(targetMs = null) {
+  const audio = elements.reviewAudio;
+  if (!audio) return false;
+
+  const desiredMs = targetMs === null ? null : clampSessionPlaybackMs(targetMs);
+  const clipIndex = desiredMs === null ? state.sessionPlaybackClipIndex : findRecordingIndexForTime(desiredMs);
+  if (clipIndex === -1) return false;
+
+  if (state.sessionPlaybackClipIndex === clipIndex && audio.src && desiredMs !== null) {
+    const recording = state.sessionRecordings[clipIndex];
+    if (recording) {
+      try {
+        audio.currentTime = Math.max(0, recordingTimeToLocalOffset(recording, desiredMs) / 1000);
+      } catch {
+        // ignore seek priming errors
+      }
+    }
+  }
+
+  try {
+    const playAttempt = audio.play();
+    if (playAttempt && typeof playAttempt.catch === 'function') {
+      playAttempt.catch(() => {});
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function setSessionPlaybackPreviewMs(absoluteMs) {
   if (absoluteMs === null || absoluteMs === undefined || Number.isNaN(Number(absoluteMs))) {
     state.sessionPlaybackPreviewMs = null;
@@ -3003,9 +3033,12 @@ function setSessionPlaybackPreviewMs(absoluteMs) {
   renderRecordingReview();
 }
 
-async function seekSessionAudioToMs(absoluteMs, { autoplay = null, forceScroll = true } = {}) {
+async function seekSessionAudioToMs(absoluteMs, { autoplay = null, forceScroll = true, userGesture = false } = {}) {
   const targetMs = clampSessionPlaybackMs(absoluteMs);
   const shouldAutoplay = autoplay === null ? true : Boolean(autoplay);
+  if (userGesture && shouldAutoplay) {
+    primeReviewAudioPlaybackForUserGesture(targetMs);
+  }
   state.sessionPlaybackPreviewMs = null;
   const played = await playSessionAudioAtMs(targetMs, { autoplay: shouldAutoplay });
   if (!played) return false;
@@ -3014,10 +3047,10 @@ async function seekSessionAudioToMs(absoluteMs, { autoplay = null, forceScroll =
   return true;
 }
 
-async function seekSessionAudioByDeltaMs(deltaMs, { autoplay = true } = {}) {
+async function seekSessionAudioByDeltaMs(deltaMs, { autoplay = true, userGesture = false } = {}) {
   const currentPlaybackMs = getVisibleSessionPlaybackMs();
   const baseMs = currentPlaybackMs === null ? 0 : currentPlaybackMs;
-  return seekSessionAudioToMs(baseMs + Number(deltaMs || 0), { autoplay, forceScroll: true });
+  return seekSessionAudioToMs(baseMs + Number(deltaMs || 0), { autoplay, forceScroll: true, userGesture });
 }
 
 async function playReviewAudio() {
@@ -5821,27 +5854,27 @@ function bindEvents() {
   });
   elements.reviewProgressInput?.addEventListener('change', () => {
     const nextValue = Number(elements.reviewProgressInput?.value || 0);
-    seekSessionAudioToMs(nextValue, { autoplay: true, forceScroll: true }).catch((error) =>
+    seekSessionAudioToMs(nextValue, { autoplay: true, forceScroll: true, userGesture: true }).catch((error) =>
       console.warn('Unable to seek whole-session playback', error)
     );
   });
   elements.reviewJumpBack5mButton?.addEventListener('click', () => {
-    seekSessionAudioByDeltaMs(-5 * 60 * 1000, { autoplay: true }).catch((error) =>
+    seekSessionAudioByDeltaMs(-5 * 60 * 1000, { autoplay: true, userGesture: true }).catch((error) =>
       console.warn('Unable to seek backward 5 minutes', error)
     );
   });
   elements.reviewJumpBack30Button?.addEventListener('click', () => {
-    seekSessionAudioByDeltaMs(-30 * 1000, { autoplay: true }).catch((error) =>
+    seekSessionAudioByDeltaMs(-30 * 1000, { autoplay: true, userGesture: true }).catch((error) =>
       console.warn('Unable to seek backward 30 seconds', error)
     );
   });
   elements.reviewJumpForward30Button?.addEventListener('click', () => {
-    seekSessionAudioByDeltaMs(30 * 1000, { autoplay: true }).catch((error) =>
+    seekSessionAudioByDeltaMs(30 * 1000, { autoplay: true, userGesture: true }).catch((error) =>
       console.warn('Unable to seek forward 30 seconds', error)
     );
   });
   elements.reviewJumpForward5mButton?.addEventListener('click', () => {
-    seekSessionAudioByDeltaMs(5 * 60 * 1000, { autoplay: true }).catch((error) =>
+    seekSessionAudioByDeltaMs(5 * 60 * 1000, { autoplay: true, userGesture: true }).catch((error) =>
       console.warn('Unable to seek forward 5 minutes', error)
     );
   });
