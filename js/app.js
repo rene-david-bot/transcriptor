@@ -5168,6 +5168,7 @@ async function startSpeakerTracking(stream) {
     state.speakerTrackingStatus = 'Speaker timing could not start. Tap the button to retry.';
     stopSpeakerTracks(stream);
     renderSpeakerInsights();
+    showToast('Speaker diarization could not start on this audio stream. Trying the final pass after stopping may still work.', 5000);
   }
 }
 
@@ -5236,7 +5237,7 @@ function buildRealtimeClientOptions() {
       startSessionRecording(stream.clone()).catch((error) => {
         console.warn('Local session recording failed to start', error);
       });
-      startSpeakerTracking(stream).catch((error) => {
+      startSpeakerTracking(stream.clone()).catch((error) => {
         console.warn('Background speaker tracking failed to start', error);
       });
     },
