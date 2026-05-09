@@ -3873,10 +3873,11 @@ function renderControls() {
   elements.endSessionButton.classList.remove('hidden');
   elements.endSessionButton.textContent = ended ? 'New Session' : 'End Session';
   elements.endSessionButton.disabled = !session && !ended;
-  elements.renameSessionButton.disabled = !session;
-  elements.exportMarkdownButton.disabled = !session || !state.currentSegments.length;
-  elements.exportTxtButton.disabled = !session || !state.currentSegments.length;
-  elements.exportCurrentFromSide.disabled = !session || !state.currentSegments.length;
+  if (elements.renameSessionButton) elements.renameSessionButton.disabled = !session;
+  if (elements.exportMarkdownButton) elements.exportMarkdownButton.disabled = !session || !state.currentSegments.length;
+  if (elements.exportTxtButton) elements.exportTxtButton.disabled = !session || !state.currentSegments.length;
+  if (elements.exportJsonButton) elements.exportJsonButton.disabled = !session || !state.currentSegments.length;
+  if (elements.exportCurrentFromSide) elements.exportCurrentFromSide.disabled = !session || !state.currentSegments.length;
 }
 
 function renderResumeButtons() {
@@ -6249,11 +6250,18 @@ async function exportCurrentSession(kind) {
     showToast('There is nothing to export yet.');
     return;
   }
+
   if (kind === 'md') {
     exportSessionMarkdown(state.currentSession, state.currentSegments, buildTranscriptTimestamp);
-  } else {
-    exportSessionTxt(state.currentSession, state.currentSegments, buildTranscriptTimestamp);
+    return;
   }
+
+  if (kind === 'json') {
+    exportSessionJson(state.currentSession, state.currentSegments);
+    return;
+  }
+
+  exportSessionTxt(state.currentSession, state.currentSegments, buildTranscriptTimestamp);
 }
 
 async function exportHistoricalSession(sessionId, kind) {
@@ -6263,11 +6271,18 @@ async function exportHistoricalSession(sessionId, kind) {
     showToast('That session has no transcript segments to export.');
     return;
   }
+
   if (kind === 'md') {
     exportSessionMarkdown(session, segments, (segment) => buildTranscriptTimestamp(segment));
-  } else {
-    exportSessionTxt(session, segments, (segment) => buildTranscriptTimestamp(segment));
+    return;
   }
+
+  if (kind === 'json') {
+    exportSessionJson(session, segments);
+    return;
+  }
+
+  exportSessionTxt(session, segments, (segment) => buildTranscriptTimestamp(segment));
 }
 
 async function applySpeakerAliasesToCurrentSession(nextAliases) {
@@ -6745,9 +6760,10 @@ function bindEvents() {
     await renameSpeakerForCurrentSession(renameButton.dataset.speakerRawLabel);
   });
 
-  elements.exportMarkdownButton.addEventListener('click', () => exportCurrentSession('md'));
-  elements.exportTxtButton.addEventListener('click', () => exportCurrentSession('txt'));
-  elements.exportCurrentFromSide.addEventListener('click', () => exportCurrentSession('txt'));
+  elements.exportMarkdownButton?.addEventListener('click', () => exportCurrentSession('md'));
+  elements.exportTxtButton?.addEventListener('click', () => exportCurrentSession('txt'));
+  elements.exportJsonButton?.addEventListener('click', () => exportCurrentSession('json'));
+  elements.exportCurrentFromSide?.addEventListener('click', () => exportCurrentSession('txt'));
 
   elements.toggleAutoScrollButton.addEventListener('click', async () => {
     await persistSettings({ autoScroll: !state.settings.autoScroll });

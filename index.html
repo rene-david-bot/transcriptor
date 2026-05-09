@@ -217,8 +217,15 @@
                       <p class="session-meta" id="sessionMeta">Start a session to begin.</p>
                     </div>
                     <div class="summary-actions">
-                      <button class="button button--ghost button--small" id="renameSessionButton">Rename</button>
                       <button class="button button--ghost button--small" id="toggleAutoScrollButton">Auto-follow: On</button>
+                      <details class="action-menu action-menu--align-end">
+                        <summary class="button button--ghost button--small action-menu__summary">More</summary>
+                        <div class="action-menu__sheet">
+                          <button class="button button--ghost button--small button--block action-menu__item" id="renameSessionButton" type="button">Rename session</button>
+                          <button class="button button--ghost button--small button--block action-menu__item" type="button" data-route="history">Open history</button>
+                          <button class="button button--ghost button--small button--block action-menu__item" type="button" data-route="settings">Open settings</button>
+                        </div>
+                      </details>
                     </div>
                   </div>
 
@@ -273,8 +280,14 @@
                       <h3>Live bilingual transcript</h3>
                     </div>
                     <div class="button-row transcript-export-actions">
-                      <button class="button button--ghost button--small transcript-export-actions__button" id="exportMarkdownButton">Markdown</button>
-                      <button class="button button--ghost button--small transcript-export-actions__button" id="exportTxtButton">TXT</button>
+                      <details class="action-menu action-menu--align-end">
+                        <summary class="button button--ghost button--small transcript-export-actions__button action-menu__summary">Export</summary>
+                        <div class="action-menu__sheet">
+                          <button class="button button--ghost button--small button--block action-menu__item" id="exportMarkdownButton" type="button">Markdown</button>
+                          <button class="button button--ghost button--small button--block action-menu__item" id="exportTxtButton" type="button">TXT</button>
+                          <button class="button button--ghost button--small button--block action-menu__item" id="exportJsonButton" type="button">JSON</button>
+                        </div>
+                      </details>
                     </div>
                   </div>
 
@@ -354,97 +367,85 @@
                     </div>
                   </div>
                 </section>
+
+                <section class="panel live-support-panel">
+                  <details class="live-disclosure" id="speakerInsightsDisclosure">
+                    <summary class="live-disclosure__summary">
+                      <div>
+                        <p class="eyebrow">Insights</p>
+                        <h3>Speaker timing &amp; session audio</h3>
+                      </div>
+                    </summary>
+                    <div class="live-disclosure__body">
+                      <div class="speaker-summary" id="speakerSummary">
+                        <div class="note">No speaker timing data yet.</div>
+                      </div>
+                      <div class="review-audio-panel">
+                        <div class="review-audio-panel__top">
+                          <div class="review-audio-panel__copy">
+                            <strong>Whole session audio</strong>
+                            <span id="reviewAudioStatus">Local session recording will appear here while capture runs.</span>
+                          </div>
+                        </div>
+                        <div class="review-audio-transport-dock" id="reviewAudioTransportDock">
+                          <div class="review-audio-transport hidden" id="reviewAudioTransport">
+                            <div class="review-audio-transport__controls">
+                              <button
+                                type="button"
+                                class="button button--ghost button--small review-audio-transport__play-toggle"
+                                id="reviewPlayPauseButton"
+                                aria-label="Play whole session audio"
+                                title="Play whole session audio"
+                              >▶</button>
+                              <button
+                                type="button"
+                                class="button button--ghost button--small review-audio-transport__stop-button"
+                                id="reviewStopButton"
+                                aria-label="Stop whole session audio"
+                                title="Stop whole session audio"
+                              >Stop</button>
+                              <button type="button" class="button button--ghost button--small" id="reviewJumpBack5mButton">-5m</button>
+                              <button type="button" class="button button--ghost button--small" id="reviewJumpBack30Button">-30s</button>
+                              <button type="button" class="button button--ghost button--small" id="reviewJumpForward30Button">+30s</button>
+                              <button type="button" class="button button--ghost button--small" id="reviewJumpForward5mButton">+5m</button>
+                            </div>
+                            <div class="review-audio-transport__timeline">
+                              <span class="review-audio-transport__time" id="reviewCurrentTime">00:00</span>
+                              <input
+                                type="range"
+                                class="review-audio-transport__slider"
+                                id="reviewProgressInput"
+                                min="0"
+                                max="0"
+                                step="1000"
+                                value="0"
+                                aria-label="Whole session playback position"
+                              />
+                              <span class="review-audio-transport__time" id="reviewTotalTime">00:00</span>
+                            </div>
+                          </div>
+                        </div>
+                        <audio class="hidden" id="reviewAudio" preload="metadata"></audio>
+                      </div>
+                    </div>
+                  </details>
+                </section>
+
+                <section class="panel live-help-panel">
+                  <details class="live-help-disclosure">
+                    <summary class="live-help-disclosure__summary">Session behavior</summary>
+                    <div class="live-help-disclosure__body">
+                      <ul class="checklist compact-list">
+                        <li>Stop closes the live connection and stops microphone sending for the current session.</li>
+                        <li>Final transcript segments are saved locally after each completed turn.</li>
+                        <li>After long listening sessions, the connection rolls over automatically.</li>
+                        <li>Resume continues the same logical session and transcript history.</li>
+                        <li>Speaker timing is best effort and intentionally lower priority than live text.</li>
+                      </ul>
+                    </div>
+                  </details>
+                </section>
               </div>
-
-              <aside class="live-side">
-                <section class="panel side-panel">
-                  <div class="panel__header">
-                    <div>
-                      <p class="eyebrow">Session actions</p>
-                      <h3>Quick access</h3>
-                    </div>
-                  </div>
-                  <div class="stack-list">
-                    <button class="button button--secondary button--block" data-route="history">Open history</button>
-                    <button class="button button--secondary button--block" data-route="settings">Open settings</button>
-                    <button class="button button--ghost button--block" id="exportCurrentFromSide">Export current session</button>
-                  </div>
-                </section>
-
-                <section class="panel side-panel">
-                  <div class="panel__header">
-                    <div>
-                      <h3>Speaker timing summary</h3>
-                    </div>
-                  </div>
-                  <div class="speaker-summary" id="speakerSummary">
-                    <div class="note">No speaker timing data yet.</div>
-                  </div>
-                  <div class="review-audio-panel">
-                    <div class="review-audio-panel__top">
-                      <div class="review-audio-panel__copy">
-                        <strong>Whole session audio</strong>
-                        <span id="reviewAudioStatus">Local session recording will appear here while capture runs.</span>
-                      </div>
-                    </div>
-                    <div class="review-audio-transport-dock" id="reviewAudioTransportDock">
-                      <div class="review-audio-transport hidden" id="reviewAudioTransport">
-                        <div class="review-audio-transport__controls">
-                          <button
-                            type="button"
-                            class="button button--ghost button--small review-audio-transport__play-toggle"
-                            id="reviewPlayPauseButton"
-                            aria-label="Play whole session audio"
-                            title="Play whole session audio"
-                          >▶</button>
-                          <button
-                            type="button"
-                            class="button button--ghost button--small review-audio-transport__stop-button"
-                            id="reviewStopButton"
-                            aria-label="Stop whole session audio"
-                            title="Stop whole session audio"
-                          >Stop</button>
-                          <button type="button" class="button button--ghost button--small" id="reviewJumpBack5mButton">-5m</button>
-                          <button type="button" class="button button--ghost button--small" id="reviewJumpBack30Button">-30s</button>
-                          <button type="button" class="button button--ghost button--small" id="reviewJumpForward30Button">+30s</button>
-                          <button type="button" class="button button--ghost button--small" id="reviewJumpForward5mButton">+5m</button>
-                        </div>
-                        <div class="review-audio-transport__timeline">
-                          <span class="review-audio-transport__time" id="reviewCurrentTime">00:00</span>
-                          <input
-                            type="range"
-                            class="review-audio-transport__slider"
-                            id="reviewProgressInput"
-                            min="0"
-                            max="0"
-                            step="1000"
-                            value="0"
-                            aria-label="Whole session playback position"
-                          />
-                          <span class="review-audio-transport__time" id="reviewTotalTime">00:00</span>
-                        </div>
-                      </div>
-                    </div>
-                    <audio class="hidden" id="reviewAudio" preload="metadata"></audio>
-                  </div>
-                </section>
-
-                <section class="panel side-panel">
-                  <div class="panel__header">
-                    <div>
-                      <p class="eyebrow">Notes</p>
-                      <h3>Behavior</h3>
-                    </div>
-                  </div>
-                  <ul class="checklist compact-list">
-                    <li>Stop closes the live connection and stops microphone sending for the current session.</li>
-                    <li>Final transcript segments are saved locally after each completed turn.</li>
-                    <li>After long listening sessions, the connection rolls over automatically.</li>
-                    <li>Resume continues the same logical session and transcript history.</li>
-                    <li>Speaker timing is best effort and intentionally lower priority than live text.</li>
-                  </ul>
-                </section>
-              </aside>
             </div>
           </section>
 
@@ -610,6 +611,6 @@
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-    <script type="module" src="./js/app.js?v=20260509-nav-compact"></script>
+    <script type="module" src="./js/app.js?v=20260509-pass1-live-cleanup"></script>
   </body>
 </html>
