@@ -2108,7 +2108,6 @@ function renderSpeakerTimingSummary(slotRollup, summary, { final = false } = {})
   const rows = buildSpeakerTimingSummaryRows(slotRollup, summary);
   if (!rows.length) return '';
 
-  const totalAutoMs = rows.reduce((total, row) => total + Math.max(0, Number(row.autoMs || 0)), 0);
   const renderedSpeakerKeys = new Set();
 
   return `
@@ -2129,7 +2128,6 @@ function renderSpeakerTimingSummary(slotRollup, summary, { final = false } = {})
             <span role="columnheader">Speaker</span>
             <span role="columnheader">Part</span>
             <span role="columnheader">Manual</span>
-            <span role="columnheader">Auto</span>
             <span role="columnheader">Total</span>
           </div>
           ${rows
@@ -2149,7 +2147,6 @@ function renderSpeakerTimingSummary(slotRollup, summary, { final = false } = {})
                   </button>
                   <span class="speaker-timing-summary__part" role="cell">${escapeHtml(row.note || '')}</span>
                   <span role="cell">${formatSpeakerTimingSummaryDuration(row.manualMs || 0)}</span>
-                  <span role="cell">${formatSpeakerTimingSummaryDuration(row.autoMs || 0)}</span>
                   <span role="cell">${firstRowForSpeaker ? formatSpeakerTimingSummaryDuration(row.totalMs || 0) : '—'}</span>
                 </div>`;
             })
@@ -2158,7 +2155,6 @@ function renderSpeakerTimingSummary(slotRollup, summary, { final = false } = {})
             <strong role="cell">All speakers</strong>
             <span role="cell">Σ</span>
             <span role="cell">${formatSpeakerTimingSummaryDuration(slotRollup?.totalWindowMs || 0)}</span>
-            <span role="cell">${formatSpeakerTimingSummaryDuration(totalAutoMs)}</span>
             <span role="cell">${formatSpeakerTimingSummaryDuration(slotRollup?.totalWindowMs || 0)}</span>
           </div>
         </div>
@@ -3569,14 +3565,13 @@ function buildManualSpeakerRowsForDisplay() {
         isBaseline: false,
       };
     })
-    .filter((segment) => segment.changeMs > 0);
+    .filter((segment) => segment.changeMs > 0)
+    .reverse();
 
   return {
     headings: ['Speaker', 'Change', 'Overall'],
     rows: eventRows,
-    emptyMessage: isManualSpeakerTimerRunning()
-      ? 'Speaker timing is running. Tap 👥 when the speaker changes.'
-      : 'No speaker marks yet. Tap Resume to start, then use 👥 when the speaker changes.',
+    emptyMessage: '',
   };
 }
 
@@ -3593,13 +3588,7 @@ function renderManualSpeakerControls() {
   elements.speakerChangeDock?.setAttribute('data-manual-speaker-state', timerRunning ? 'running' : 'paused');
   elements.speakerChangeTimer.textContent = formatManualStopwatchTime(getManualSpeakerElapsedMs());
   if (elements.speakerChangeTimerState) {
-    elements.speakerChangeTimerState.textContent = timerRunning
-      ? `${liveLabel} live`
-      : state.currentSession?.status === 'ended'
-        ? 'Session ended'
-        : state.currentSession?.status === 'active' || state.runtimeStatus === 'stopped' || state.currentSession?.status === 'paused'
-          ? 'Stopped'
-          : 'Ready';
+    elements.speakerChangeTimerState.textContent = '';
   }
   if (elements.speakerChangeCurrentLabel) {
     elements.speakerChangeCurrentLabel.textContent = 'Current speaker';
@@ -3612,9 +3601,7 @@ function renderManualSpeakerControls() {
       .join('');
   }
   if (elements.speakerChangePendingHint) {
-    elements.speakerChangePendingHint.textContent = timerRunning
-      ? `Live now: ${liveLabel}. Tap 👥 Mark to save the speaker change in the timing.`
-      : `Choose the speaker you want active when timing resumes.`;
+    elements.speakerChangePendingHint.textContent = '';
   }
   if (elements.speakerChangeCustomInput) {
     if (document.activeElement !== elements.speakerChangeCustomInput || elements.speakerChangeCustomInput.value !== state.manualSpeakerCustomNameDraft) {
@@ -3638,16 +3625,20 @@ function renderManualSpeakerControls() {
     elements.speakerChangeButton.classList.toggle('speaker-change-action--reset', !timerRunning);
   }
   if (elements.speakerChangePauseButton) {
-    elements.speakerChangePauseButton.textContent = timerRunning ? 'Stop' : 'Resume';
-    elements.speakerChangePauseButton.disabled =
-      !state.currentSession || state.currentSession.status === 'ended' || (!timerRunning && state.currentSession.status !== 'active');
-    elements.speakerChangePauseButton.dataset.mode = timerRunning ? 'stop' : 'resume';
-    elements.speakerChangePauseButton.classList.toggle('speaker-change-action--stop', timerRunning);
-    elements.speakerChangePauseButton.classList.toggle('speaker-change-action--resume', !timerRunning);
+    const session = state.currentSession;
+    const runtime = state.runtimeStatus;
+    const canStop = Boolean(session && ['listening', 'connecting', 'reconnecting'].includes(runtime));
+    const canResume = Boolean(session && session.status === 'active' && (['paused', 'stopped', 'error'].includes(runtime) || runtime === 'idle'));
+    const mode = canStop ? 'stop' : 'resume';
+    elements.speakerChangePauseButton.textContent = canStop ? 'Stop' : 'Resume';
+    elements.speakerChangePauseButton.disabled = !(canStop || canResume);
+    elements.speakerChangePauseButton.dataset.mode = mode;
+    elements.speakerChangePauseButton.classList.toggle('speaker-change-action--stop', mode === 'stop');
+    elements.speakerChangePauseButton.classList.toggle('speaker-change-action--resume', mode === 'resume');
   }
   if (elements.speakerChangeMarkers) {
     if (!manualRows.rows.length) {
-      elements.speakerChangeMarkers.innerHTML = `<div class="speaker-change-marker-empty">${escapeHtml(manualRows.emptyMessage)}</div>`;
+      elements.speakerChangeMarkers.innerHTML = '';
     } else {
       elements.speakerChangeMarkers.innerHTML = [
         `<div class="speaker-change-marker-headings"><span>${escapeHtml(manualRows.headings[0])}</span><span>${escapeHtml(
@@ -6364,7 +6355,7 @@ function bindEvents() {
   });
   elements.speakerChangePauseButton?.addEventListener('click', () => {
     const mode = elements.speakerChangePauseButton?.dataset.mode || 'resume';
-    const action = mode === 'stop' ? pauseManualSpeakerTimer() : resumeManualSpeakerTimer();
+    const action = mode === 'stop' ? stopListening() : startListening();
     action.catch((error) => console.warn('Unable to update manual speaker timer', error));
   });
   elements.speakerChangeResetButton?.addEventListener('click', () => {
