@@ -123,6 +123,8 @@ const SESSION_RECORDING_CHUNK_MS = 60000;
 const SPEAKER_FINALIZE_RETRY_DELAY_MS = 1200;
 const SPEAKER_FINALIZE_MAX_ATTEMPTS = 2;
 const SPEAKER_FINALIZE_BATCH_TARGET_MS = 5 * 60 * 1000;
+const MIC_LEVEL_METER_MIN_DB = -72;
+const MIC_LEVEL_METER_INTERVAL_MS = 80;
 
 const state = {
   route: 'setup',
@@ -178,6 +180,16 @@ const state = {
   sessionRecordingMimeType: '',
   sessionRecordingChunkStartMs: 0,
   sessionRecordingSessionId: null,
+  micLevelStream: null,
+  micLevelAudioContext: null,
+  micLevelSourceNode: null,
+  micLevelSplitterNode: null,
+  micLevelLeftAnalyser: null,
+  micLevelRightAnalyser: null,
+  micLevelLeftData: null,
+  micLevelRightData: null,
+  micLevelStereo: false,
+  micLevelTimer: null,
   sessionRecordingPersistTasks: new Set(),
   sessionRecordings: [],
   sessionPlaybackClipIndex: -1,
@@ -294,6 +306,14 @@ const elements = {
   speakerChangeDock: $('#speakerChangeDock'),
   speakerChangeTimer: $('#speakerChangeTimer'),
   speakerChangeTimerState: $('#speakerChangeTimerState'),
+  micLevelMeter: $('#micLevelMeter'),
+  micLevelMode: $('#micLevelMode'),
+  micLevelDb: $('#micLevelDb'),
+  micLevelLeftRow: $('#micLevelLeftRow'),
+  micLevelLeftLabel: $('#micLevelLeftLabel'),
+  micLevelLeftFill: $('#micLevelLeftFill'),
+  micLevelRightRow: $('#micLevelRightRow'),
+  micLevelRightFill: $('#micLevelRightFill'),
   speakerChangeCurrentLabel: $('#speakerChangeCurrentLabel'),
   speakerChangeCurrentChips: $('#speakerChangeCurrentChips'),
   speakerChangePendingHint: $('#speakerChangePendingHint'),
@@ -4416,6 +4436,188 @@ function stopSpeakerTracks(stream) {
   });
 }
 
+function getLiveMicLevelAudioContextClass() {
+  return window.AudioContext || window.webkitAudioContext || null;
+}
+
+function micLevelPercentFromDb(db) {
+  const numericDb = Number(db);
+  const clampedDb = Math.max(
+    MIC_LEVEL_METER_MIN_DB,
+    Math.min(0, Number.isFinite(numericDb) ? numericDb : MIC_LEVEL_METER_MIN_DB)
+  );
+  const normalized = (clampedDb - MIC_LEVEL_METER_MIN_DB) / (0 - MIC_LEVEL_METER_MIN_DB);
+  return `${Math.max(0, Math.min(100, normalized * 100))}%`;
+}
+
+function formatMicLevelDb(db) {
+  if (!Number.isFinite(db)) return '−∞ dB';
+  return `${Math.round(db)} dB`;
+}
+
+function sampleMicLevelDb(analyser, data) {
+  if (!analyser || !data) return MIC_LEVEL_METER_MIN_DB;
+
+  analyser.getByteTimeDomainData(data);
+  let sumSquares = 0;
+  for (let index = 0; index < data.length; index += 1) {
+    const sample = (data[index] - 128) / 128;
+    sumSquares += sample * sample;
+  }
+
+  const rms = Math.sqrt(sumSquares / data.length);
+  if (!Number.isFinite(rms) || rms <= 0.0001) return MIC_LEVEL_METER_MIN_DB;
+  return Math.max(MIC_LEVEL_METER_MIN_DB, Math.min(0, 20 * Math.log10(rms)));
+}
+
+function renderMicLevelMeter({ active = false, stereo = false, leftDb = MIC_LEVEL_METER_MIN_DB, rightDb = MIC_LEVEL_METER_MIN_DB } = {}) {
+  if (!elements.micLevelMeter) return;
+
+  elements.micLevelMeter.classList.toggle('hidden', !active);
+  elements.micLevelMeter.setAttribute('aria-hidden', active ? 'false' : 'true');
+
+  if (elements.micLevelMode) {
+    elements.micLevelMode.textContent = active ? (stereo ? 'Stereo input' : 'Mono input') : 'Mic closed';
+  }
+  if (elements.micLevelDb) {
+    const peakDb = active ? Math.max(leftDb, stereo ? rightDb : MIC_LEVEL_METER_MIN_DB) : Number.NEGATIVE_INFINITY;
+    elements.micLevelDb.textContent = formatMicLevelDb(peakDb);
+  }
+  if (elements.micLevelLeftLabel) {
+    elements.micLevelLeftLabel.textContent = stereo ? 'L' : 'Mono';
+  }
+  if (elements.micLevelLeftFill) {
+    elements.micLevelLeftFill.style.width = active ? micLevelPercentFromDb(leftDb) : '0%';
+  }
+  if (elements.micLevelRightRow) {
+    elements.micLevelRightRow.classList.toggle('hidden', !active || !stereo);
+  }
+  if (elements.micLevelRightFill) {
+    elements.micLevelRightFill.style.width = active && stereo ? micLevelPercentFromDb(rightDb) : '0%';
+  }
+}
+
+function updateMicLevelMeter() {
+  const leftDb = sampleMicLevelDb(state.micLevelLeftAnalyser, state.micLevelLeftData);
+  const rightDb = state.micLevelStereo ? sampleMicLevelDb(state.micLevelRightAnalyser, state.micLevelRightData) : MIC_LEVEL_METER_MIN_DB;
+  renderMicLevelMeter({
+    active: Boolean(state.micLevelAudioContext),
+    stereo: state.micLevelStereo,
+    leftDb,
+    rightDb,
+  });
+}
+
+async function stopMicLevelMeter() {
+  window.clearInterval(state.micLevelTimer);
+  state.micLevelTimer = null;
+
+  const audioContext = state.micLevelAudioContext;
+  const stream = state.micLevelStream;
+
+  [state.micLevelSplitterNode, state.micLevelLeftAnalyser, state.micLevelRightAnalyser, state.micLevelSourceNode].forEach((node) => {
+    try {
+      node?.disconnect?.();
+    } catch {
+      // ignore
+    }
+  });
+
+  state.micLevelStream = null;
+  state.micLevelAudioContext = null;
+  state.micLevelSourceNode = null;
+  state.micLevelSplitterNode = null;
+  state.micLevelLeftAnalyser = null;
+  state.micLevelRightAnalyser = null;
+  state.micLevelLeftData = null;
+  state.micLevelRightData = null;
+  state.micLevelStereo = false;
+
+  stopSpeakerTracks(stream);
+  renderMicLevelMeter({ active: false });
+
+  if (audioContext && audioContext.state !== 'closed') {
+    await audioContext.close().catch(() => {});
+  }
+}
+
+async function startMicLevelMeter(stream) {
+  if (!stream || !elements.micLevelMeter) {
+    stopSpeakerTracks(stream);
+    return;
+  }
+
+  await stopMicLevelMeter();
+
+  const AudioContextClass = getLiveMicLevelAudioContextClass();
+  if (!AudioContextClass) {
+    stopSpeakerTracks(stream);
+    return;
+  }
+
+  try {
+    const track = stream.getAudioTracks?.()[0] || null;
+    let audioContext;
+    try {
+      audioContext = new AudioContextClass({ latencyHint: 'interactive' });
+    } catch {
+      audioContext = new AudioContextClass();
+    }
+    if (audioContext.state === 'suspended') {
+      await audioContext.resume().catch(() => {});
+    }
+
+    const source = audioContext.createMediaStreamSource(stream);
+    const configuredChannelCount = Number(track?.getSettings?.()?.channelCount || 0);
+    const effectiveChannelCount = configuredChannelCount || Number(source.channelCount || 0);
+    const stereo = effectiveChannelCount >= 2;
+
+    const leftAnalyser = audioContext.createAnalyser();
+    leftAnalyser.fftSize = 1024;
+    leftAnalyser.smoothingTimeConstant = 0.72;
+
+    let splitter = null;
+    let rightAnalyser = null;
+    if (stereo) {
+      splitter = audioContext.createChannelSplitter(2);
+      source.connect(splitter);
+      splitter.connect(leftAnalyser, 0);
+      rightAnalyser = audioContext.createAnalyser();
+      rightAnalyser.fftSize = 1024;
+      rightAnalyser.smoothingTimeConstant = 0.72;
+      splitter.connect(rightAnalyser, 1);
+    } else {
+      source.connect(leftAnalyser);
+    }
+
+    state.micLevelStream = stream;
+    state.micLevelAudioContext = audioContext;
+    state.micLevelSourceNode = source;
+    state.micLevelSplitterNode = splitter;
+    state.micLevelLeftAnalyser = leftAnalyser;
+    state.micLevelRightAnalyser = rightAnalyser;
+    state.micLevelLeftData = new Uint8Array(leftAnalyser.fftSize);
+    state.micLevelRightData = rightAnalyser ? new Uint8Array(rightAnalyser.fftSize) : null;
+    state.micLevelStereo = stereo;
+    state.micLevelTimer = window.setInterval(updateMicLevelMeter, MIC_LEVEL_METER_INTERVAL_MS);
+
+    track?.addEventListener?.(
+      'ended',
+      () => {
+        stopMicLevelMeter().catch(() => {});
+      },
+      { once: true }
+    );
+
+    renderMicLevelMeter({ active: true, stereo, leftDb: MIC_LEVEL_METER_MIN_DB, rightDb: MIC_LEVEL_METER_MIN_DB });
+    updateMicLevelMeter();
+  } catch (error) {
+    console.warn('Unable to start live mic level meter', error);
+    await stopMicLevelMeter();
+    stopSpeakerTracks(stream);
+  }
+}
+
 function clearSpeakerChunkStopTimer() {
   window.clearTimeout(state.speakerChunkStopTimer);
   state.speakerChunkStopTimer = null;
@@ -5257,11 +5459,19 @@ function buildRealtimeClientOptions() {
     autoGainControl: normalizeAudioProcessingEnabled(state.settings.autoGainControl),
     onEvent: handleRealtimeEvent,
     onStreamAvailable: (stream) => {
-      startSessionRecording(stream.clone()).catch((error) => {
+      const sessionRecordingStream = stream.clone();
+      const speakerTrackingStream = stream.clone();
+      const micLevelStream = stream.clone();
+      stopSpeakerTracks(stream);
+
+      startSessionRecording(sessionRecordingStream).catch((error) => {
         console.warn('Local session recording failed to start', error);
       });
-      startSpeakerTracking(stream.clone()).catch((error) => {
+      startSpeakerTracking(speakerTrackingStream).catch((error) => {
         console.warn('Background speaker tracking failed to start', error);
+      });
+      startMicLevelMeter(micLevelStream).catch((error) => {
+        console.warn('Live mic level meter failed to start', error);
       });
     },
     onStatus: (status, message) => {
@@ -5276,6 +5486,7 @@ function buildRealtimeClientOptions() {
       state.speechActive = false;
       await pauseManualSpeakerTimer({ persist: false });
       await stopSpeakerTracking({ statusMessage: 'Speaker timing paused.' });
+      await stopMicLevelMeter();
       await stopSessionRecording();
       await ensureScreenWakeLock(false);
       flushListeningClock();
@@ -5339,6 +5550,7 @@ async function startListening({ silent = false } = {}) {
   if (state.client) {
     resetLiveCommitState();
     await stopSpeakerTracking({ statusMessage: 'Refreshing speaker timing...' });
+    await stopMicLevelMeter();
     await stopSessionRecording();
     await state.client.disconnect({ nextStatus: 'stopped', message: 'Resetting the live connection...' });
     state.client = null;
@@ -5378,6 +5590,7 @@ async function startListening({ silent = false } = {}) {
     state.speechActive = false;
     await pauseManualSpeakerTimer({ persist: false });
     await stopSpeakerTracking({ statusMessage: 'Speaker timing idle.' });
+    await stopMicLevelMeter();
     await stopSessionRecording();
     await ensureScreenWakeLock(false);
     state.client = null;
@@ -5403,6 +5616,7 @@ async function pauseListening() {
     await pauseManualSpeakerTimer({ persist: false });
   }
   await stopSpeakerTracking({ statusMessage: 'Paused. Speaker timing may keep catching up briefly.' });
+  await stopMicLevelMeter();
   await stopSessionRecording();
   if (state.client) {
     await state.client.disconnect({ nextStatus: 'paused', message: pausedMessage });
@@ -5429,6 +5643,7 @@ async function stopListening() {
     await pauseManualSpeakerTimer({ persist: false });
   }
   await stopSpeakerTracking({ statusMessage: 'Stopped. Run the final speaker pass for the last buffered audio.' });
+  await stopMicLevelMeter();
   await stopSessionRecording();
   if (state.client) {
     await state.client.disconnect({ nextStatus: 'stopped', message: stoppedMessage });
@@ -5458,6 +5673,7 @@ async function endCurrentSession() {
     await pauseManualSpeakerTimer({ persist: false });
   }
   await stopSpeakerTracking({ statusMessage: 'Ending session. Run the final speaker pass for the last buffered audio.' });
+  await stopMicLevelMeter();
   await stopSessionRecording();
   if (state.client) {
     await state.client.disconnect({ nextStatus: 'ended', message: 'Session ended.' });
@@ -5957,6 +6173,8 @@ async function rolloverConnection() {
   flushListeningClock();
   flushSpeechClock();
   await stopSpeakerTracking({ statusMessage: 'Refreshing speaker timing with the live connection...' });
+  await stopMicLevelMeter();
+  await stopSessionRecording();
   await state.client.disconnect({ nextStatus: 'reconnecting', message: 'Refreshing the live connection...' });
   state.client = null;
   await persistCurrentSessionNow();
@@ -6542,6 +6760,7 @@ function bindEvents() {
     flushListeningClock();
     flushSpeechClock();
     stopSpeakerTracking({ statusMessage: 'Leaving the page. Speaker timing paused.' }).catch(() => {});
+    stopMicLevelMeter().catch(() => {});
     stopSessionRecording().catch(() => {});
     ensureScreenWakeLock(false).catch(() => {});
     if (state.currentSession && state.currentSession.status !== 'ended' && ['listening', 'connecting', 'reconnecting'].includes(state.runtimeStatus)) {

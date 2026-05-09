@@ -2356,6 +2356,69 @@ body[data-review-audio-floating='true'][data-route='live'] .transcript-list {
   font-variant-numeric: tabular-nums;
 }
 
+.speaker-change-dock__meter {
+  display: grid;
+  gap: 0.45rem;
+  padding: 0.7rem 0.8rem;
+  border-radius: 18px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: rgba(8, 14, 27, 0.58);
+}
+
+.speaker-change-dock__meter-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.speaker-change-dock__meter-mode,
+.speaker-change-dock__meter-channel {
+  color: var(--muted-strong);
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.speaker-change-dock__meter-db {
+  color: var(--text-soft);
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.speaker-change-dock__meter-bars {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.speaker-change-dock__meter-row {
+  display: grid;
+  grid-template-columns: 2.9rem minmax(0, 1fr);
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.speaker-change-dock__meter-track {
+  position: relative;
+  height: 0.72rem;
+  overflow: hidden;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: rgba(15, 23, 42, 0.88);
+  box-shadow: inset 0 1px 2px rgba(2, 6, 23, 0.45);
+}
+
+.speaker-change-dock__meter-fill {
+  width: 0%;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #22c55e 0%, #22c55e 68%, #facc15 84%, #ef4444 100%);
+  box-shadow: 0 0 14px rgba(34, 197, 94, 0.2);
+  transition: width 80ms linear;
+}
+
 .speaker-change-dock__speaker-row {
   display: grid;
   gap: 0.45rem;
@@ -2619,6 +2682,14 @@ body[data-review-audio-floating='true'][data-route='live'] .transcript-list {
     font-size: 0.76rem;
   }
 
+  .speaker-change-dock__meter {
+    padding: 0.62rem 0.68rem;
+  }
+
+  .speaker-change-dock__meter-row {
+    grid-template-columns: 2.5rem minmax(0, 1fr);
+  }
+
   .speaker-change-marker-headings {
     display: none;
   }
@@ -2860,6 +2931,18 @@ body[data-theme='light'][data-route='live'] .speaker-slot-summary__chip,
 body[data-theme='light'][data-route='live'] .speaker-slot-row {
   background: rgba(248, 250, 252, 0.96);
   border-color: rgba(191, 219, 254, 0.86);
+}
+
+body[data-theme='light'][data-route='live'] .speaker-change-dock__meter {
+  border-color: rgba(226, 232, 240, 0.92);
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow: none;
+}
+
+body[data-theme='light'][data-route='live'] .speaker-change-dock__meter-track {
+  border-color: rgba(203, 213, 225, 0.92);
+  background: rgba(241, 245, 249, 0.94);
+  box-shadow: inset 0 1px 2px rgba(148, 163, 184, 0.22);
 }
 
 body[data-theme='light'][data-route='live'] .speaker-timing-summary__head,

@@ -312,6 +312,26 @@
                           <span class="speaker-change-dock__timer" id="speakerChangeTimer">00:00.00</span>
                         </div>
                       </div>
+                      <div class="speaker-change-dock__meter hidden" id="micLevelMeter" aria-hidden="true">
+                        <div class="speaker-change-dock__meter-head">
+                          <span class="speaker-change-dock__meter-mode" id="micLevelMode">Mic closed</span>
+                          <span class="speaker-change-dock__meter-db" id="micLevelDb">−∞ dB</span>
+                        </div>
+                        <div class="speaker-change-dock__meter-bars">
+                          <div class="speaker-change-dock__meter-row" id="micLevelLeftRow">
+                            <span class="speaker-change-dock__meter-channel" id="micLevelLeftLabel">Mono</span>
+                            <div class="speaker-change-dock__meter-track">
+                              <div class="speaker-change-dock__meter-fill" id="micLevelLeftFill"></div>
+                            </div>
+                          </div>
+                          <div class="speaker-change-dock__meter-row hidden" id="micLevelRightRow">
+                            <span class="speaker-change-dock__meter-channel">R</span>
+                            <div class="speaker-change-dock__meter-track">
+                              <div class="speaker-change-dock__meter-fill" id="micLevelRightFill"></div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
                       <div class="speaker-change-dock__speaker-row">
                         <span class="speaker-change-dock__speaker-label" id="speakerChangeCurrentLabel">Current speaker</span>
                         <div class="speaker-change-chip-list" id="speakerChangeCurrentChips" role="group" aria-label="Current speaker"></div>
@@ -592,6 +612,6 @@
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-    <script type="module" src="./js/app.js?v=20260509-export-mobile-fit-r3"></script>
+    <script type="module" src="./js/app.js?v=20260509-mic-meter"></script>
   </body>
 </html>
