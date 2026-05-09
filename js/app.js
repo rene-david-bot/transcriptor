@@ -1549,6 +1549,7 @@ async function applyManualSpeakerSelection(nextRawLabel = elements.speakerChange
   const previousActiveLabel = normalizeManualSpeakerName(state.manualSpeakerActiveLabel || previousLabel || '');
   const resolvedLabel = findExistingManualSpeakerOption(nextLabel, state.currentSession) || nextLabel;
   let didSwitchLiveSpeaker = false;
+  let createdSpeakerMark = false;
 
   state.manualSpeakerCurrentLabel = resolvedLabel;
   state.manualSpeakerCustomNameDraft = '';
@@ -1570,7 +1571,9 @@ async function applyManualSpeakerSelection(nextRawLabel = elements.speakerChange
     resolvedLabel !== previousActiveLabel
   ) {
     clearPendingManualSpeakerChange();
-    await splitManualSpeakerSpan({ atMs: getManualSpeakerSessionPositionMs(), persist: false });
+    createdSpeakerMark = Boolean(
+      await splitManualSpeakerSpan({ atMs: getManualSpeakerSessionPositionMs(), persist: false })
+    );
     didSwitchLiveSpeaker = normalizeManualSpeakerName(state.manualSpeakerActiveLabel || '') === resolvedLabel;
   } else {
     clearPendingManualSpeakerChange();
@@ -1580,9 +1583,13 @@ async function applyManualSpeakerSelection(nextRawLabel = elements.speakerChange
 
   if (state.currentSession) {
     syncManualSpeakerStateToSession();
-    if (resolvedLabel !== previousLabel || didSwitchLiveSpeaker) {
+    if (resolvedLabel !== previousLabel || didSwitchLiveSpeaker || createdSpeakerMark) {
       await persistCurrentSessionNow();
     }
+  }
+
+  if (createdSpeakerMark && didSwitchLiveSpeaker) {
+    showToast(`Marked speaker change to ${resolvedLabel}.`);
   }
 
   return true;
@@ -3661,7 +3668,7 @@ function renderManualSpeakerControls() {
   }
   if (elements.speakerChangePendingHint) {
     elements.speakerChangePendingHint.textContent = timerRunning
-      ? `Live now: ${activeLabel}. Picking a new speaker in the dropdown switches live immediately.`
+      ? `Live now: ${activeLabel}. Changing the dropdown sets the mark and switches the current speaker immediately.`
       : `Choose the speaker you want active when timing resumes.`;
   }
   if (elements.speakerChangeCustomInput) {
