@@ -3795,7 +3795,6 @@ function renderControls() {
   elements.renameSessionButton.disabled = !session;
   elements.exportMarkdownButton.disabled = !session || !state.currentSegments.length;
   elements.exportTxtButton.disabled = !session || !state.currentSegments.length;
-  elements.exportJsonButton.disabled = !session || !state.currentSegments.length;
   elements.exportCurrentFromSide.disabled = !session || !state.currentSegments.length;
 }
 
@@ -5971,10 +5970,8 @@ async function exportCurrentSession(kind) {
   }
   if (kind === 'md') {
     exportSessionMarkdown(state.currentSession, state.currentSegments, buildTranscriptTimestamp);
-  } else if (kind === 'txt') {
-    exportSessionTxt(state.currentSession, state.currentSegments, buildTranscriptTimestamp);
   } else {
-    exportSessionJson(state.currentSession, state.currentSegments);
+    exportSessionTxt(state.currentSession, state.currentSegments, buildTranscriptTimestamp);
   }
 }
 
@@ -5987,10 +5984,8 @@ async function exportHistoricalSession(sessionId, kind) {
   }
   if (kind === 'md') {
     exportSessionMarkdown(session, segments, (segment) => buildTranscriptTimestamp(segment));
-  } else if (kind === 'txt') {
-    exportSessionTxt(session, segments, (segment) => buildTranscriptTimestamp(segment));
   } else {
-    exportSessionJson(session, segments);
+    exportSessionTxt(session, segments, (segment) => buildTranscriptTimestamp(segment));
   }
 }
 
@@ -6471,8 +6466,7 @@ function bindEvents() {
 
   elements.exportMarkdownButton.addEventListener('click', () => exportCurrentSession('md'));
   elements.exportTxtButton.addEventListener('click', () => exportCurrentSession('txt'));
-  elements.exportJsonButton.addEventListener('click', () => exportCurrentSession('json'));
-  elements.exportCurrentFromSide.addEventListener('click', () => exportCurrentSession('json'));
+  elements.exportCurrentFromSide.addEventListener('click', () => exportCurrentSession('txt'));
 
   elements.toggleAutoScrollButton.addEventListener('click', async () => {
     await persistSettings({ autoScroll: !state.settings.autoScroll });

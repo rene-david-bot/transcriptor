@@ -13,7 +13,8 @@ export function buildExportBaseName(session) {
 }
 
 function download(content, filename, mimeType) {
-  const blob = new Blob([content], { type: mimeType });
+  const withBom = typeof content === 'string' && String(mimeType || '').startsWith('text/plain') ? `\uFEFF${content}` : content;
+  const blob = new Blob([withBom], { type: mimeType });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
@@ -91,23 +92,11 @@ function formatSegmentForMarkdown(segment, timestamp) {
 }
 
 function formatSegmentForText(segment, timestamp) {
-  const speakerLine = segment.speakerLabel
-    ? `Speaker: ${segment.speakerLabel}`
-    : segment.speakerStatus === 'pending'
-      ? 'Speaker: analyzing'
-      : null;
+  const speakerLabel = segment.speakerLabel || (segment.speakerStatus === 'pending' ? 'analyzing' : '');
+  const sourceHeader = [`[${timestamp}]`, segment.sourceLanguage.toUpperCase(), speakerLabel].filter(Boolean).join(' ');
+  const targetHeader = [`[${timestamp}]`, segment.targetLanguage.toUpperCase(), speakerLabel].filter(Boolean).join(' ');
 
-  return [
-    `[${timestamp}] ${segment.sourceLanguage.toUpperCase()}`,
-    speakerLine,
-    segment.sourceText || '',
-    '',
-    `[${timestamp}] ${segment.targetLanguage.toUpperCase()}`,
-    segment.translatedText || '',
-    '',
-  ]
-    .filter(Boolean)
-    .join('\n');
+  return [sourceHeader, segment.sourceText || '', '', targetHeader, segment.translatedText || ''].join('\n');
 }
 
 export function exportSessionMarkdown(session, segments, formatTimestamp) {
@@ -137,21 +126,12 @@ export function exportSessionMarkdown(session, segments, formatTimestamp) {
 
 export function exportSessionTxt(session, segments, formatTimestamp) {
   const base = buildExportBaseName(session);
-  const speakerSummary = buildSpeakerSummary(segments);
   const content = [
     `${session.title}`,
-    `Created: ${session.createdAt}`,
-    `Status: ${session.status}`,
-    `Source: ${session.sourceLanguage}`,
-    `Target: ${session.targetLanguage}`,
-    `Duration(ms): ${session.activeDurationMs || 0}`,
-    `Segments: ${segments.length}`,
-    session.glossary ? `Glossary: ${session.glossary}` : null,
-    ...buildSpeakerSummaryLines(speakerSummary, ''),
     '',
-    ...segments.flatMap((segment) => [formatSegmentForText(segment, formatTimestamp(segment)), '']),
+    ...segments.flatMap((segment, index) => [formatSegmentForText(segment, formatTimestamp(segment)), index < segments.length - 1 ? '' : null]),
   ]
-    .filter(Boolean)
+    .filter((line) => line !== null)
     .join('\n');
 
   download(content, `${base}.txt`, 'text/plain;charset=utf-8');
