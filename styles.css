@@ -2314,47 +2314,6 @@ body[data-review-audio-floating='true'][data-route='live'] .transcript-list {
   gap: 0.45rem;
 }
 
-.speaker-change-dock__speaker-buttons {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.45rem;
-}
-
-.speaker-change-dock__speaker-chip {
-  appearance: none;
-  border: 1px solid rgba(148, 163, 184, 0.2);
-  background: rgba(15, 23, 42, 0.5);
-  color: var(--text);
-  border-radius: 999px;
-  padding: 0.55rem 0.8rem;
-  font: inherit;
-  font-size: 0.92rem;
-  line-height: 1.1;
-  cursor: pointer;
-}
-
-.speaker-change-dock__speaker-chip--selected {
-  border-color: rgba(96, 165, 250, 0.55);
-  background: rgba(37, 99, 235, 0.22);
-}
-
-.speaker-change-dock__speaker-chip--live {
-  border-color: rgba(52, 211, 153, 0.45);
-  box-shadow: inset 0 0 0 1px rgba(52, 211, 153, 0.18);
-}
-
-.speaker-change-dock__speaker-chip--queued {
-  border-color: rgba(250, 204, 21, 0.45);
-  box-shadow: inset 0 0 0 1px rgba(250, 204, 21, 0.18);
-}
-
-.speaker-change-dock__speaker-chip small {
-  display: block;
-  margin-top: 0.18rem;
-  font-size: 0.72rem;
-  opacity: 0.82;
-}
-
 .speaker-change-dock__speaker-row select {
   width: 100%;
 }
