@@ -1160,7 +1160,7 @@ function startClockTimer() {
     renderSessionSummary();
     renderManualSpeakerControls();
     updatePlaybackHighlight();
-  }, 1000);
+  }, 100);
 }
 
 function closeSidebar() {
@@ -1331,9 +1331,10 @@ function getSpeakerNamesForContext(session = state.currentSession) {
 }
 
 function getSpeakerOptionsForManualControls(session = state.currentSession) {
-  const seeded = getSpeakerNamesForContext(session);
-  const fallback = ['Speaker A', 'Speaker B', 'Speaker C'];
-  return [...new Set([...seeded, ...fallback])].filter(Boolean).slice(0, 8);
+  const seeded = Array.from(new Set(getSpeakerNamesForContext(session).map((name) => normalizeManualSpeakerName(name)).filter(Boolean)));
+  if (seeded.length === 0) return ['Speaker A', 'Speaker B'];
+  if (seeded.length === 1) return [seeded[0], 'Speaker B'];
+  return seeded.slice(0, 8);
 }
 
 function normalizeManualSpeakerName(value) {
@@ -1428,15 +1429,13 @@ async function splitManualSpeakerSpan({ atMs = getManualSpeakerSessionPositionMs
   }
 
   const absoluteAtMs = Math.max(0, Math.round(Number(atMs || 0)));
-  const nextLabel = syncManualSpeakerSelectionFromUi();
-  const activeLabel = normalizeManualSpeakerName(state.manualSpeakerActiveLabel || nextLabel);
+  const currentLabel = syncManualSpeakerSelectionFromUi();
   const openStartMs = Math.max(0, Number(state.manualSpeakerOpenStartMs || 0));
-  const rawSplitAtMs = state.manualSpeakerPendingChangeAtMs === null ? absoluteAtMs : state.manualSpeakerPendingChangeAtMs;
-  const splitAtMs = Math.max(openStartMs, Math.min(absoluteAtMs, Math.round(Number(rawSplitAtMs || absoluteAtMs))));
+  const splitAtMs = Math.max(openStartMs, absoluteAtMs);
 
-  const didAddSegment = addManualSpeakerSegment(activeLabel, openStartMs, splitAtMs);
+  const didAddSegment = addManualSpeakerSegment(currentLabel, openStartMs, splitAtMs);
   state.manualSpeakerOpenStartMs = splitAtMs;
-  state.manualSpeakerActiveLabel = normalizeManualSpeakerName(nextLabel || activeLabel);
+  state.manualSpeakerActiveLabel = normalizeManualSpeakerName(currentLabel);
   clearPendingManualSpeakerChange();
   syncManualSpeakerStateToSession();
 
@@ -1455,24 +1454,9 @@ async function commitCurrentManualSpeakerSpan({ atMs = getManualSpeakerSessionPo
   }
 
   const stopAtMs = Math.max(0, Math.round(Number(atMs || 0)));
-  const selectedLabel = syncManualSpeakerSelectionFromUi();
-  let activeLabel = normalizeManualSpeakerName(state.manualSpeakerActiveLabel || selectedLabel);
-  let openStartMs = Math.max(0, Number(state.manualSpeakerOpenStartMs || 0));
-  let changed = false;
-
-  if (
-    state.manualSpeakerPendingChangeAtMs !== null &&
-    selectedLabel &&
-    activeLabel &&
-    normalizeManualSpeakerName(selectedLabel) !== activeLabel
-  ) {
-    const splitAtMs = Math.max(openStartMs, Math.min(stopAtMs, Math.round(Number(state.manualSpeakerPendingChangeAtMs || stopAtMs))));
-    changed = addManualSpeakerSegment(activeLabel, openStartMs, splitAtMs) || changed;
-    openStartMs = splitAtMs;
-    activeLabel = normalizeManualSpeakerName(selectedLabel);
-  }
-
-  changed = addManualSpeakerSegment(activeLabel, openStartMs, stopAtMs) || changed;
+  const currentLabel = syncManualSpeakerSelectionFromUi();
+  const openStartMs = Math.max(0, Number(state.manualSpeakerOpenStartMs || 0));
+  const changed = addManualSpeakerSegment(currentLabel, openStartMs, stopAtMs);
   state.manualSpeakerOpenStartMs = null;
   state.manualSpeakerActiveLabel = '';
   clearPendingManualSpeakerChange();
@@ -1599,26 +1583,9 @@ function getManualSpeakerLabelForSegment(segment, session = state.currentSession
 
   const currentPositionMs = Math.max(0, getManualSpeakerSessionPositionMs(session));
   const openStartMs = Math.max(0, Number(state.manualSpeakerOpenStartMs || 0));
-  const selectedLabel = normalizeManualSpeakerName(state.manualSpeakerCurrentLabel || '');
-  const activeLabel = normalizeManualSpeakerName(state.manualSpeakerActiveLabel || selectedLabel);
+  const selectedLabel = normalizeManualSpeakerName(state.manualSpeakerCurrentLabel || state.manualSpeakerActiveLabel || '');
 
-  if (
-    state.manualSpeakerPendingChangeAtMs !== null &&
-    selectedLabel &&
-    activeLabel &&
-    selectedLabel !== activeLabel
-  ) {
-    const splitAtMs = Math.max(openStartMs, Math.min(currentPositionMs, Math.round(Number(state.manualSpeakerPendingChangeAtMs || currentPositionMs))));
-    if (segmentStartMs >= openStartMs && segmentStartMs < splitAtMs) {
-      return activeLabel;
-    }
-    if (segmentStartMs >= splitAtMs && segmentStartMs < currentPositionMs) {
-      return selectedLabel;
-    }
-    return '';
-  }
-
-  return segmentStartMs >= openStartMs && segmentStartMs < currentPositionMs ? activeLabel : '';
+  return segmentStartMs >= openStartMs && segmentStartMs < currentPositionMs ? selectedLabel : '';
 }
 
 function buildSessionGlossary(session = state.currentSession) {
@@ -3841,7 +3808,10 @@ function renderControls() {
   elements.pauseButton.classList.add('hidden');
   elements.resumeButton.classList.add('hidden');
   elements.stopButton.classList.add('hidden');
-  elements.endSessionButton.disabled = !session || ended;
+  elements.newSessionButton.classList.add('hidden');
+  elements.endSessionButton.classList.remove('hidden');
+  elements.endSessionButton.textContent = ended ? 'New Session' : 'End Session';
+  elements.endSessionButton.disabled = !session && !ended;
   elements.renameSessionButton.disabled = !session;
   elements.exportMarkdownButton.disabled = !session || !state.currentSegments.length;
   elements.exportTxtButton.disabled = !session || !state.currentSegments.length;
@@ -5593,8 +5563,7 @@ async function markManualSpeakerChange({ atMs = getManualSpeakerSessionPositionM
     return;
   }
   const selectedLabel = normalizeManualSpeakerName(state.manualSpeakerCurrentLabel || getResolvedManualSpeakerSelection());
-  const activeLabel = normalizeManualSpeakerName(state.manualSpeakerActiveLabel || selectedLabel);
-  if (!selectedLabel || selectedLabel === activeLabel) {
+  if (!selectedLabel) {
     renderManualSpeakerControls();
     return false;
   }
@@ -6468,7 +6437,13 @@ function bindEvents() {
   elements.pauseButton.addEventListener('click', pauseListening);
   elements.resumeButton.addEventListener('click', () => startListening());
   elements.stopButton.addEventListener('click', stopListening);
-  elements.endSessionButton.addEventListener('click', endCurrentSession);
+  elements.endSessionButton.addEventListener('click', () => {
+    if (!state.currentSession || state.currentSession.status === 'ended') {
+      createFreshSessionFromLive().catch((error) => console.warn('Unable to start a new session', error));
+      return;
+    }
+    endCurrentSession().catch((error) => console.warn('Unable to end the session', error));
+  });
   elements.newSessionButton.addEventListener('click', createFreshSessionFromLive);
   elements.renameSessionButton.addEventListener('click', renameCurrentSession);
   elements.speakerSummary.addEventListener('click', async (event) => {
