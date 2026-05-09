@@ -93,10 +93,10 @@ function formatSegmentForMarkdown(segment, timestamp) {
 
 function formatSegmentForText(segment, timestamp) {
   const speakerLabel = segment.speakerLabel || (segment.speakerStatus === 'pending' ? 'analyzing' : '');
-  const sourceHeader = [`[${timestamp}]`, segment.sourceLanguage.toUpperCase(), speakerLabel].filter(Boolean).join(' ');
-  const targetHeader = [`[${timestamp}]`, segment.targetLanguage.toUpperCase(), speakerLabel].filter(Boolean).join(' ');
+  const sourceHeader = [`[${timestamp}]`, speakerLabel, segment.sourceLanguage.toUpperCase()].filter(Boolean).join(' ');
+  const targetHeader = segment.targetLanguage.toUpperCase();
 
-  return [sourceHeader, segment.sourceText || '', '', targetHeader, segment.translatedText || ''].join('\n');
+  return [sourceHeader, segment.sourceText || '', targetHeader, segment.translatedText || ''].join('\n');
 }
 
 export function exportSessionMarkdown(session, segments, formatTimestamp) {
