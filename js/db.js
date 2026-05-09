@@ -24,6 +24,22 @@ function canUseLocalStorage() {
   return typeof localStorage !== 'undefined';
 }
 
+async function estimateBrowserStorageUsage() {
+  if (typeof navigator === 'undefined' || typeof navigator.storage?.estimate !== 'function') {
+    return { usageBytes: null, quotaBytes: null };
+  }
+
+  try {
+    const estimate = await navigator.storage.estimate();
+    return {
+      usageBytes: Number.isFinite(estimate?.usage) ? estimate.usage : null,
+      quotaBytes: Number.isFinite(estimate?.quota) ? estimate.quota : null,
+    };
+  } catch {
+    return { usageBytes: null, quotaBytes: null };
+  }
+}
+
 function pickLocalSettings(settings = {}) {
   return LOCAL_SETTINGS_FIELDS.reduce((picked, key) => {
     if (settings[key] === undefined) return picked;
@@ -284,9 +300,12 @@ export async function getStorageSummary() {
   const tx = db.transaction('segments', 'readonly');
   const segmentCount = await requestToPromise(tx.objectStore('segments').count());
   await txComplete(tx);
+  const { usageBytes, quotaBytes } = await estimateBrowserStorageUsage();
   return {
     sessions: sessions.length,
     activeSessions: sessions.filter((session) => session.status !== 'ended').length,
     segments: segmentCount,
+    usageBytes,
+    quotaBytes,
   };
 }

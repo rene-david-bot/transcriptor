@@ -16,7 +16,7 @@ import {
   upsertRecording,
   upsertSegment,
   upsertSession,
-} from './db.js';
+} from './db.js?v=20260509-storage-size';
 import { exportSessionJson, exportSessionMarkdown, exportSessionTxt } from './exporters.js';
 import {
   buildRealtimeTranscriptionSessionPreview,
@@ -355,6 +355,7 @@ const elements = {
   clearAllSessionsButton: $('#clearAllSessionsButton'),
   clearDraftsButton: $('#clearDraftsButton'),
   storageStats: $('#storageStats'),
+  historyStorageStats: $('#historyStorageStats'),
   installCard: $('#installCard'),
   installButton: $('#installButton'),
   toggleAutoScrollButton: $('#toggleAutoScrollButton'),
@@ -376,6 +377,36 @@ let debugNoPersistence = false;
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function formatStorageBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return 'Unknown';
+
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let value = bytes;
+  let unitIndex = 0;
+
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+
+  const maximumFractionDigits = unitIndex === 0 ? 0 : value < 10 ? 1 : 0;
+  return `${value.toLocaleString(undefined, { maximumFractionDigits })} ${units[unitIndex]}`;
+}
+
+function renderStorageSummaryMarkup(summary) {
+  const lines = [];
+
+  if (Number.isFinite(summary?.usageBytes)) {
+    lines.push(`<div><strong>${formatStorageBytes(summary.usageBytes)}</strong> total browser storage used</div>`);
+  }
+
+  lines.push(`<div><strong>${summary.sessions}</strong> session${summary.sessions === 1 ? '' : 's'} stored locally</div>`);
+  lines.push(`<div><strong>${summary.activeSessions}</strong> active or resumable session${summary.activeSessions === 1 ? '' : 's'}</div>`);
+  lines.push(`<div><strong>${summary.segments}</strong> transcript segment${summary.segments === 1 ? '' : 's'}</div>`);
+
+  return lines.join('');
 }
 
 function getLanguageName(code) {
@@ -1256,11 +1287,13 @@ async function refreshSessions() {
 
 async function renderStorageStats() {
   const summary = await getStorageSummary();
-  elements.storageStats.innerHTML = [
-    `<div><strong>${summary.sessions}</strong> session${summary.sessions === 1 ? '' : 's'} stored locally</div>`,
-    `<div><strong>${summary.activeSessions}</strong> active or resumable session${summary.activeSessions === 1 ? '' : 's'}</div>`,
-    `<div><strong>${summary.segments}</strong> transcript segment${summary.segments === 1 ? '' : 's'}</div>`,
-  ].join('');
+  const markup = renderStorageSummaryMarkup(summary);
+  if (elements.storageStats) {
+    elements.storageStats.innerHTML = markup;
+  }
+  if (elements.historyStorageStats) {
+    elements.historyStorageStats.innerHTML = markup;
+  }
 }
 
 function pickSpeakerCaptureMimeType() {
