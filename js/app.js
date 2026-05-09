@@ -1492,6 +1492,8 @@ async function useManualSpeakerCustomName(rawValue = state.manualSpeakerCustomNa
 
   const existingLabel = findExistingManualSpeakerOption(nextLabel);
   const resolvedLabel = existingLabel || nextLabel;
+  let addedToSession = false;
+  let addedToDefaults = false;
 
   if (state.currentSession) {
     const currentSpeakerNames = parseSpeakerNames(state.currentSession.speakerNames || '');
@@ -1505,7 +1507,19 @@ async function useManualSpeakerCustomName(rawValue = state.manualSpeakerCustomNa
         return false;
       }
       state.currentSession.speakerNames = normalizeSpeakerNamesInput([...currentSpeakerNames, resolvedLabel].join(', '));
+      addedToSession = true;
     }
+  }
+
+  const defaultSpeakerNames = parseSpeakerNames(state.settings.speakerNames || '');
+  const hasDefaultName = defaultSpeakerNames.some(
+    (label) => normalizeManualSpeakerName(label).toLocaleLowerCase() === resolvedLabel.toLocaleLowerCase()
+  );
+  if (!hasDefaultName) {
+    await persistSettings({
+      speakerNames: normalizeSpeakerNamesInput([...defaultSpeakerNames, resolvedLabel].join(', ')),
+    });
+    addedToDefaults = true;
   }
 
   state.manualSpeakerCurrentLabel = resolvedLabel;
@@ -1523,7 +1537,17 @@ async function useManualSpeakerCustomName(rawValue = state.manualSpeakerCustomNa
     await persistCurrentSessionNow();
   }
 
-  showToast(existingLabel ? `${resolvedLabel} selected.` : `${resolvedLabel} added for this session.`);
+  if (existingLabel) {
+    showToast(`${resolvedLabel} selected.`);
+  } else if (addedToSession && addedToDefaults) {
+    showToast(`${resolvedLabel} added for this session and saved to defaults.`);
+  } else if (addedToSession) {
+    showToast(`${resolvedLabel} added for this session.`);
+  } else if (addedToDefaults) {
+    showToast(`${resolvedLabel} saved to defaults.`);
+  } else {
+    showToast(`${resolvedLabel} selected.`);
+  }
   return true;
 }
 
