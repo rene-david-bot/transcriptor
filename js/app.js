@@ -228,6 +228,7 @@ const elements = {
   sidebar: $('#sidebar'),
   backdrop: $('#backdrop'),
   menuButton: $('#menuButton'),
+  setupNavButton: $('#setupNavButton'),
   sidebarClose: $('#sidebarClose'),
   statusPill: $('#statusPill'),
   statusLine: $('#statusLine'),
@@ -236,6 +237,7 @@ const elements = {
   topbarTitle: $('#topbarTitle'),
   toast: $('#toast'),
   startForm: $('#startForm'),
+  startSessionFromSetupButton: $('#startSessionFromSetupButton'),
   apiKeyInput: $('#apiKeyInput'),
   toggleApiKey: $('#toggleApiKey'),
   sourceLanguageInput: $('#sourceLanguageInput'),
@@ -646,6 +648,7 @@ function getTopbarTitleText() {
   }
   if (state.route === 'history') return 'History';
   if (state.route === 'settings') return 'Preferences';
+  if (state.route === 'setup') return 'Setup';
   return 'Transcripto';
 }
 
@@ -662,6 +665,12 @@ function renderTopbarTitle() {
 function renderTopbarChrome() {
   renderTopbarEyebrow();
   renderTopbarTitle();
+}
+
+function renderNavigationLabels() {
+  if (!elements.setupNavButton) return;
+  const hasOpenSession = Boolean(state.currentSession && state.currentSession.status !== 'ended');
+  elements.setupNavButton.textContent = hasOpenSession ? 'New session' : 'Setup';
 }
 
 function syncReviewAudioTransportMount({ floatingPlayback = false } = {}) {
@@ -1294,6 +1303,12 @@ async function renderStorageStats() {
   if (elements.historyStorageStats) {
     elements.historyStorageStats.innerHTML = markup;
   }
+}
+
+function renderSetupStartAction() {
+  if (!elements.startSessionFromSetupButton) return;
+  const hasOpenSession = Boolean(state.currentSession && state.currentSession.status !== 'ended');
+  elements.startSessionFromSetupButton.textContent = hasOpenSession ? 'Start new session' : 'Start listening';
 }
 
 function pickSpeakerCaptureMimeType() {
@@ -2506,6 +2521,17 @@ function buildTranscriptTimestamp(segment) {
   return formatDuration(segment.endMs || 0);
 }
 
+function buildLiveSessionSummaryTitle(session) {
+  if (!session) return 'No active session';
+  return `${getLanguageName(session.sourceLanguage)} → ${getLanguageName(session.targetLanguage)}`;
+}
+
+function buildLiveSessionSummaryMeta(session, counts) {
+  if (!session) return 'Start a session to begin.';
+  const parts = [slugDate(session.createdAt), `${counts.savedSegments} saved segment${counts.savedSegments === 1 ? '' : 's'}`];
+  return parts.join(' • ');
+}
+
 function renderSessionSummary() {
   const session = state.currentSession;
   if (!session) {
@@ -2522,8 +2548,8 @@ function renderSessionSummary() {
 
   const counts = getTranscriptDisplayCounts();
 
-  elements.sessionTitle.textContent = session.title;
-  elements.sessionMeta.textContent = buildSessionMeta(session);
+  elements.sessionTitle.textContent = buildLiveSessionSummaryTitle(session);
+  elements.sessionMeta.textContent = buildLiveSessionSummaryMeta(session, counts);
   elements.durationValue.textContent = formatDuration(getEffectiveActiveDuration());
   elements.speechOnlyValue.textContent = formatDuration(getEffectiveSpeechDuration());
   if (elements.segmentCountLabel) elements.segmentCountLabel.textContent = 'Rows shown';
@@ -3961,6 +3987,8 @@ function renderCurrentView() {
   renderManualSpeakerControls();
   renderHistory();
   renderControls();
+  renderSetupStartAction();
+  renderNavigationLabels();
 }
 
 async function refreshSessionRecordings(sessionId = state.currentSession?.id) {
@@ -5444,9 +5472,10 @@ async function handleStartFromSetup(event) {
     ...formValues,
   });
 
-  if (state.currentSession && state.currentSession.status !== 'ended' && state.currentSegments.length === 0) {
-    const abandon = window.confirm('Start a new session and leave the current empty session behind?');
-    if (!abandon) return;
+  if (state.currentSession && state.currentSession.status !== 'ended') {
+    const confirmed = window.confirm('Start a new session? The current one will be stopped but kept in local history.');
+    if (!confirmed) return;
+    await stopListening();
   }
 
   const session = await createSession(formValues);

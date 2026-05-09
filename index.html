@@ -29,10 +29,9 @@
         </div>
 
         <nav class="sidebar__nav" aria-label="Primary">
-          <button type="button" class="nav-link" data-route="setup">New / Setup</button>
-          <button type="button" class="nav-link" data-route="live">Current Session</button>
-          <button type="button" class="nav-link" data-action="new-session">New Session</button>
-          <button type="button" class="nav-link" data-route="history">Previous Sessions / History</button>
+          <button type="button" class="nav-link" data-route="setup" id="setupNavButton">Setup</button>
+          <button type="button" class="nav-link" data-route="live">Current session</button>
+          <button type="button" class="nav-link" data-route="history">History</button>
           <button type="button" class="nav-link" data-route="settings">Settings</button>
         </nav>
 
@@ -175,7 +174,7 @@
                 </section>
 
                 <div class="button-row button-row--wrap">
-                  <button type="submit" class="button button--primary">Start listening</button>
+                  <button type="submit" class="button button--primary" id="startSessionFromSetupButton">Start listening</button>
                   <button type="button" class="button button--secondary hidden" id="resumeLastSessionButton">Resume last session</button>
                 </div>
 
@@ -611,6 +610,6 @@
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-    <script type="module" src="./js/app.js?v=20260509-storage-size"></script>
+    <script type="module" src="./js/app.js?v=20260509-nav-compact"></script>
   </body>
 </html>
