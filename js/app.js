@@ -2132,7 +2132,6 @@ function renderSpeakerTimingSummary(slotRollup, summary, { final = false } = {})
           </div>
           ${rows
             .map((row) => {
-              const firstRowForSpeaker = !renderedSpeakerKeys.has(row.speakerKey);
               renderedSpeakerKeys.add(row.speakerKey);
               return `
                 <div class="speaker-timing-summary__row" role="row">
@@ -2147,7 +2146,7 @@ function renderSpeakerTimingSummary(slotRollup, summary, { final = false } = {})
                   </button>
                   <span class="speaker-timing-summary__part" role="cell">${escapeHtml(row.note || '')}</span>
                   <span role="cell">${formatSpeakerTimingSummaryDuration(row.manualMs || 0)}</span>
-                  <span role="cell">${firstRowForSpeaker ? formatSpeakerTimingSummaryDuration(row.totalMs || 0) : '—'}</span>
+                  <span role="cell">${formatSpeakerTimingSummaryDuration(row.totalMs || 0)}</span>
                 </div>`;
             })
             .join('')}
@@ -3593,7 +3592,7 @@ function renderManualSpeakerControls() {
     const session = state.currentSession;
     const runtime = state.runtimeStatus;
     const canStop = Boolean(session && ['listening', 'connecting', 'reconnecting'].includes(runtime));
-    const canResume = Boolean(session && session.status === 'active' && (['paused', 'stopped', 'error'].includes(runtime) || runtime === 'idle'));
+    const canResume = Boolean(session && session.status !== 'ended' && ['paused', 'stopped', 'error', 'idle'].includes(runtime));
     const mode = canStop ? 'stop' : 'resume';
     elements.speakerChangePauseButton.textContent = canStop ? 'Stop' : 'Resume';
     elements.speakerChangePauseButton.disabled = !(canStop || canResume);
