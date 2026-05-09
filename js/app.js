@@ -1549,7 +1549,6 @@ async function applyManualSpeakerSelection(nextRawLabel = elements.speakerChange
   const previousActiveLabel = normalizeManualSpeakerName(state.manualSpeakerActiveLabel || previousLabel || '');
   const resolvedLabel = findExistingManualSpeakerOption(nextLabel, state.currentSession) || nextLabel;
   let didSwitchLiveSpeaker = false;
-  let createdSpeakerMark = false;
 
   state.manualSpeakerCurrentLabel = resolvedLabel;
   state.manualSpeakerCustomNameDraft = '';
@@ -1562,34 +1561,25 @@ async function applyManualSpeakerSelection(nextRawLabel = elements.speakerChange
     state.currentSession.manualSpeakerCurrentLabel = resolvedLabel;
   }
 
+  clearPendingManualSpeakerChange();
+
   if (
     state.currentSession?.status === 'active' &&
     !state.manualSpeakerPaused &&
-    state.manualSpeakerOpenStartMs !== null &&
     resolvedLabel &&
-    previousActiveLabel &&
     resolvedLabel !== previousActiveLabel
   ) {
-    clearPendingManualSpeakerChange();
-    createdSpeakerMark = Boolean(
-      await splitManualSpeakerSpan({ atMs: getManualSpeakerSessionPositionMs(), persist: false })
-    );
-    didSwitchLiveSpeaker = normalizeManualSpeakerName(state.manualSpeakerActiveLabel || '') === resolvedLabel;
-  } else {
-    clearPendingManualSpeakerChange();
+    state.manualSpeakerActiveLabel = resolvedLabel;
+    didSwitchLiveSpeaker = true;
   }
 
   renderManualSpeakerControls();
 
   if (state.currentSession) {
     syncManualSpeakerStateToSession();
-    if (resolvedLabel !== previousLabel || didSwitchLiveSpeaker || createdSpeakerMark) {
+    if (resolvedLabel !== previousLabel || didSwitchLiveSpeaker) {
       await persistCurrentSessionNow();
     }
-  }
-
-  if (createdSpeakerMark && didSwitchLiveSpeaker) {
-    showToast(`Marked speaker change to ${resolvedLabel}.`);
   }
 
   return true;
@@ -3668,7 +3658,7 @@ function renderManualSpeakerControls() {
   }
   if (elements.speakerChangePendingHint) {
     elements.speakerChangePendingHint.textContent = timerRunning
-      ? `Live now: ${activeLabel}. Changing the dropdown sets the mark and switches the current speaker immediately.`
+      ? `Live now: ${activeLabel}. Changing the dropdown only switches the current live speaker.`
       : `Choose the speaker you want active when timing resumes.`;
   }
   if (elements.speakerChangeCustomInput) {
