@@ -312,8 +312,10 @@ const elements = {
   micLevelLeftRow: $('#micLevelLeftRow'),
   micLevelLeftLabel: $('#micLevelLeftLabel'),
   micLevelLeftFill: $('#micLevelLeftFill'),
+  micLevelLeftDb: $('#micLevelLeftDb'),
   micLevelRightRow: $('#micLevelRightRow'),
   micLevelRightFill: $('#micLevelRightFill'),
+  micLevelRightDb: $('#micLevelRightDb'),
   speakerChangeCurrentLabel: $('#speakerChangeCurrentLabel'),
   speakerChangeCurrentChips: $('#speakerChangeCurrentChips'),
   speakerChangePendingHint: $('#speakerChangePendingHint'),
@@ -4451,7 +4453,7 @@ function micLevelPercentFromDb(db) {
 }
 
 function formatMicLevelDb(db) {
-  if (!Number.isFinite(db)) return '−∞ dB';
+  if (!Number.isFinite(db)) return '−∞';
   return `${Math.round(db)} dB`;
 }
 
@@ -4476,24 +4478,23 @@ function renderMicLevelMeter({ active = false, stereo = false, leftDb = MIC_LEVE
   elements.micLevelMeter.classList.toggle('hidden', !active);
   elements.micLevelMeter.setAttribute('aria-hidden', active ? 'false' : 'true');
 
-  if (elements.micLevelMode) {
-    elements.micLevelMode.textContent = active ? (stereo ? 'Stereo input' : 'Mono input') : 'Mic closed';
-  }
-  if (elements.micLevelDb) {
-    const peakDb = active ? Math.max(leftDb, stereo ? rightDb : MIC_LEVEL_METER_MIN_DB) : Number.NEGATIVE_INFINITY;
-    elements.micLevelDb.textContent = formatMicLevelDb(peakDb);
-  }
   if (elements.micLevelLeftLabel) {
-    elements.micLevelLeftLabel.textContent = stereo ? 'L' : 'Mono';
+    elements.micLevelLeftLabel.textContent = stereo ? 'L' : 'M';
   }
   if (elements.micLevelLeftFill) {
     elements.micLevelLeftFill.style.width = active ? micLevelPercentFromDb(leftDb) : '0%';
+  }
+  if (elements.micLevelLeftDb) {
+    elements.micLevelLeftDb.textContent = active ? formatMicLevelDb(leftDb) : '−∞';
   }
   if (elements.micLevelRightRow) {
     elements.micLevelRightRow.classList.toggle('hidden', !active || !stereo);
   }
   if (elements.micLevelRightFill) {
     elements.micLevelRightFill.style.width = active && stereo ? micLevelPercentFromDb(rightDb) : '0%';
+  }
+  if (elements.micLevelRightDb) {
+    elements.micLevelRightDb.textContent = active && stereo ? formatMicLevelDb(rightDb) : '−∞';
   }
 }
 

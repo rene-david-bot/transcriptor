@@ -306,29 +306,27 @@
                     <div class="speaker-change-dock" id="speakerChangeDock">
                       <div class="speaker-change-dock__top">
                         <div class="speaker-change-dock__copy">
-                          <strong>Manual speaker timing</strong>
+                          <strong>🎙️ Manual speaker timing</strong>
                         </div>
                         <div class="speaker-change-dock__timer-wrap">
                           <span class="speaker-change-dock__timer" id="speakerChangeTimer">00:00.00</span>
                         </div>
                       </div>
                       <div class="speaker-change-dock__meter hidden" id="micLevelMeter" aria-hidden="true">
-                        <div class="speaker-change-dock__meter-head">
-                          <span class="speaker-change-dock__meter-mode" id="micLevelMode">Mic closed</span>
-                          <span class="speaker-change-dock__meter-db" id="micLevelDb">−∞ dB</span>
-                        </div>
                         <div class="speaker-change-dock__meter-bars">
                           <div class="speaker-change-dock__meter-row" id="micLevelLeftRow">
-                            <span class="speaker-change-dock__meter-channel" id="micLevelLeftLabel">Mono</span>
+                            <span class="speaker-change-dock__meter-channel" id="micLevelLeftLabel">M</span>
                             <div class="speaker-change-dock__meter-track">
                               <div class="speaker-change-dock__meter-fill" id="micLevelLeftFill"></div>
                             </div>
+                            <span class="speaker-change-dock__meter-db" id="micLevelLeftDb">−∞ dB</span>
                           </div>
                           <div class="speaker-change-dock__meter-row hidden" id="micLevelRightRow">
                             <span class="speaker-change-dock__meter-channel">R</span>
                             <div class="speaker-change-dock__meter-track">
                               <div class="speaker-change-dock__meter-fill" id="micLevelRightFill"></div>
                             </div>
+                            <span class="speaker-change-dock__meter-db" id="micLevelRightDb">−∞ dB</span>
                           </div>
                         </div>
                       </div>
@@ -612,6 +610,6 @@
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-    <script type="module" src="./js/app.js?v=20260509-mic-meter"></script>
+    <script type="module" src="./js/app.js?v=20260509-mic-meter-compact"></script>
   </body>
 </html>
