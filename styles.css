@@ -1890,30 +1890,31 @@ strong {
   }
 
   .transcript-panel__header {
-    flex-wrap: nowrap;
-    align-items: flex-start;
+    flex-direction: column;
+    align-items: stretch;
     gap: 0.5rem;
   }
 
   .transcript-panel__header > :first-child {
     min-width: 0;
-    flex: 1 1 auto;
+    width: 100%;
   }
 
   .transcript-export-actions {
     flex-wrap: nowrap;
-    width: auto;
+    width: 100%;
     min-width: 0;
     flex: 0 0 auto;
-    justify-content: flex-end;
+    justify-content: flex-start;
     margin-left: 0;
+    gap: 0.35rem;
   }
 
   .transcript-export-actions__button {
     flex: 0 1 auto;
     min-width: 0;
-    padding-inline: 0.56rem;
-    font-size: 0.8rem;
+    padding-inline: 0.5rem;
+    font-size: 0.78rem;
   }
 
   .button,
