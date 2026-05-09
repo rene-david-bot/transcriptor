@@ -827,15 +827,15 @@ strong {
 .speaker-timing-summary__table {
   display: grid;
   gap: 0.45rem;
-  min-width: 392px;
+  min-width: 344px;
 }
 
 .speaker-timing-summary__head,
 .speaker-timing-summary__row,
 .speaker-timing-summary__foot {
   display: grid;
-  grid-template-columns: minmax(88px, 1.2fr) minmax(56px, 0.7fr) repeat(2, minmax(64px, 0.72fr));
-  gap: 0.55rem;
+  grid-template-columns: minmax(56px, 0.8fr) minmax(48px, 0.64fr) repeat(2, minmax(62px, 0.78fr));
+  gap: 0.45rem;
   align-items: center;
 }
 
@@ -2540,14 +2540,14 @@ body[data-review-audio-floating='true'][data-route='live'] .transcript-list {
   }
 
   .speaker-timing-summary__table {
-    min-width: 352px;
+    min-width: 320px;
   }
 
   .speaker-timing-summary__head,
   .speaker-timing-summary__row,
   .speaker-timing-summary__foot {
-    grid-template-columns: minmax(74px, 1fr) minmax(48px, 0.62fr) repeat(2, minmax(58px, 0.66fr));
-    gap: 0.45rem;
+    grid-template-columns: minmax(44px, 0.72fr) minmax(44px, 0.58fr) repeat(2, minmax(56px, 0.8fr));
+    gap: 0.4rem;
   }
 
   .speaker-timing-summary__head {

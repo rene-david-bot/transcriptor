@@ -2159,11 +2159,6 @@ function renderSpeakerTimingSummary(slotRollup, summary, { final = false } = {})
           </div>
         </div>
       </div>
-      <small class="speaker-timing-summary__note">${escapeHtml(
-        final
-          ? 'Manual shows the exact stopwatch window you marked. Auto shows the exact transcript speech found inside that window after the final pass. Total shows that speaker’s summed manual stopwatch time on the first row only, and the footer uses the same exact stopwatch basis.'
-          : 'Manual shows the exact stopwatch window you marked. Auto shows the exact transcript speech found inside that window so far. Total shows that speaker’s summed manual stopwatch time on the first row only, and the footer uses the same exact stopwatch basis.'
-      )}</small>
     </div>
   `;
 }
@@ -2352,7 +2347,7 @@ function renderSpeakerFinalizeButton() {
 }
 
 function renderSpeakerInsights() {
-  if (!elements.speakerStatusLine || !elements.speakerSummary) return;
+  if (!elements.speakerSummary) return;
 
   const session = state.currentSession;
   const pendingSegments = getPendingSpeakerSegmentCount(session?.id);
@@ -2370,14 +2365,14 @@ function renderSpeakerInsights() {
   );
 
   if (!session) {
-    elements.speakerStatusLine.textContent = 'Speaker timing will appear here during a live session.';
+    if (elements.speakerStatusLine) elements.speakerStatusLine.textContent = '';
     elements.speakerSummary.innerHTML = '<div class="note">No speaker timing data yet.</div>';
     renderSpeakerFinalizeButton();
     return;
   }
 
   if (!state.speakerTrackingSupported) {
-    elements.speakerStatusLine.textContent = 'This browser does not support background speaker detection.';
+    if (elements.speakerStatusLine) elements.speakerStatusLine.textContent = '';
     elements.speakerSummary.innerHTML = summary.length
       ? [renderSpeakerTimingSummary(slotRollup, summary, { final: hasFinalSpeakerTiming }), renderSpeakerSummaryDetailsDisclosure(summary)]
           .filter(Boolean)
@@ -2387,45 +2382,15 @@ function renderSpeakerInsights() {
     return;
   }
 
-  if (state.speakerFinalizeInProgress) {
-    elements.speakerStatusLine.textContent = state.speakerFinalizeProgress?.statusLine || state.speakerTrackingStatus;
-  } else if (pendingRecordingPasses) {
-    elements.speakerStatusLine.textContent = `Showing provisional speaker hints. ${pendingRecordingPasses} saved recording clip${pendingRecordingPasses === 1 ? '' : 's'} ${
-      pendingRecordingPasses === 1 ? 'is' : 'are'
-    } ready for the final speaker pass.`;
-  } else if (pendingSegments) {
-    elements.speakerStatusLine.textContent = `Showing provisional speaker hints. ${pendingSegments} raw segment${pendingSegments === 1 ? '' : 's'} ${
-      pendingSegments === 1 ? 'is' : 'are'
-    } still processing.`;
-  } else if (!activeCapture && canStartManually && !state.speakerRecorder && !state.speakerTrackingInFlight) {
-    elements.speakerStatusLine.textContent = 'The final speaker pass is ready. Tap the button above to run it now.';
-  } else if (sessionEnded && hasFinalSpeakerTiming) {
-    elements.speakerStatusLine.textContent = 'Final speaker timing is ready. The summary below lines up each manual segment with the automatic match and the speaker total.';
-  } else if (sessionEnded && summary.length) {
-    elements.speakerStatusLine.textContent = 'Session ended. The speaker view below is still provisional until you run the final speaker pass.';
-  } else if (sessionEnded) {
-    elements.speakerStatusLine.textContent = 'Session ended. No finalized speaker timing is available for this session.';
-  } else if (stoppedSession && hasFinalSpeakerTiming) {
-    elements.speakerStatusLine.textContent = 'Final speaker timing is ready. The summary below lines up each manual segment with the automatic match and the speaker total.';
-  } else if (stoppedSession && summary.length) {
-    elements.speakerStatusLine.textContent = 'Capture stopped. The speaker view below is provisional until you run the final speaker pass.';
-  } else if (stoppedSession) {
-    elements.speakerStatusLine.textContent = 'Capture stopped. No finalized speaker timing is available for this session.';
-  } else if (summary.length) {
-    elements.speakerStatusLine.textContent = 'Showing provisional speaker hints while capture runs. Stop the session, then run the final speaker pass for a full reconciliation.';
-  } else {
-    elements.speakerStatusLine.textContent = state.speakerTrackingStatus;
+  if (elements.speakerStatusLine) {
+    elements.speakerStatusLine.textContent = '';
   }
 
   const speakerTimingSummaryMarkup = renderSpeakerTimingSummary(slotRollup, summary, { final: hasFinalSpeakerTiming });
   const speakerDetailsMarkup = renderSpeakerSummaryDetailsDisclosure(summary);
 
   if (!summary.length) {
-    elements.speakerSummary.innerHTML = [
-      speakerProcessingCard,
-      speakerTimingSummaryMarkup,
-      '<div class="note">Speaker timing runs quietly in the background and can lag a little behind the live text. Tap the button above to start the full post-session speaker pass when you are done recording.</div>',
-    ]
+    elements.speakerSummary.innerHTML = [speakerProcessingCard, speakerTimingSummaryMarkup]
       .filter(Boolean)
       .join('');
     renderSpeakerFinalizeButton();
