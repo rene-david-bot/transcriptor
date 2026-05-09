@@ -317,7 +317,7 @@
                       </div>
                       <div class="speaker-change-dock__speaker-row">
                         <span class="speaker-change-dock__speaker-label" id="speakerChangeCurrentLabel">Current speaker</span>
-                        <select id="speakerChangeCurrentSelect" aria-label="Current speaker"></select>
+                        <div class="speaker-change-chip-list" id="speakerChangeCurrentChips" role="group" aria-label="Current speaker"></div>
                         <small class="speaker-change-dock__speaker-note" id="speakerChangePendingHint"></small>
                         <div class="speaker-change-dock__speaker-add-row">
                           <input
@@ -600,6 +600,6 @@
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-    <script type="module" src="./js/app.js?v=20260509-manual-speaker-rebuild"></script>
+    <script type="module" src="./js/app.js?v=20260509-manual-speaker-chips"></script>
   </body>
 </html>

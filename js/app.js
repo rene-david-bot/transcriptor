@@ -295,6 +295,7 @@ const elements = {
   speakerChangeTimer: $('#speakerChangeTimer'),
   speakerChangeTimerState: $('#speakerChangeTimerState'),
   speakerChangeCurrentLabel: $('#speakerChangeCurrentLabel'),
+  speakerChangeCurrentChips: $('#speakerChangeCurrentChips'),
   speakerChangePendingHint: $('#speakerChangePendingHint'),
   speakerChangeButton: $('#speakerChangeButton'),
   speakerChangePauseButton: $('#speakerChangePauseButton'),
@@ -1345,9 +1346,10 @@ function normalizeManualSpeakerName(value) {
 
 function getResolvedManualSpeakerSelection(session = state.currentSession, { preferDom = true } = {}) {
   const domValue = preferDom ? normalizeManualSpeakerName(elements.speakerChangeCurrentSelect?.value || '') : '';
+  const chipValue = preferDom ? normalizeManualSpeakerName(elements.speakerChangeCurrentChips?.querySelector('.speaker-change-chip--active')?.dataset.speakerChipLabel || '') : '';
   const stateValue = normalizeManualSpeakerName(state.manualSpeakerCurrentLabel || session?.manualSpeakerCurrentLabel || '');
   const fallbackValue = getSpeakerOptionsForManualControls(session)[0] || 'Speaker A';
-  const rawValue = domValue || stateValue || fallbackValue;
+  const rawValue = chipValue || domValue || stateValue || fallbackValue;
   return findExistingManualSpeakerOption(rawValue, session) || rawValue;
 }
 
@@ -1525,7 +1527,7 @@ async function useManualSpeakerCustomName(rawValue = state.manualSpeakerCustomNa
   return true;
 }
 
-async function applyManualSpeakerSelection(nextRawLabel = elements.speakerChangeCurrentSelect?.value || '') {
+async function applyManualSpeakerSelection(nextRawLabel = getResolvedManualSpeakerSelection()) {
   const nextLabel = normalizeManualSpeakerName(nextRawLabel || '');
   if (!nextLabel) return false;
 
@@ -1556,8 +1558,8 @@ async function applyManualSpeakerSelection(nextRawLabel = elements.speakerChange
   return true;
 }
 
-async function applyManualSpeakerSelectionFromControl() {
-  return applyManualSpeakerSelection(elements.speakerChangeCurrentSelect?.value || '');
+async function applyManualSpeakerSelectionFromControl(nextRawLabel = getResolvedManualSpeakerSelection()) {
+  return applyManualSpeakerSelection(nextRawLabel);
 }
 
 function getManualSpeakerLabelForSegment(segment, session = state.currentSession) {
@@ -3602,13 +3604,12 @@ function renderManualSpeakerControls() {
   if (elements.speakerChangeCurrentLabel) {
     elements.speakerChangeCurrentLabel.textContent = 'Current speaker';
   }
-  if (elements.speakerChangeCurrentSelect) {
-    elements.speakerChangeCurrentSelect.innerHTML = options
-      .map((label) => `<option value="${escapeHtml(label)}" ${label === currentLabel ? 'selected' : ''}>${escapeHtml(label)}</option>`)
+  if (elements.speakerChangeCurrentChips) {
+    elements.speakerChangeCurrentChips.innerHTML = options
+      .map(
+        (label) => `<button type="button" class="speaker-change-chip ${label === currentLabel ? 'speaker-change-chip--active' : ''}" data-speaker-chip-label="${escapeHtml(label)}" aria-pressed="${label === currentLabel ? 'true' : 'false'}" ${!state.currentSession || state.currentSession.status === 'ended' ? 'disabled' : ''}>${escapeHtml(label)}</button>`
+      )
       .join('');
-    elements.speakerChangeCurrentSelect.value = currentLabel;
-    elements.speakerChangeCurrentSelect.setAttribute('aria-label', 'Current speaker');
-    elements.speakerChangeCurrentSelect.disabled = !state.currentSession || state.currentSession.status === 'ended';
   }
   if (elements.speakerChangePendingHint) {
     elements.speakerChangePendingHint.textContent = timerRunning
@@ -6369,11 +6370,11 @@ function bindEvents() {
   elements.speakerChangeResetButton?.addEventListener('click', () => {
     resetManualSpeakerChanges().catch((error) => console.warn('Unable to reset manual speaker changes', error));
   });
-  const handleManualSpeakerCurrentSelectChange = () => {
-    applyManualSpeakerSelectionFromControl().catch((error) => console.warn('Unable to update current speaker selection', error));
-  };
-  elements.speakerChangeCurrentSelect?.addEventListener('input', handleManualSpeakerCurrentSelectChange);
-  elements.speakerChangeCurrentSelect?.addEventListener('change', handleManualSpeakerCurrentSelectChange);
+  elements.speakerChangeCurrentChips?.addEventListener('click', (event) => {
+    const chip = event.target.closest('[data-speaker-chip-label]');
+    if (!chip) return;
+    applyManualSpeakerSelectionFromControl(chip.dataset.speakerChipLabel || '').catch((error) => console.warn('Unable to update current speaker selection', error));
+  });
   elements.speakerChangeCustomInput?.addEventListener('input', () => {
     state.manualSpeakerCustomNameDraft = elements.speakerChangeCustomInput.value;
     if (elements.speakerChangeCustomUseButton) {
