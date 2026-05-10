@@ -651,16 +651,23 @@ strong {
 .action-menu__sheet {
   position: absolute;
   top: calc(100% + 0.45rem);
-  right: 0;
-  z-index: 30;
+  left: 0;
+  z-index: 80;
   display: grid;
   gap: 0.38rem;
+  width: max-content;
   min-width: min(15rem, calc(100vw - 1.5rem));
+  max-width: calc(100vw - 1rem);
   padding: 0.45rem;
   border-radius: 16px;
   border: 1px solid var(--panel-border);
   background: rgba(15, 23, 42, 0.96);
   box-shadow: 0 18px 40px rgba(2, 6, 23, 0.42);
+}
+
+.action-menu--align-end > .action-menu__sheet {
+  left: auto;
+  right: 0;
 }
 
 .action-menu__item {
@@ -2097,6 +2104,12 @@ strong {
 
   .action-menu__sheet {
     min-width: min(14rem, calc(100vw - 1.5rem));
+    max-width: calc(100vw - 1rem);
+  }
+
+  .transcript-export-actions .action-menu--align-end > .action-menu__sheet {
+    left: 0;
+    right: auto;
   }
 
   .button,
