@@ -139,7 +139,7 @@
                     autocomplete="off"
                     placeholder="Rene, Moderator, Guest"
                   />
-                  <small>Applied to detected speakers in order (A, B, C) and can be renamed later from the speaker timing panel.</small>
+                  <small>Used for manual speaker timing and to name automatic speakers after the final pass on the saved session audio.</small>
                 </label>
 
                 <section class="inline-settings-card">
@@ -430,7 +430,7 @@
                         <li>Final transcript segments are saved locally after each completed turn.</li>
                         <li>After long listening sessions, the connection rolls over automatically.</li>
                         <li>Resume continues the same logical session and transcript history.</li>
-                        <li>Speaker timing is best effort and intentionally lower priority than live text.</li>
+                        <li>Automatic speaker timing runs after Stop using the saved session audio, not during live capture.</li>
                       </ul>
                     </div>
                   </details>
@@ -601,6 +601,6 @@
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-    <script type="module" src="./js/app.js?v=20260510-speaker-summary-total-fix"></script>
+    <script type="module" src="./js/app.js?v=20260510-final-speaker-pass-only"></script>
   </body>
 </html>

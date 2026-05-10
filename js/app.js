@@ -183,9 +183,10 @@ const state = {
   speakerTrackingPendingChunks: 0,
   speakerTrackingStopRequested: false,
   speakerTrackingSessionId: null,
-  speakerTrackingStatus: 'Speaker detection is idle.',
+  speakerTrackingStatus: 'Automatic speaker timing runs after you stop the session.',
   speakerFinalizeInProgress: false,
   speakerFinalizeProgress: null,
+  speakerFinalizeAutoTimer: null,
   debugDiarizeAudioChunk: null,
   speakerSummaryExpandedKeys: new Set(),
   sessionRecordingSupported: typeof window !== 'undefined' && typeof MediaRecorder !== 'undefined',
@@ -2145,10 +2146,32 @@ function getCanonicalRawSpeakerLabelForManualLabel(label, session = state.curren
   return getNextUnusedCanonicalRawLabel(usedRawLabels, parseSpeakerNames(session?.speakerNames || state.settings.speakerNames || '').length);
 }
 
-function buildCanonicalFinalDiarizedSegments({ diarizedSegments = [], session = state.currentSession, batchIndex = 0 } = {}) {
+function createSpeakerFinalAssignmentState(session = state.currentSession) {
+  const rawByManualLabel = new Map();
+  const usedRawLabels = new Set();
+
+  buildManualLabelToCanonicalRawMap(session).forEach((rawSpeaker, normalizedLabel) => {
+    const normalizedRawSpeaker = String(rawSpeaker || '').trim();
+    if (!normalizedRawSpeaker) return;
+    usedRawLabels.add(normalizedRawSpeaker);
+    if (normalizedLabel) {
+      rawByManualLabel.set(normalizedLabel, normalizedRawSpeaker);
+    }
+  });
+
+  return {
+    rawByManualLabel,
+    usedRawLabels,
+  };
+}
+
+function buildCanonicalFinalDiarizedSegments({ diarizedSegments = [], session = state.currentSession, assignmentState = null } = {}) {
   const manualSlots = buildManualSpeakerSlots(session, state.currentSegments);
-  const usedRawLabels = new Set(Object.keys(session?.speakerAliases || {}).map((label) => String(label || '').trim()).filter(Boolean));
+  const resolvedAssignmentState = assignmentState || createSpeakerFinalAssignmentState(session);
+  const usedRawLabels = resolvedAssignmentState.usedRawLabels || new Set();
+  const rawByManualLabel = resolvedAssignmentState.rawByManualLabel || new Map();
   const localSpeakerAssignments = new Map();
+  const seededSpeakerCount = parseSpeakerNames(session?.speakerNames || state.settings.speakerNames || '').length;
 
   diarizedSegments.forEach((segment) => {
     const localSpeaker = String(segment.speaker || '').trim();
@@ -2167,16 +2190,22 @@ function buildCanonicalFinalDiarizedSegments({ diarizedSegments = [], session = 
     const bestManualMatch = [...overlapByLabel.entries()].sort((left, right) => right[1] - left[1])[0] || null;
     if (!localSpeakerAssignments.has(localSpeaker)) {
       if (bestManualMatch && bestManualMatch[1] >= 1200) {
-        const [label] = bestManualMatch;
+        const [matchedLabel] = bestManualMatch;
+        const label = normalizeManualSpeakerName(matchedLabel) || String(matchedLabel || '').trim() || 'Speaker';
+        const normalizedLabel = normalizeTranscriptSpeakerKey(label);
+        let rawSpeaker = rawByManualLabel.get(normalizedLabel);
+        if (!rawSpeaker) {
+          rawSpeaker = getCanonicalRawSpeakerLabelForManualLabel(label, session, usedRawLabels);
+          rawByManualLabel.set(normalizedLabel, rawSpeaker);
+        } else {
+          usedRawLabels.add(rawSpeaker);
+        }
         localSpeakerAssignments.set(localSpeaker, {
-          rawSpeaker: getCanonicalRawSpeakerLabelForManualLabel(label, session, usedRawLabels),
-          label,
+          rawSpeaker,
+          label: resolveSpeakerLabel(rawSpeaker, session, label),
         });
       } else {
-        const rawSpeaker = getNextUnusedCanonicalRawLabel(
-          usedRawLabels,
-          Math.max(parseSpeakerNames(session?.speakerNames || state.settings.speakerNames || '').length, batchIndex)
-        );
+        const rawSpeaker = getNextUnusedCanonicalRawLabel(usedRawLabels, seededSpeakerCount);
         localSpeakerAssignments.set(localSpeaker, {
           rawSpeaker,
           label: formatSpeakerLabel(rawSpeaker),
@@ -2600,7 +2629,7 @@ function buildSpeakerProcessingCardState({ pendingSegments = 0, pendingRecording
       meta: pendingSegments
         ? `${pendingSegments} raw segment${pendingSegments === 1 ? '' : 's'} still being labeled`
         : `${activeChunks} speaker chunk${activeChunks === 1 ? '' : 's'} in flight`,
-      note: 'The background summary can lag a little behind the live transcript.',
+      note: 'Automatic speaker timing can take a moment while the saved audio is being processed.',
       determinate: false,
       ratio: 0,
     };
@@ -2634,11 +2663,7 @@ function getPendingSpeakerSegmentCount(sessionId = state.currentSession?.id) {
 }
 
 function canStartSpeakerTrackingManually(session = state.currentSession) {
-  if (!session || !state.speakerTrackingSupported) return false;
-  if (session.status !== 'active') return false;
-  const stream = state.client?.mediaStream;
-  if (!stream?.getAudioTracks) return false;
-  return stream.getAudioTracks().some((track) => track.readyState !== 'ended');
+  return false;
 }
 
 function renderSpeakerFinalizeButton() {
@@ -2646,21 +2671,13 @@ function renderSpeakerFinalizeButton() {
 
   const session = state.currentSession;
   const activeCapture = Boolean(session && session.status === 'active' && ['connecting', 'listening', 'reconnecting'].includes(state.runtimeStatus));
-  const hasRecorder = Boolean(
-    session &&
-      state.speakerTrackingSessionId === session.id &&
-      state.speakerRecorder &&
-      state.speakerRecorder.state !== 'inactive'
-  );
-  const queueBusy = state.speakerTrackingPendingChunks > 0 || state.speakerTrackingInFlight;
   const pendingSegments = getPendingSpeakerSegmentCount(session?.id);
+  const recordings = getSpeakerFinalizeRecordings(state.sessionRecordings);
+  const hasSavedAudio = recordings.length > 0;
   const pendingRecordingPasses = getPendingRecordingPasses(session?.id).length;
   const hasSummary = state.currentSegments.some((segment) => Boolean(getTranscriptSpeakerLabel(segment) || segment.speakerLabel));
   const hasFinalSpeakerTiming = Boolean(session?.speakerFinalizedAt);
-  const canStartManually = canStartSpeakerTrackingManually(session) && !hasRecorder && !queueBusy && !pendingSegments;
-  const canFinalize = Boolean(
-    session && !activeCapture && state.speakerTrackingSupported && (hasRecorder || queueBusy || pendingSegments || pendingRecordingPasses || canStartManually)
-  );
+  const canFinalize = Boolean(session && !activeCapture && state.speakerTrackingSupported && hasSavedAudio);
 
   elements.finalizeSpeakerButton.classList.toggle('hidden', Boolean(activeCapture && !state.speakerFinalizeInProgress));
 
@@ -2689,33 +2706,31 @@ function renderSpeakerFinalizeButton() {
       const current = Math.min(total, Math.max(Number(progress.currentIndex || 0), processed < total ? processed + 1 : processed, 1));
       elements.finalizeSpeakerButton.textContent = `Finalizing speaker timing (${current}/${total})…`;
     } else {
-      elements.finalizeSpeakerButton.textContent =
-        hasRecorder || queueBusy || pendingSegments || pendingRecordingPasses ? 'Finalizing speaker timing…' : 'Starting speaker timing…';
+      elements.finalizeSpeakerButton.textContent = 'Finalizing speaker timing…';
     }
     return;
   }
 
-  if (canStartManually) {
-    elements.finalizeSpeakerButton.textContent = 'Run final speaker timing';
-    return;
-  }
-
-  if (hasRecorder && !queueBusy && !pendingSegments) {
-    elements.finalizeSpeakerButton.textContent = 'Capture final speaker batch now';
+  if (!hasSavedAudio) {
+    elements.finalizeSpeakerButton.textContent = 'No saved audio yet';
     return;
   }
 
   if (pendingRecordingPasses) {
-    elements.finalizeSpeakerButton.textContent = `Run final speaker timing (${pendingRecordingPasses} clip${pendingRecordingPasses === 1 ? '' : 's'})`;
+    elements.finalizeSpeakerButton.textContent = `Run final speaker timing (${recordings.length} clip${recordings.length === 1 ? '' : 's'})`;
     return;
   }
 
-  if (pendingSegments || queueBusy || hasRecorder) {
+  if (pendingSegments) {
     elements.finalizeSpeakerButton.textContent = 'Run final speaker timing';
     return;
   }
 
-  elements.finalizeSpeakerButton.textContent = hasFinalSpeakerTiming ? 'Final speaker timing ready' : hasSummary ? 'Speaker timing available' : 'No speaker timing yet';
+  elements.finalizeSpeakerButton.textContent = hasFinalSpeakerTiming
+    ? 'Run final speaker timing again'
+    : hasSummary || hasSavedAudio
+      ? 'Run final speaker timing'
+      : 'No speaker timing yet';
 }
 
 function renderSpeakerInsights() {
@@ -4357,8 +4372,8 @@ async function loadSession(sessionId) {
   state.manualSpeakerEditingEventId = '';
   state.currentSession.speakerFinalizedAt = String(session.speakerFinalizedAt || '').trim();
   state.speakerTrackingStatus = state.speakerTrackingSupported
-    ? 'Speaker timing is a best-effort background feature and may lag slightly.'
-    : 'This browser does not support background speaker detection.';
+    ? 'Automatic speaker timing runs after you stop the session.'
+    : 'This browser does not support automatic speaker timing.';
   state.draftByItemId.clear();
   state.commitMetaByItemId.clear();
   resetManualTranscriptSuppressionState();
@@ -4509,6 +4524,110 @@ async function markRecordingsAsDiarized(recordings = [], diarizedAt = nowIso()) 
   }
 }
 
+async function markRecordingsPendingDiarization(recordings = []) {
+  if (!recordings.length) return;
+  const updatedIds = new Set();
+
+  for (const recording of recordings) {
+    if (!recording?.id) continue;
+    const id = String(recording.id || '').trim();
+    if (!id || updatedIds.has(id)) continue;
+    updatedIds.add(id);
+    await upsertRecording({
+      ...recording,
+      diarizedAt: '',
+    });
+  }
+
+  if (updatedIds.size) {
+    state.sessionRecordings = state.sessionRecordings.map((recording) => {
+      const id = String(recording?.id || '').trim();
+      if (!id || !updatedIds.has(id)) return recording;
+      return {
+        ...recording,
+        diarizedAt: '',
+      };
+    });
+  }
+}
+
+function getSpeakerFinalizeRecordings(recordings = state.sessionRecordings) {
+  return (Array.isArray(recordings) ? recordings : [])
+    .filter((recording) => hasRecordingBlob(recording))
+    .sort((left, right) => Number(left?.startMs || 0) - Number(right?.startMs || 0));
+}
+
+async function resetAutomaticSpeakerLabelsForSession(session = state.currentSession) {
+  if (!session) return 0;
+
+  const sessionId = session.id;
+  const sessionSegments = state.currentSession?.id === sessionId ? [...state.currentSegments] : await listSegmentsBySession(sessionId);
+  const updatedSegments = [];
+
+  for (const segment of sessionSegments) {
+    const manualLabel = getManualSpeakerLabelForSegment(segment, session);
+    const nextLabel = String(manualLabel || '').trim();
+    const nextStatus = nextLabel ? 'done' : state.speakerTrackingSupported ? 'pending' : 'unsupported';
+    const nextScore = nextLabel ? Math.max(Number(segment.speakerScore || 0), 1) : 0;
+    const nextConfidence = nextLabel ? 1 : 0;
+
+    if (
+      !String(segment.speakerRawLabel || '').trim() &&
+      String(segment.speakerLabel || '').trim() === nextLabel &&
+      Number(segment.speakerScore || 0) === nextScore &&
+      Number(segment.speakerConfidence || 0) === nextConfidence &&
+      String(segment.speakerStatus || '').trim() === nextStatus
+    ) {
+      continue;
+    }
+
+    const updatedSegment = {
+      ...segment,
+      speakerRawLabel: '',
+      speakerLabel: nextLabel,
+      speakerScore: nextScore,
+      speakerConfidence: nextConfidence,
+      speakerDurationMs: nextLabel ? Math.max(Number(segment.speakerDurationMs || 0), Number(segment.endMs || 0) - Number(segment.startMs || 0)) : 0,
+      speakerStatus: nextStatus,
+      speakerUpdatedAt: nowIso(),
+    };
+    await upsertSegment(updatedSegment);
+    updatedSegments.push(updatedSegment);
+  }
+
+  if (updatedSegments.length && state.currentSession?.id === sessionId) {
+    updatedSegments.forEach((segment) => upsertCurrentSegmentInState(segment));
+  }
+
+  if (updatedSegments.length) {
+    await persistCurrentSessionNow();
+    if (state.currentSession?.id === sessionId) {
+      renderTranscript();
+      renderSpeakerInsights();
+    }
+  }
+
+  return updatedSegments.length;
+}
+
+function clearSpeakerFinalizeAutoTimer() {
+  if (typeof window === 'undefined') return;
+  window.clearTimeout(state.speakerFinalizeAutoTimer);
+  state.speakerFinalizeAutoTimer = null;
+}
+
+function scheduleAutomaticSpeakerFinalize({ reason = 'stopped', delayMs = 600 } = {}) {
+  if (typeof window === 'undefined') return;
+  clearSpeakerFinalizeAutoTimer();
+  if (!state.currentSession || !state.speakerTrackingSupported) return;
+  if (state.currentSession.status === 'active') return;
+
+  state.speakerFinalizeAutoTimer = window.setTimeout(() => {
+    state.speakerFinalizeAutoTimer = null;
+    finalizeSpeakerTiming({ auto: true, reason }).catch((error) => console.warn('Automatic speaker timing finalize failed', error));
+  }, Math.max(0, Number(delayMs || 0)));
+}
+
 async function applyDiarizedRecordingPass(
   { audioBlob, filename, chunkStartMs, chunkEndMs, diarizedSegments, recordings = [], force = false },
   session = state.currentSession
@@ -4569,15 +4688,37 @@ async function normalizeRecordingClipForFinalSpeakerPass(recording) {
   };
 }
 
-async function diarizeRecordingClip(recording, session = state.currentSession) {
+async function diarizeRecordingClip(recording, session = state.currentSession, { assignmentState = null } = {}) {
   if (!recording?.blob || !session) return 0;
   const prepared = await normalizeRecordingClipForFinalSpeakerPass(recording);
+  const diarized = await runDiarizeAudioChunk({
+    apiKey: state.settings.apiKey,
+    audioBlob: prepared.audioBlob,
+    filename: prepared.filename,
+    language: session.sourceLanguage,
+  });
+
+  const canonicalSegments = buildCanonicalFinalDiarizedSegments({
+    diarizedSegments: diarized.segments.map((segment) => ({
+      ...segment,
+      startMs: Number(recording.startMs || 0) + Math.round(Number(segment.start || 0) * 1000),
+      endMs: Number(recording.startMs || 0) + Math.round(Number(segment.end || 0) * 1000),
+    })),
+    session,
+    assignmentState,
+  });
+
   return applyDiarizedRecordingPass(
     {
       audioBlob: prepared.audioBlob,
       filename: prepared.filename,
       chunkStartMs: Number(recording.startMs || 0),
       chunkEndMs: Number(recording.endMs || recording.startMs || 0),
+      diarizedSegments: canonicalSegments.map((segment) => ({
+        ...segment,
+        start: Math.max(0, (Number(segment.startMs || 0) - Number(recording.startMs || 0)) / 1000),
+        end: Math.max(0, (Number(segment.endMs || 0) - Number(recording.startMs || 0)) / 1000),
+      })),
       recordings: [recording],
     },
     session
@@ -4717,10 +4858,10 @@ function buildSpeakerFinalizeBatches(recordings = []) {
   }));
 }
 
-async function diarizeRecordingBatch(batch, session = state.currentSession) {
+async function diarizeRecordingBatch(batch, session = state.currentSession, { assignmentState = null } = {}) {
   if (!batch?.recordings?.length || !session) return 0;
   if (batch.recordings.length === 1) {
-    return diarizeRecordingClip(batch.recordings[0], session);
+    return diarizeRecordingClip(batch.recordings[0], session, { assignmentState });
   }
   const mergedAudio = await mergeRecordingBatchToWav(batch.recordings);
   const diarized = await runDiarizeAudioChunk({
@@ -4736,7 +4877,7 @@ async function diarizeRecordingBatch(batch, session = state.currentSession) {
       endMs: Number(batch.startMs || 0) + Math.round(Number(segment.end || 0) * 1000),
     })),
     session,
-    batchIndex: Number(batch.index || 0),
+    assignmentState,
   });
 
   return applyDiarizedRecordingPass(
@@ -4757,13 +4898,17 @@ async function diarizeRecordingBatch(batch, session = state.currentSession) {
   );
 }
 
-async function diarizeRecordingClipWithRetry(recording, session = state.currentSession, { maxAttempts = SPEAKER_FINALIZE_MAX_ATTEMPTS, onRetry } = {}) {
+async function diarizeRecordingClipWithRetry(
+  recording,
+  session = state.currentSession,
+  { maxAttempts = SPEAKER_FINALIZE_MAX_ATTEMPTS, onRetry, assignmentState = null } = {}
+) {
   let lastError = null;
   const attempts = Math.max(1, Number(maxAttempts || 1));
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
-      const applied = await diarizeRecordingClip(recording, session);
+      const applied = await diarizeRecordingClip(recording, session, { assignmentState });
       return {
         ok: true,
         applied,
@@ -4788,7 +4933,7 @@ async function diarizeRecordingClipWithRetry(recording, session = state.currentS
 async function diarizeRecordingBatchIndividually(
   batch,
   session = state.currentSession,
-  { maxAttempts = SPEAKER_FINALIZE_MAX_ATTEMPTS, onRetry, onRecordingProgress } = {}
+  { maxAttempts = SPEAKER_FINALIZE_MAX_ATTEMPTS, onRetry, onRecordingProgress, assignmentState = null } = {}
 ) {
   if (!batch?.recordings?.length || !session) {
     return {
@@ -4819,6 +4964,7 @@ async function diarizeRecordingBatchIndividually(
 
     const result = await diarizeRecordingClipWithRetry(recording, session, {
       maxAttempts,
+      assignmentState,
       onRetry: (error, nextAttempt, totalAttempts) => {
         lastError = error;
         onRetry?.(error, nextAttempt, totalAttempts, recording, index, batch.recordings.length);
@@ -4846,9 +4992,13 @@ async function diarizeRecordingBatchIndividually(
   };
 }
 
-async function diarizeRecordingBatchWithRetry(batch, session = state.currentSession, { maxAttempts = SPEAKER_FINALIZE_MAX_ATTEMPTS, onRetry } = {}) {
+async function diarizeRecordingBatchWithRetry(
+  batch,
+  session = state.currentSession,
+  { maxAttempts = SPEAKER_FINALIZE_MAX_ATTEMPTS, onRetry, assignmentState = null } = {}
+) {
   if (batch?.recordings?.length === 1) {
-    const result = await diarizeRecordingClipWithRetry(batch.recordings[0], session, { maxAttempts, onRetry });
+    const result = await diarizeRecordingClipWithRetry(batch.recordings[0], session, { maxAttempts, onRetry, assignmentState });
     return {
       ...result,
       mode: 'single',
@@ -4863,7 +5013,7 @@ async function diarizeRecordingBatchWithRetry(batch, session = state.currentSess
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
-      const applied = await diarizeRecordingBatch(batch, session);
+      const applied = await diarizeRecordingBatch(batch, session, { assignmentState });
       return {
         ok: true,
         applied,
@@ -4883,6 +5033,7 @@ async function diarizeRecordingBatchWithRetry(batch, session = state.currentSess
 
   return diarizeRecordingBatchIndividually(batch, session, {
     maxAttempts,
+    assignmentState,
     onRetry: (error, nextAttempt, totalAttempts, recording, index, totalRecordings) => {
       onRetry?.(error, nextAttempt, totalAttempts, recording, index, totalRecordings, true);
     },
@@ -5271,93 +5422,91 @@ async function startSpeakerTimingFromCurrentSession() {
   return false;
 }
 
-async function finalizeSpeakerTiming() {
+async function finalizeSpeakerTiming({ auto = false, reason = 'manual' } = {}) {
   if (!state.currentSession) {
-    showToast('Create or open a session first.');
-    return;
+    if (!auto) showToast('Create or open a session first.');
+    return false;
   }
 
   if (!state.speakerTrackingSupported) {
-    showToast('Speaker timing is not supported in this browser.');
-    return;
+    if (!auto) showToast('Speaker timing is not supported in this browser.');
+    return false;
   }
 
-  if (state.speakerFinalizeInProgress) return;
+  if (state.speakerFinalizeInProgress) return false;
+
+  if (state.currentSession.status === 'active') {
+    state.speakerTrackingStatus = 'Automatic speaker timing runs after you stop the session.';
+    renderSpeakerInsights();
+    if (!auto) {
+      showToast('Stop the session first, then run final speaker timing.', 4500);
+    }
+    return false;
+  }
+
+  clearSpeakerFinalizeAutoTimer();
 
   const sessionId = state.currentSession.id;
-  const continueTracking = Boolean(state.client && state.currentSession.status === 'active');
-  const hasRecorder = Boolean(
-    state.speakerTrackingSessionId === sessionId && state.speakerRecorder && state.speakerRecorder.state !== 'inactive'
-  );
-  const hadQueuedWork = !isSpeakerAttributionIdle(sessionId);
   await waitForPendingSessionRecordingWrites();
-  const recordings = state.sessionRecordings.length ? state.sessionRecordings : await refreshSessionRecordings(sessionId);
-  const pendingRecordingPasses = recordings.filter((recording) => !recording.diarizedAt && hasRecordingBlob(recording));
+  const recordings = getSpeakerFinalizeRecordings(
+    state.sessionRecordings.length ? state.sessionRecordings : await refreshSessionRecordings(sessionId)
+  );
 
-  if (!hasRecorder && !hadQueuedWork && !pendingRecordingPasses.length) {
-    if (canStartSpeakerTrackingManually(state.currentSession)) {
-      state.speakerFinalizeInProgress = true;
-      renderSpeakerFinalizeButton();
-      try {
-        await startSpeakerTimingFromCurrentSession();
-      } finally {
-        state.speakerFinalizeInProgress = false;
-        renderSpeakerInsights();
-      }
-      return;
+  if (!recordings.length) {
+    state.speakerTrackingStatus = 'No saved session audio yet for automatic speaker timing.';
+    renderSpeakerInsights();
+    renderRecordingReview();
+    if (!auto) {
+      showToast('No saved session audio yet for automatic speaker timing.', 4500);
     }
+    return false;
+  }
 
-    showToast('There is no queued speaker timing to finalize right now.');
-    renderSpeakerFinalizeButton();
-    return;
+  const finalBatches = buildSpeakerFinalizeBatches(recordings);
+  if (!finalBatches.length) {
+    state.speakerTrackingStatus = 'No saved session audio yet for automatic speaker timing.';
+    renderSpeakerInsights();
+    renderRecordingReview();
+    if (!auto) {
+      showToast('No saved session audio yet for automatic speaker timing.', 4500);
+    }
+    return false;
   }
 
   state.speakerFinalizeInProgress = true;
   setSpeakerFinalizeProgress({
-    total: pendingRecordingPasses.length,
+    total: finalBatches.length,
     completed: 0,
     failed: 0,
-    currentIndex: pendingRecordingPasses.length ? 1 : 0,
-    statusLine: pendingRecordingPasses.length
-      ? 'Running the final speaker pass across the saved session audio...'
-      : hasRecorder
-        ? continueTracking
-          ? 'Capturing the current speaker chunk for the final speaker pass...'
-          : 'Capturing the last speaker chunk...'
-        : 'Finishing queued speaker timing...',
-    note: pendingRecordingPasses.length
-      ? 'Preparing the saved clips for the final speaker pass now.'
-      : 'Working through the queued speaker timing now.',
+    currentIndex: finalBatches.length ? 1 : 0,
+    statusLine: 'Running the final speaker pass across the saved session audio...',
+    note:
+      reason === 'ended'
+        ? 'Preparing the saved clips after the session ended.'
+        : 'Preparing the saved clips for the final speaker pass now.',
   });
-  state.speakerTrackingStatus = pendingRecordingPasses.length
-    ? 'Running the final speaker pass across the saved session audio...'
-    : hasRecorder
-      ? continueTracking
-        ? 'Capturing the current speaker chunk for the final speaker pass...'
-        : 'Capturing the last speaker chunk...'
-      : 'Finishing queued speaker timing...';
+  state.speakerTrackingStatus = 'Running the final speaker pass across the saved session audio...';
   renderSpeakerInsights();
   renderRecordingReview();
 
   try {
-    if (hasRecorder) {
-      await flushSpeakerRecorderChunk({ continueTracking });
-    }
+    state.currentSession.speakerFinalizedAt = '';
+    state.speakerSpansBySession.set(sessionId, []);
+    await markRecordingsPendingDiarization(recordings);
+    await resetAutomaticSpeakerLabelsForSession(state.currentSession);
+    await persistCurrentSessionNow();
 
-    await waitForPendingSessionRecordingWrites();
-    const refreshedRecordings = await refreshSessionRecordings(sessionId);
-    const storedPasses = refreshedRecordings.filter((recording) => !recording.diarizedAt && recording.blob?.size);
-    const finalBatches = buildSpeakerFinalizeBatches(storedPasses);
+    const assignmentState = createSpeakerFinalAssignmentState(state.currentSession);
     let completedPasses = 0;
     let failedPasses = 0;
 
-    if (storedPasses.length) {
-      state.currentSession.speakerFinalizedAt = '';
-      state.speakerSpansBySession.set(sessionId, []);
-      await persistCurrentSessionNow();
-    }
-
     for (const [index, batch] of finalBatches.entries()) {
+      if (state.currentSession?.id !== sessionId || state.currentSession.status === 'active') {
+        const deferredError = new Error('Speaker timing will resume after the next stop.');
+        deferredError.name = 'SpeakerFinalizeDeferred';
+        throw deferredError;
+      }
+
       const totalPasses = finalBatches.length;
       const clipRange = `${formatDurationShort(batch.startMs || 0)} to ${formatDurationShort(batch.endMs || batch.startMs || 0)}`;
       const clipCount = batch.recordings.length;
@@ -5373,6 +5522,7 @@ async function finalizeSpeakerTiming() {
       renderSpeakerInsights();
 
       const result = await diarizeRecordingBatchWithRetry(batch, state.currentSession, {
+        assignmentState,
         onRetry: (error, nextAttempt, maxAttempts, recording, recordingIndex, totalRecordings, usingClipFallback = false) => {
           setSpeakerFinalizeProgress({
             total: totalPasses,
@@ -5435,20 +5585,13 @@ async function finalizeSpeakerTiming() {
       renderSpeakerInsights();
     }
 
-    if (storedPasses.length) {
-      await applyManualSpeakerEventsToCurrentSession();
-    }
+    await applyManualSpeakerEventsToCurrentSession({ unresolvedStatus: 'unmatched' });
 
-    const finalized = await waitForSpeakerAttributionIdle({
-      sessionId,
-      timeoutMs: continueTracking ? 30000 : 120000,
-    });
-
-    const latestRecordings = await refreshSessionRecordings(sessionId);
+    const latestRecordings = getSpeakerFinalizeRecordings(await refreshSessionRecordings(sessionId));
     const remainingRecordingPasses = latestRecordings.filter((recording) => !recording.diarizedAt && hasRecordingBlob(recording)).length;
 
     if (remainingRecordingPasses > 0) {
-      const processedPasses = Math.max(0, storedPasses.length - remainingRecordingPasses);
+      const processedPasses = Math.max(0, latestRecordings.length - remainingRecordingPasses);
       state.currentSession.speakerFinalizedAt = '';
       await persistCurrentSessionNow();
       state.speakerTrackingStatus = processedPasses
@@ -5456,25 +5599,32 @@ async function finalizeSpeakerTiming() {
         : `Final speaker timing hit a temporary issue. ${remainingRecordingPasses} clip${remainingRecordingPasses === 1 ? '' : 's'} still need another try.`;
       showToast(
         processedPasses
-          ? `Final speaker timing updated for ${processedPasses}/${storedPasses.length || remainingRecordingPasses} clips. ${remainingRecordingPasses} still queued.`
+          ? `Final speaker timing updated for ${processedPasses}/${latestRecordings.length || remainingRecordingPasses} clips. ${remainingRecordingPasses} still queued.`
           : 'Final speaker timing hit a temporary issue. The remaining clips stay queued for retry.',
         5000
       );
-    } else if (finalized) {
+    } else {
       state.currentSession.speakerFinalizedAt = nowIso();
       await persistCurrentSessionNow();
       state.speakerTrackingStatus = 'Final speaker timing updated.';
       showToast('Final speaker timing is ready.');
-    } else {
-      state.speakerTrackingStatus = 'Speaker timing is still catching up.';
-      showToast('Speaker timing is still catching up in the background.', 4500);
     }
+
+    return true;
   } catch (error) {
+    if (error?.name === 'SpeakerFinalizeDeferred') {
+      state.currentSession.speakerFinalizedAt = '';
+      await persistCurrentSessionNow();
+      state.speakerTrackingStatus = 'Automatic speaker timing will resume after you stop the session again.';
+      return false;
+    }
+
     console.warn('Unable to finalize speaker timing', error);
     state.currentSession.speakerFinalizedAt = '';
     await persistCurrentSessionNow();
     state.speakerTrackingStatus = 'Speaker timing hit a temporary issue. The remaining clips stay queued for retry.';
     showToast('Speaker timing hit a temporary issue. Try the remaining clips again in a moment.', 5000);
+    return false;
   } finally {
     state.speakerFinalizeInProgress = false;
     setSpeakerFinalizeProgress(null);
@@ -5682,7 +5832,7 @@ async function persistManualSpeakerStateNow() {
   await persistCurrentSessionNow();
 }
 
-async function applyManualSpeakerEventsToCurrentSession() {
+async function applyManualSpeakerEventsToCurrentSession({ unresolvedStatus = null } = {}) {
   if (!state.currentSession) return;
   const session = state.currentSession;
   syncManualSpeakerStateToSession(session);
@@ -5697,10 +5847,12 @@ async function applyManualSpeakerEventsToCurrentSession() {
       : automaticLabel
         ? Math.max(Number(segment.speakerConfidence || 0), 0.55)
         : 0;
+    const nextStatus = nextLabel ? 'done' : unresolvedStatus || segment.speakerStatus;
 
     if (
       String(segment.speakerLabel || '').trim() === nextLabel &&
-      (!manualLabel || Number(segment.speakerConfidence || 0) === nextConfidence)
+      (!manualLabel || Number(segment.speakerConfidence || 0) === nextConfidence) &&
+      String(segment.speakerStatus || '').trim() === String(nextStatus || '').trim()
     ) {
       continue;
     }
@@ -5709,7 +5861,7 @@ async function applyManualSpeakerEventsToCurrentSession() {
       ...segment,
       speakerLabel: nextLabel,
       speakerRawLabel: segment.speakerRawLabel || '',
-      speakerStatus: nextLabel ? 'done' : segment.speakerStatus,
+      speakerStatus: nextStatus,
       speakerUpdatedAt: nowIso(),
       speakerScore: manualLabel ? Math.max(Number(segment.speakerScore || 0), 1) : Number(segment.speakerScore || 0),
       speakerConfidence: nextConfidence,
@@ -5930,15 +6082,11 @@ function buildRealtimeClientOptions() {
     onEvent: handleRealtimeEvent,
     onStreamAvailable: (stream) => {
       const sessionRecordingStream = stream.clone();
-      const speakerTrackingStream = stream.clone();
       const micLevelStream = stream.clone();
       stopSpeakerTracks(stream);
 
       startSessionRecording(sessionRecordingStream).catch((error) => {
         console.warn('Local session recording failed to start', error);
-      });
-      startSpeakerTracking(speakerTrackingStream).catch((error) => {
-        console.warn('Background speaker tracking failed to start', error);
       });
       startMicLevelMeter(micLevelStream).catch((error) => {
         console.warn('Live mic level meter failed to start', error);
@@ -5955,7 +6103,8 @@ function buildRealtimeClientOptions() {
       resetLiveCommitState();
       state.speechActive = false;
       await pauseManualSpeakerTimer({ persist: false });
-      await stopSpeakerTracking({ statusMessage: 'Speaker timing paused.' });
+      clearSpeakerFinalizeAutoTimer();
+      await stopSpeakerTracking({ statusMessage: 'Automatic speaker timing runs after you stop the session.' });
       await stopMicLevelMeter();
       await stopSessionRecording();
       await ensureScreenWakeLock(false);
@@ -6008,6 +6157,7 @@ async function startListening({ silent = false } = {}) {
     showToast('Create or open a session first.');
     return;
   }
+  clearSpeakerFinalizeAutoTimer();
   if (!state.settings.apiKey) {
     showToast('Please add your OpenAI API key first.');
     setRoute('setup');
@@ -6019,7 +6169,7 @@ async function startListening({ silent = false } = {}) {
   }
   if (state.client) {
     resetLiveCommitState();
-    await stopSpeakerTracking({ statusMessage: 'Refreshing speaker timing...' });
+    await stopSpeakerTracking({ statusMessage: 'Automatic speaker timing will rerun after you stop the session.' });
     await stopMicLevelMeter();
     await stopSessionRecording();
     await state.client.disconnect({ nextStatus: 'stopped', message: 'Resetting the live connection...' });
@@ -6060,7 +6210,7 @@ async function startListening({ silent = false } = {}) {
     resetLiveCommitState();
     state.speechActive = false;
     await pauseManualSpeakerTimer({ persist: false });
-    await stopSpeakerTracking({ statusMessage: 'Speaker timing idle.' });
+    await stopSpeakerTracking({ statusMessage: 'Automatic speaker timing runs after you stop the session.' });
     await stopMicLevelMeter();
     await stopSessionRecording();
     await ensureScreenWakeLock(false);
@@ -6079,12 +6229,13 @@ async function startListening({ silent = false } = {}) {
 async function pauseListening() {
   if (!state.currentSession) return;
   const pausedMessage = 'Paused. Microphone sending has stopped.';
+  clearSpeakerFinalizeAutoTimer();
   resetLiveCommitState();
   flushListeningClock();
   flushSpeechClock();
   state.speechActive = false;
   await pauseManualSpeakerTimer({ persist: false });
-  await stopSpeakerTracking({ statusMessage: 'Paused. Speaker timing may keep catching up briefly.' });
+  await stopSpeakerTracking({ statusMessage: 'Paused. Automatic speaker timing will run after you stop the session.' });
   await stopMicLevelMeter();
   await stopSessionRecording();
   if (state.client) {
@@ -6104,12 +6255,13 @@ async function pauseListening() {
 async function stopListening() {
   if (!state.currentSession) return;
   const stoppedMessage = 'Stopped. Tap Resume to continue this session.';
+  clearSpeakerFinalizeAutoTimer();
   resetLiveCommitState();
   flushListeningClock();
   flushSpeechClock();
   state.speechActive = false;
   await pauseManualSpeakerTimer({ persist: false });
-  await stopSpeakerTracking({ statusMessage: 'Stopped. Run the final speaker pass for the last buffered audio.' });
+  await stopSpeakerTracking({ statusMessage: 'Stopped. Automatic speaker timing is running on the saved session audio.' });
   await stopMicLevelMeter();
   await stopSessionRecording();
   if (state.client) {
@@ -6125,6 +6277,7 @@ async function stopListening() {
   await syncLastActiveSession();
   setStatus('stopped', stoppedMessage);
   renderCurrentView();
+  scheduleAutomaticSpeakerFinalize({ reason: 'stopped' });
 }
 
 async function endCurrentSession() {
@@ -6132,12 +6285,13 @@ async function endCurrentSession() {
   const confirmed = window.confirm('End this session? The transcript stays in local history, but live capture will stop.');
   if (!confirmed) return;
 
+  clearSpeakerFinalizeAutoTimer();
   resetLiveCommitState();
   flushListeningClock();
   flushSpeechClock();
   state.speechActive = false;
   await pauseManualSpeakerTimer({ persist: false });
-  await stopSpeakerTracking({ statusMessage: 'Ending session. Run the final speaker pass for the last buffered audio.' });
+  await stopSpeakerTracking({ statusMessage: 'Ending session. Automatic speaker timing is running on the saved session audio.' });
   await stopMicLevelMeter();
   await stopSessionRecording();
   if (state.client) {
@@ -6159,6 +6313,7 @@ async function endCurrentSession() {
   await refreshSessions();
   setStatus('ended', 'Session ended. You can reopen it from history or start a new one.');
   renderCurrentView();
+  scheduleAutomaticSpeakerFinalize({ reason: 'ended' });
   showToast('Session ended.');
 }
 
@@ -6698,7 +6853,7 @@ async function rolloverConnection() {
   resetLiveCommitState();
   flushListeningClock();
   flushSpeechClock();
-  await stopSpeakerTracking({ statusMessage: 'Refreshing speaker timing with the live connection...' });
+  await stopSpeakerTracking({ statusMessage: 'Automatic speaker timing will rerun after you stop the session.' });
   await stopMicLevelMeter();
   await stopSessionRecording();
   await state.client.disconnect({ nextStatus: 'reconnecting', message: 'Refreshing the live connection...' });
@@ -7306,7 +7461,7 @@ function bindEvents() {
   window.addEventListener('pagehide', () => {
     flushListeningClock();
     flushSpeechClock();
-    stopSpeakerTracking({ statusMessage: 'Leaving the page. Speaker timing paused.' }).catch(() => {});
+    stopSpeakerTracking({ statusMessage: 'Leaving the page. Automatic speaker timing will wait until you stop the session again.' }).catch(() => {});
     stopMicLevelMeter().catch(() => {});
     stopSessionRecording().catch(() => {});
     ensureScreenWakeLock(false).catch(() => {});
