@@ -132,6 +132,7 @@ const state = {
   sessions: [],
   currentSession: null,
   currentSegments: [],
+  liveFrozenTargetDisplayBySegmentId: new Map(),
   client: null,
   runtimeStatus: 'idle',
   runtimeMessage: 'Waiting to start.',
@@ -1117,6 +1118,33 @@ function clearLiveDraftCarry() {
   state.liveDraftCarryItemId = null;
   state.liveDraftCarrySource = '';
   state.liveDraftCarryTranslation = '';
+}
+
+function shouldFreezeVisibleLiveRowTranslations() {
+  return Boolean(state.currentSession && state.currentSession.status === 'active');
+}
+
+function resetLiveRowTranslationFreezeState() {
+  state.liveFrozenTargetDisplayBySegmentId.clear();
+}
+
+function primeLiveRowTranslationFreeze(segment) {
+  if (!shouldFreezeVisibleLiveRowTranslations()) return;
+  const segmentId = String(segment?.id || '').trim();
+  if (!segmentId || state.liveFrozenTargetDisplayBySegmentId.has(segmentId)) return;
+
+  const translatedText = String(segment.translatedText || segment.translatedDraft || '').trim();
+  state.liveFrozenTargetDisplayBySegmentId.set(segmentId, {
+    targetText: translatedText,
+    targetPending: !translatedText && segment.translationStatus !== 'error',
+  });
+}
+
+function getFrozenLiveRowTranslation(segment) {
+  if (!shouldFreezeVisibleLiveRowTranslations()) return null;
+  const segmentId = String(segment?.id || '').trim();
+  if (!segmentId) return null;
+  return state.liveFrozenTargetDisplayBySegmentId.get(segmentId) || null;
 }
 
 function setLiveDraftCarry({ itemId = null, source = '', translation = '' } = {}) {
@@ -2773,6 +2801,7 @@ function buildLiveTranscriptState() {
 
   const sourceDraft = String(session.draftSource || '').trim();
   const targetDraft = String(session.draftTranslation || '').trim();
+  const activeSession = Boolean(session?.status === 'active');
   const hasActiveSpeech = Boolean(sourceDraft) && (state.speechActive || Boolean(state.activeDraftItemId));
   const lastSegment = state.currentSegments[state.currentSegments.length - 1];
   const draftEchoesLastFinal = Boolean(
@@ -2780,7 +2809,8 @@ function buildLiveTranscriptState() {
       lastSegment &&
       sourceDraft &&
       normalizeTranscript(lastSegment.sourceText) === normalizeTranscript(sourceDraft) &&
-      (!targetDraft ||
+      ((!activeSession && sourceDraft) ||
+        !targetDraft ||
         normalizeTranscript(lastSegment.translatedText || lastSegment.translatedDraft || '') === normalizeTranscript(targetDraft))
   );
   const hasRenderableLiveDraft = Boolean((sourceDraft || targetDraft) && !draftEchoesLastFinal);
@@ -2872,8 +2902,13 @@ function getTranscriptAuxParts(segment) {
 }
 
 function buildTranscriptDisplayItemFromSegment(segment, { sourceLabel, targetLabel }) {
-  const translatedText = String(segment.translatedText || segment.translatedDraft || '').trim();
-  const translationPending = !translatedText && segment.translationStatus !== 'error';
+  const frozenTranslation = getFrozenLiveRowTranslation(segment);
+  const translatedText = frozenTranslation
+    ? String(frozenTranslation.targetText || '').trim()
+    : String(segment.translatedText || segment.translatedDraft || '').trim();
+  const translationPending = frozenTranslation
+    ? Boolean(frozenTranslation.targetPending)
+    : !translatedText && segment.translationStatus !== 'error';
   return {
     key: segment.id,
     title: getTranscriptSpeakerLabel(segment),
@@ -3385,12 +3420,18 @@ function mergeLiveRowIntoFeedRows(rows, liveRow) {
     return { rows, liveRow, mergedIntoLastRow: false };
   }
 
+  const freezeTargetUpdates = Boolean(
+    shouldFreezeVisibleLiveRowTranslations() &&
+      lastRow.lastSegment?.id &&
+      state.liveFrozenTargetDisplayBySegmentId.has(lastRow.lastSegment.id)
+  );
+
   const nextRows = [...rows];
   nextRows[nextRows.length - 1] = {
     ...lastRow,
     sourceText: liveRow.sourceText || lastRow.sourceText,
-    targetText: liveRow.targetText || lastRow.targetText,
-    targetPending: liveRow.targetPending,
+    targetText: freezeTargetUpdates ? lastRow.targetText : liveRow.targetText || lastRow.targetText,
+    targetPending: freezeTargetUpdates ? lastRow.targetPending : liveRow.targetPending,
     timestamp: liveRow.timestamp || lastRow.timestamp,
   };
 
@@ -4246,6 +4287,7 @@ async function loadSession(sessionId) {
   const session = await getSession(sessionId);
   if (!session) return null;
   resetSessionPlaybackState();
+  resetLiveRowTranslationFreezeState();
   state.currentSession = session;
   state.currentSegments = await listSegmentsBySession(sessionId);
   state.sessionRecordings = await listRecordingsBySession(sessionId);
@@ -5796,6 +5838,7 @@ async function handleStartFromSetup(event) {
   const session = await createSession(formValues);
   state.currentSession = session;
   state.currentSegments = [];
+  resetLiveRowTranslationFreezeState();
   state.sessionRecordings = [];
   resetSessionPlaybackState();
   state.manualSpeakerEvents = [];
@@ -6008,6 +6051,7 @@ async function pauseListening() {
   await applyManualSpeakerEventsToCurrentSession();
   await persistCurrentSessionNow();
   await syncLastActiveSession();
+  resetLiveRowTranslationFreezeState();
   setStatus('paused', pausedMessage);
   renderCurrentView();
 }
@@ -6034,6 +6078,7 @@ async function stopListening() {
   await applyManualSpeakerEventsToCurrentSession();
   await persistCurrentSessionNow();
   await syncLastActiveSession();
+  resetLiveRowTranslationFreezeState();
   setStatus('stopped', stoppedMessage);
   renderCurrentView();
 }
@@ -6067,6 +6112,7 @@ async function endCurrentSession() {
   await applyManualSpeakerEventsToCurrentSession();
   await persistCurrentSessionNow();
   await syncLastActiveSession();
+  resetLiveRowTranslationFreezeState();
   await refreshSessions();
   setStatus('ended', 'Session ended. You can reopen it from history or start a new one.');
   renderCurrentView();
@@ -6491,6 +6537,7 @@ async function finalizeSegmentFromEvent(event) {
   const labeledSegment = await applyStoredSpeakerSpansToSegment(segment, state.currentSession);
 
   upsertCurrentSegmentInState(labeledSegment);
+  primeLiveRowTranslationFreeze(labeledSegment);
   await upsertSegment(labeledSegment);
   clearDraftState(itemId, { preserveVisibleDraft: true });
   await persistCurrentSessionNow();
@@ -7468,6 +7515,7 @@ async function createDebugSession({
   state.currentSession = session;
   state.sessions = [session, ...state.sessions.filter((item) => item.id !== session.id)];
   state.currentSegments = [];
+  resetLiveRowTranslationFreezeState();
   state.sessionRecordings = [];
   state.manualSpeakerEvents = [];
   state.manualSpeakerOpenStartMs = null;
@@ -7506,6 +7554,7 @@ async function ensureDebugSession({ sourceLanguage = 'en', targetLanguage = 'de'
     });
     state.currentSession = session;
     state.currentSegments = [];
+    resetLiveRowTranslationFreezeState();
     clearLiveDraftCarry();
   }
 
