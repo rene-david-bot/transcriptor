@@ -2412,9 +2412,6 @@ function renderSpeakerSummaryCards(summary, { includeTotalCard = true } = {}) {
 
 function buildSpeakerTimingSummaryRows(slotRollup, summary = []) {
   const manualSlots = Array.isArray(slotRollup?.slots) ? slotRollup.slots : [];
-  const manualTotalByKey = new Map(
-    (Array.isArray(slotRollup?.speakers) ? slotRollup.speakers : []).map((speaker) => [speaker.key, Math.max(0, Number(speaker.windowMs || 0))])
-  );
   const mergedSlots = [];
   const mergedSlotByGroupId = new Map();
   const speakerPartIndex = new Map();
@@ -2448,6 +2445,11 @@ function buildSpeakerTimingSummaryRows(slotRollup, summary = []) {
       mergedSlots.push(merged);
       mergedSlotByGroupId.set(groupId, merged);
     });
+
+  const manualTotalByKey = mergedSlots.reduce((totals, slot) => {
+    totals.set(slot.speakerKey, (totals.get(slot.speakerKey) || 0) + Math.max(0, Number(slot.manualMs || 0)));
+    return totals;
+  }, new Map());
 
   const rows = mergedSlots
     .sort((left, right) => left.startMs - right.startMs)
