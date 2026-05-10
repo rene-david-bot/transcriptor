@@ -2050,6 +2050,7 @@ function buildManualSpeakerSlots(session = state.currentSession, segments = stat
 
       return {
         id: event.id,
+        groupId: String(event.groupId || event.id || '').trim() || event.id,
         label: event.speakerLabel,
         startMs,
         endMs,
@@ -2414,21 +2415,53 @@ function buildSpeakerTimingSummaryRows(slotRollup, summary = []) {
   const manualTotalByKey = new Map(
     (Array.isArray(slotRollup?.speakers) ? slotRollup.speakers : []).map((speaker) => [speaker.key, Math.max(0, Number(speaker.windowMs || 0))])
   );
+  const mergedSlots = [];
+  const mergedSlotByGroupId = new Map();
   const speakerPartIndex = new Map();
 
-  const rows = manualSlots
-    .map((slot) => {
+  manualSlots
+    .slice()
+    .sort((left, right) => Math.max(0, Number(left.startMs || 0)) - Math.max(0, Number(right.startMs || 0)))
+    .forEach((slot, index) => {
       const speakerKey = getSpeakerSummaryKeyForManualLabel(slot.label || 'Speaker');
-      const nextPart = (speakerPartIndex.get(speakerKey) || 0) + 1;
-      speakerPartIndex.set(speakerKey, nextPart);
-      const totalMs = Math.max(0, Number(manualTotalByKey.get(speakerKey) ?? slot.windowMs ?? 0));
-      return {
-        key: `${speakerKey}:${slot.id}:${nextPart}`,
+      const groupId = String(slot.groupId || slot.id || `${speakerKey}:${index + 1}`).trim() || `${speakerKey}:${index + 1}`;
+      const existing = mergedSlotByGroupId.get(groupId);
+
+      if (existing) {
+        existing.manualMs += Math.max(0, Number(slot.windowMs || 0));
+        existing.autoMs += Math.max(0, Number(slot.speechMs || 0));
+        existing.startMs = Math.min(existing.startMs, Math.max(0, Number(slot.startMs || 0)));
+        existing.endMs = Math.max(existing.endMs, Math.max(0, Number(slot.endMs || slot.startMs || 0)));
+        return;
+      }
+
+      const merged = {
+        groupId,
         speakerKey,
         label: slot.label || 'Speaker',
-        note: `Part ${nextPart}`,
         manualMs: Math.max(0, Number(slot.windowMs || 0)),
         autoMs: Math.max(0, Number(slot.speechMs || 0)),
+        startMs: Math.max(0, Number(slot.startMs || 0)),
+        endMs: Math.max(0, Number(slot.endMs || slot.startMs || 0)),
+      };
+
+      mergedSlots.push(merged);
+      mergedSlotByGroupId.set(groupId, merged);
+    });
+
+  const rows = mergedSlots
+    .sort((left, right) => left.startMs - right.startMs)
+    .map((slot) => {
+      const nextPart = (speakerPartIndex.get(slot.speakerKey) || 0) + 1;
+      speakerPartIndex.set(slot.speakerKey, nextPart);
+      const totalMs = Math.max(0, Number(manualTotalByKey.get(slot.speakerKey) ?? slot.manualMs ?? 0));
+      return {
+        key: `${slot.speakerKey}:${slot.groupId}:${nextPart}`,
+        speakerKey: slot.speakerKey,
+        label: slot.label || 'Speaker',
+        note: `Part ${nextPart}`,
+        manualMs: Math.max(0, Number(slot.manualMs || 0)),
+        autoMs: Math.max(0, Number(slot.autoMs || 0)),
         totalMs,
         startMs: Math.max(0, Number(slot.startMs || 0)),
       };
