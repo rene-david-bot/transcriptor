@@ -114,7 +114,7 @@ const DISPLAY_ROW_MAX_MS = 10000;
 const DISPLAY_ROW_MAX_GAP_MS = 1800;
 const DISPLAY_ROW_MAX_SENTENCE_COUNT = 2;
 const TRANSCRIPT_FOLLOW_TRIGGER_RATIO = 0.72;
-const TRANSCRIPT_FOLLOW_SLACK_PX = 72;
+const TRANSCRIPT_FOLLOW_SLACK_PX = 20;
 const SPEAKER_CHUNK_MS = 20000;
 const SPEAKER_INITIAL_CHUNK_MS = 8000;
 const SPEAKER_MIN_CHUNK_BYTES = 4000;
@@ -996,12 +996,13 @@ function getTranscriptFollowAnchor(list = elements.transcriptList) {
 
 function getTranscriptFollowTargetTop(list = elements.transcriptList) {
   if (!list) return 0;
+  const maxScrollTop = Math.max(0, list.scrollHeight - list.clientHeight);
   const anchor = getTranscriptFollowAnchor(list);
   if (!anchor) {
-    return Math.max(0, list.scrollHeight - list.clientHeight);
+    return maxScrollTop;
   }
   const anchorBottom = anchor.offsetTop + anchor.offsetHeight;
-  return Math.max(0, Math.round(anchorBottom - list.clientHeight * TRANSCRIPT_FOLLOW_TRIGGER_RATIO));
+  return Math.min(maxScrollTop, Math.max(0, Math.round(anchorBottom - list.clientHeight * TRANSCRIPT_FOLLOW_TRIGGER_RATIO)));
 }
 
 function getTranscriptFollowOverflow(list = elements.transcriptList) {
@@ -1016,7 +1017,8 @@ function getTranscriptFollowOverflow(list = elements.transcriptList) {
 function isTranscriptNearFollowPosition(slack = TRANSCRIPT_FOLLOW_SLACK_PX) {
   const list = elements.transcriptList;
   if (!list || list.scrollHeight <= list.clientHeight + 24) return true;
-  return Math.max(0, list.scrollHeight - list.clientHeight - list.scrollTop) <= slack;
+  const targetTop = getTranscriptFollowTargetTop(list);
+  return list.scrollTop >= Math.max(0, targetTop - slack);
 }
 
 function updateTranscriptAutoFollowState() {
