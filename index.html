@@ -522,6 +522,12 @@
                 </label>
 
                 <label class="field">
+                  <span>Finalized row UI delay (ms)</span>
+                  <input id="settingsFinalizedSegmentDelayInput" type="number" min="0" max="5000" step="100" inputmode="numeric" />
+                  <small>Wait before a newly finalized transcript row is inserted into the scrolling transcript. Recognition and storage still happen immediately. Default: 1000 ms.</small>
+                </label>
+
+                <label class="field">
                   <span>Timestamp style</span>
                   <select id="timestampStyleSelect">
                     <option value="elapsed">Elapsed session time</option>
@@ -603,6 +609,6 @@
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-    <script type="module" src="./js/app.js?v=20260510-manual-pause-suppress-transcript"></script>
+    <script type="module" src="./js/app.js?v=20260510-finalized-row-delay"></script>
   </body>
 </html>

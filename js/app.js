@@ -83,6 +83,7 @@ const DEFAULT_SETTINGS = {
   autoScroll: true,
   textSize: 'medium',
   timestampStyle: 'elapsed',
+  finalizedSegmentUiDelayMs: 1000,
 };
 
 const STATUS_COPY = {
@@ -113,6 +114,8 @@ const DISPLAY_ROW_TARGET_MS = 7000;
 const DISPLAY_ROW_MAX_MS = 10000;
 const DISPLAY_ROW_MAX_GAP_MS = 1800;
 const DISPLAY_ROW_MAX_SENTENCE_COUNT = 2;
+const FINALIZED_SEGMENT_UI_DELAY_MIN_MS = 0;
+const FINALIZED_SEGMENT_UI_DELAY_MAX_MS = 5000;
 const TRANSCRIPT_FOLLOW_TRIGGER_RATIO = 0.72;
 const TRANSCRIPT_FOLLOW_SLACK_PX = 72;
 const SPEAKER_CHUNK_MS = 20000;
@@ -132,6 +135,8 @@ const state = {
   sessions: [],
   currentSession: null,
   currentSegments: [],
+  transcriptUiPendingRevealAtBySegmentId: new Map(),
+  transcriptUiRevealTimers: new Map(),
   client: null,
   runtimeStatus: 'idle',
   runtimeMessage: 'Waiting to start.',
@@ -354,6 +359,7 @@ const elements = {
   themeSelect: $('#themeSelect'),
   autoScrollInput: $('#autoScrollInput'),
   timestampStyleSelect: $('#timestampStyleSelect'),
+  settingsFinalizedSegmentDelayInput: $('#settingsFinalizedSegmentDelayInput'),
   settingsGlossaryInput: $('#settingsGlossaryInput'),
   settingsSpeakerNamesInput: $('#settingsSpeakerNamesInput'),
   forgetApiKeyButton: $('#forgetApiKeyButton'),
@@ -886,6 +892,11 @@ function applySettingsToForms() {
   elements.themeSelect.value = normalizeTheme(settings.theme);
   elements.autoScrollInput.checked = Boolean(settings.autoScroll);
   elements.timestampStyleSelect.value = settings.timestampStyle || 'elapsed';
+  if (elements.settingsFinalizedSegmentDelayInput) {
+    elements.settingsFinalizedSegmentDelayInput.value = String(
+      normalizeFinalizedSegmentUiDelayMs(settings.finalizedSegmentUiDelayMs)
+    );
+  }
   elements.toggleAutoScrollButton.textContent = `Auto-follow: ${settings.autoScroll ? 'On' : 'Off'}`;
   applyTheme(settings.theme);
   document.body.classList.remove('text-size-small', 'text-size-medium', 'text-size-large', 'text-size-xlarge');
@@ -940,6 +951,19 @@ function applyTranscriptViewButtonLabels() {
 
 function normalizeTheme(theme) {
   return theme === 'light' ? 'light' : 'dark';
+}
+
+function normalizeFinalizedSegmentUiDelayMs(value, fallback = DEFAULT_SETTINGS.finalizedSegmentUiDelayMs) {
+  if (value === '' || value === null || value === undefined) {
+    return fallback;
+  }
+
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+
+  return Math.min(FINALIZED_SEGMENT_UI_DELAY_MAX_MS, Math.max(FINALIZED_SEGMENT_UI_DELAY_MIN_MS, Math.round(parsed)));
 }
 
 function applyTheme(theme = state.settings?.theme) {
@@ -1051,8 +1075,14 @@ async function persistSettings(partial = {}) {
     ...state.settings,
     ...partial,
   };
+  state.settings.finalizedSegmentUiDelayMs = normalizeFinalizedSegmentUiDelayMs(state.settings.finalizedSegmentUiDelayMs);
   if (!debugNoPersistence) {
     await saveSettings(state.settings);
+  }
+  if (state.settings.finalizedSegmentUiDelayMs === 0 && state.transcriptUiPendingRevealAtBySegmentId.size) {
+    resetTranscriptSegmentUiDelayState();
+    renderSessionSummary();
+    renderTranscript();
   }
   applySettingsToForms();
 }
@@ -1156,6 +1186,83 @@ function resetManualTranscriptSuppressionState() {
   state.manualTranscriptBlockedItemIds.clear();
   state.manualTranscriptAllowedItemIds.clear();
   state.manualTranscriptAllowNextCommittedItem = false;
+}
+
+function clearTranscriptSegmentUiRevealTimers() {
+  state.transcriptUiRevealTimers.forEach((timerId) => window.clearTimeout(timerId));
+  state.transcriptUiRevealTimers.clear();
+}
+
+function resetTranscriptSegmentUiDelayState() {
+  clearTranscriptSegmentUiRevealTimers();
+  state.transcriptUiPendingRevealAtBySegmentId.clear();
+}
+
+function isTranscriptSegmentPendingUiReveal(segmentId) {
+  const normalizedSegmentId = String(segmentId || '').trim();
+  if (!normalizedSegmentId) return false;
+
+  const revealAt = Number(state.transcriptUiPendingRevealAtBySegmentId.get(normalizedSegmentId) || 0);
+  if (!revealAt) return false;
+  if (revealAt > Date.now()) return true;
+
+  state.transcriptUiPendingRevealAtBySegmentId.delete(normalizedSegmentId);
+  const timerId = state.transcriptUiRevealTimers.get(normalizedSegmentId);
+  if (timerId) {
+    window.clearTimeout(timerId);
+    state.transcriptUiRevealTimers.delete(normalizedSegmentId);
+  }
+  return false;
+}
+
+function getVisibleTranscriptSegments() {
+  return state.currentSegments.filter((segment) => !isTranscriptSegmentPendingUiReveal(segment.id));
+}
+
+function getPendingTranscriptUiRevealState() {
+  const pendingSegments = state.currentSegments.filter((segment) => isTranscriptSegmentPendingUiReveal(segment.id));
+  if (!pendingSegments.length) return null;
+
+  const nextSegment = pendingSegments.reduce((best, segment) => {
+    if (!best) return segment;
+    const bestRevealAt = Number(state.transcriptUiPendingRevealAtBySegmentId.get(best.id) || 0);
+    const segmentRevealAt = Number(state.transcriptUiPendingRevealAtBySegmentId.get(segment.id) || 0);
+    if (!bestRevealAt || (segmentRevealAt && segmentRevealAt < bestRevealAt)) {
+      return segment;
+    }
+    return best;
+  }, null);
+
+  return {
+    count: pendingSegments.length,
+    nextSegment,
+  };
+}
+
+function scheduleTranscriptSegmentUiReveal(segmentId) {
+  const normalizedSegmentId = String(segmentId || '').trim();
+  if (!normalizedSegmentId) return;
+
+  const existingTimerId = state.transcriptUiRevealTimers.get(normalizedSegmentId);
+  if (existingTimerId) {
+    window.clearTimeout(existingTimerId);
+    state.transcriptUiRevealTimers.delete(normalizedSegmentId);
+  }
+
+  const delayMs = normalizeFinalizedSegmentUiDelayMs(state.settings.finalizedSegmentUiDelayMs);
+  if (delayMs <= 0) {
+    state.transcriptUiPendingRevealAtBySegmentId.delete(normalizedSegmentId);
+    return;
+  }
+
+  state.transcriptUiPendingRevealAtBySegmentId.set(normalizedSegmentId, Date.now() + delayMs);
+  const timerId = window.setTimeout(() => {
+    state.transcriptUiRevealTimers.delete(normalizedSegmentId);
+    state.transcriptUiPendingRevealAtBySegmentId.delete(normalizedSegmentId);
+    renderSessionSummary();
+    renderTranscript();
+  }, delayMs);
+  state.transcriptUiRevealTimers.set(normalizedSegmentId, timerId);
 }
 
 function allowManualTranscriptItem(itemId) {
@@ -1421,6 +1528,7 @@ function collectSettingsFromSettingsForm() {
     theme: normalizeTheme(elements.themeSelect.value),
     autoScroll: elements.autoScrollInput.checked,
     timestampStyle: elements.timestampStyleSelect.value,
+    finalizedSegmentUiDelayMs: normalizeFinalizedSegmentUiDelayMs(elements.settingsFinalizedSegmentDelayInput?.value),
   };
 }
 
@@ -2694,7 +2802,7 @@ function getTranscriptDisplayCounts() {
   }
 
   const liveDraft = buildLiveTranscriptState();
-  const feedRows = buildTranscriptFeedRows(liveDraft.sourceLabel, liveDraft.targetLabel);
+  const feedRows = buildTranscriptFeedRows(liveDraft.sourceLabel, liveDraft.targetLabel, getVisibleTranscriptSegments());
   const liveRow = buildTranscriptDisplayItemFromLiveDraft(liveDraft);
   const { rows: mergedRows, liveRow: appendedLiveRow } = mergeLiveRowIntoFeedRows(feedRows, liveRow);
 
@@ -2754,6 +2862,7 @@ function buildLiveTranscriptState() {
   const session = state.currentSession;
   const sourceLabel = getLanguageName(session?.sourceLanguage || state.settings.sourceLanguage || '');
   const targetLabel = getLanguageName(session?.targetLanguage || state.settings.targetLanguage || '');
+  const pendingTranscriptReveal = getPendingTranscriptUiRevealState();
 
   if (!session) {
     return {
@@ -2793,6 +2902,9 @@ function buildLiveTranscriptState() {
 
   if (browsingEarlier && (state.currentSegments.length || hasRenderableLiveDraft)) {
     liveStateLabel = 'Reading earlier text';
+  } else if (pendingTranscriptReveal) {
+    liveStateLabel = 'Incoming…';
+    liveMeta = 'The next finalized line is being held briefly before it joins the scrolling transcript.';
   } else if (!hasRenderableLiveDraft && state.currentSegments.length) {
     liveStateLabel = 'Waiting';
     liveMeta = 'The transcript stays ready and will append the next segment below.';
@@ -3334,10 +3446,10 @@ function shouldMergeTranscriptFeedRows(previousRow, nextRow, previousSegment, ne
   return mergedSentenceCount <= 1 && nextTotalDurationMs <= DISPLAY_ROW_TARGET_MS;
 }
 
-function buildTranscriptFeedRows(sourceLabel, targetLabel) {
+function buildTranscriptFeedRows(sourceLabel, targetLabel, segments = getVisibleTranscriptSegments()) {
   const rows = [];
 
-  state.currentSegments.forEach((segment) => {
+  segments.forEach((segment) => {
     const nextRow = buildTranscriptDisplayItemFromSegment(segment, { sourceLabel, targetLabel });
     const lastRow = rows[rows.length - 1];
 
@@ -3404,17 +3516,21 @@ function renderTranscriptHistory() {
   const liveDraft = buildLiveTranscriptState();
   const sourceLabel = liveDraft.sourceLabel;
   const targetLabel = liveDraft.targetLabel;
+  const visibleSegments = getVisibleTranscriptSegments();
+  const pendingTranscriptReveal = getPendingTranscriptUiRevealState();
   const shouldFollow = Boolean(state.settings.autoScroll && state.transcriptPinnedToBottom);
   const previousScrollTop = list.scrollTop;
 
-  const feedRows = buildTranscriptFeedRows(sourceLabel, targetLabel);
+  const feedRows = buildTranscriptFeedRows(sourceLabel, targetLabel, visibleSegments);
   const liveRow = buildTranscriptDisplayItemFromLiveDraft(liveDraft);
   const { rows: mergedRows, liveRow: appendedLiveRow, mergedIntoLastRow } = mergeLiveRowIntoFeedRows(feedRows, liveRow);
 
   if (!mergedRows.length && !appendedLiveRow) {
     list.innerHTML = `<div class="transcript-empty">${escapeHtml(
-      state.currentSession
-        ? 'Transcript lines will appear here as speech is captured and translated.'
+      pendingTranscriptReveal
+        ? 'Incoming… The next finalized line is being held briefly before it appears here.'
+        : state.currentSession
+          ? 'Transcript lines will appear here as speech is captured and translated.'
         : 'Listen in one language and read in another. Start a session to begin.'
     )}</div>`;
   } else {
@@ -4246,6 +4362,7 @@ async function loadSession(sessionId) {
   const session = await getSession(sessionId);
   if (!session) return null;
   resetSessionPlaybackState();
+  resetTranscriptSegmentUiDelayState();
   state.currentSession = session;
   state.currentSegments = await listSegmentsBySession(sessionId);
   state.sessionRecordings = await listRecordingsBySession(sessionId);
@@ -5796,6 +5913,7 @@ async function handleStartFromSetup(event) {
   const session = await createSession(formValues);
   state.currentSession = session;
   state.currentSegments = [];
+  resetTranscriptSegmentUiDelayState();
   state.sessionRecordings = [];
   resetSessionPlaybackState();
   state.manualSpeakerEvents = [];
@@ -6491,6 +6609,7 @@ async function finalizeSegmentFromEvent(event) {
   const labeledSegment = await applyStoredSpeakerSpansToSegment(segment, state.currentSession);
 
   upsertCurrentSegmentInState(labeledSegment);
+  scheduleTranscriptSegmentUiReveal(labeledSegment.id);
   await upsertSegment(labeledSegment);
   clearDraftState(itemId, { preserveVisibleDraft: true });
   await persistCurrentSessionNow();
@@ -6752,6 +6871,7 @@ async function deleteHistoricalSession(sessionId) {
   if (state.currentSession?.id === sessionId) {
     state.currentSession = null;
     state.currentSegments = [];
+    resetTranscriptSegmentUiDelayState();
     setStatus('idle', 'Waiting to start.');
   }
   if (state.lastActiveSessionId === sessionId) {
@@ -7159,6 +7279,7 @@ function bindEvents() {
     if (state.currentSession?.status === 'ended') {
       state.currentSession = null;
       state.currentSegments = [];
+      resetTranscriptSegmentUiDelayState();
       setStatus('idle', 'Waiting to start.');
     }
     renderCurrentView();
@@ -7174,6 +7295,7 @@ function bindEvents() {
     await clearAllSessions();
     state.currentSession = null;
     state.currentSegments = [];
+    resetTranscriptSegmentUiDelayState();
     state.lastActiveSessionId = null;
     setStatus('idle', 'Waiting to start.');
     await refreshSessions();
@@ -7244,6 +7366,7 @@ async function loadBootstrapData() {
     ...DEFAULT_SETTINGS,
     ...(await getSettings()),
   };
+  state.settings.finalizedSegmentUiDelayMs = normalizeFinalizedSegmentUiDelayMs(state.settings.finalizedSegmentUiDelayMs);
   state.lastActiveSessionId = await getMeta('lastActiveSessionId');
   await refreshSessions();
   applySettingsToForms();
@@ -7299,6 +7422,7 @@ function setDebugSegments(segments = []) {
   if (!state.currentSession) return buildDebugSnapshot();
 
   const sessionId = state.currentSession.id;
+  resetTranscriptSegmentUiDelayState();
   state.currentSegments = (Array.isArray(segments) ? segments : []).map((segment, index) => {
     const startMs = Number(segment?.startMs ?? index * 4000);
     const endMs = Number(segment?.endMs ?? startMs + 2500);
@@ -7468,6 +7592,7 @@ async function createDebugSession({
   state.currentSession = session;
   state.sessions = [session, ...state.sessions.filter((item) => item.id !== session.id)];
   state.currentSegments = [];
+  resetTranscriptSegmentUiDelayState();
   state.sessionRecordings = [];
   state.manualSpeakerEvents = [];
   state.manualSpeakerOpenStartMs = null;
@@ -7506,6 +7631,7 @@ async function ensureDebugSession({ sourceLanguage = 'en', targetLanguage = 'de'
     });
     state.currentSession = session;
     state.currentSegments = [];
+    resetTranscriptSegmentUiDelayState();
     clearLiveDraftCarry();
   }
 
