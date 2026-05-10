@@ -17,7 +17,7 @@ import {
   upsertSegment,
   upsertSession,
 } from './db.js?v=20260509-storage-size';
-import { exportSessionJson, exportSessionMarkdown, exportSessionTxt } from './exporters.js';
+import { exportSessionMarkdown, exportSessionTxt } from './exporters.js';
 import {
   buildRealtimeTranscriptionSessionPreview,
   diarizeAudioChunk,
@@ -331,8 +331,6 @@ const elements = {
   transcriptLiveBand: $('#transcriptLiveBand'),
   exportMarkdownButton: $('#exportMarkdownButton'),
   exportTxtButton: $('#exportTxtButton'),
-  exportJsonButton: $('#exportJsonButton'),
-  exportCurrentFromSide: $('#exportCurrentFromSide'),
   historyList: $('#historyList'),
   refreshHistoryButton: $('#refreshHistoryButton'),
   settingsForm: $('#settingsForm'),
@@ -3821,7 +3819,6 @@ function renderHistory() {
             <button class="button button--ghost button--small" data-history-action="rename" data-session-id="${session.id}">Rename</button>
             <button class="button button--ghost button--small" data-history-action="export-md" data-session-id="${session.id}">Markdown</button>
             <button class="button button--ghost button--small" data-history-action="export-txt" data-session-id="${session.id}">TXT</button>
-            <button class="button button--ghost button--small" data-history-action="export-json" data-session-id="${session.id}">JSON</button>
             <button class="button button--danger button--small" data-history-action="delete" data-session-id="${session.id}">Delete</button>
           </div>
         </article>
@@ -3876,8 +3873,6 @@ function renderControls() {
   if (elements.renameSessionButton) elements.renameSessionButton.disabled = !session;
   if (elements.exportMarkdownButton) elements.exportMarkdownButton.disabled = !session || !state.currentSegments.length;
   if (elements.exportTxtButton) elements.exportTxtButton.disabled = !session || !state.currentSegments.length;
-  if (elements.exportJsonButton) elements.exportJsonButton.disabled = !session || !state.currentSegments.length;
-  if (elements.exportCurrentFromSide) elements.exportCurrentFromSide.disabled = !session || !state.currentSegments.length;
 }
 
 function renderResumeButtons() {
@@ -6245,6 +6240,13 @@ async function rolloverConnection() {
   await startListening({ silent: true });
 }
 
+function closeClosestActionMenu(element) {
+  const actionMenu = element?.closest('.action-menu');
+  if (actionMenu instanceof HTMLDetailsElement) {
+    actionMenu.open = false;
+  }
+}
+
 async function exportCurrentSession(kind) {
   if (!state.currentSession || !state.currentSegments.length) {
     showToast('There is nothing to export yet.');
@@ -6253,11 +6255,6 @@ async function exportCurrentSession(kind) {
 
   if (kind === 'md') {
     exportSessionMarkdown(state.currentSession, state.currentSegments, buildTranscriptTimestamp);
-    return;
-  }
-
-  if (kind === 'json') {
-    exportSessionJson(state.currentSession, state.currentSegments);
     return;
   }
 
@@ -6274,11 +6271,6 @@ async function exportHistoricalSession(sessionId, kind) {
 
   if (kind === 'md') {
     exportSessionMarkdown(session, segments, (segment) => buildTranscriptTimestamp(segment));
-    return;
-  }
-
-  if (kind === 'json') {
-    exportSessionJson(session, segments);
     return;
   }
 
@@ -6760,10 +6752,14 @@ function bindEvents() {
     await renameSpeakerForCurrentSession(renameButton.dataset.speakerRawLabel);
   });
 
-  elements.exportMarkdownButton?.addEventListener('click', () => exportCurrentSession('md'));
-  elements.exportTxtButton?.addEventListener('click', () => exportCurrentSession('txt'));
-  elements.exportJsonButton?.addEventListener('click', () => exportCurrentSession('json'));
-  elements.exportCurrentFromSide?.addEventListener('click', () => exportCurrentSession('txt'));
+  elements.exportMarkdownButton?.addEventListener('click', (event) => {
+    closeClosestActionMenu(event.currentTarget);
+    void exportCurrentSession('md');
+  });
+  elements.exportTxtButton?.addEventListener('click', (event) => {
+    closeClosestActionMenu(event.currentTarget);
+    void exportCurrentSession('txt');
+  });
 
   elements.toggleAutoScrollButton.addEventListener('click', async () => {
     await persistSettings({ autoScroll: !state.settings.autoScroll });
@@ -6814,7 +6810,6 @@ function bindEvents() {
     if (historyAction === 'delete') await deleteHistoricalSession(sessionId);
     if (historyAction === 'export-md') await exportHistoricalSession(sessionId, 'md');
     if (historyAction === 'export-txt') await exportHistoricalSession(sessionId, 'txt');
-    if (historyAction === 'export-json') await exportHistoricalSession(sessionId, 'json');
   });
 
   window.addEventListener('beforeinstallprompt', (event) => {

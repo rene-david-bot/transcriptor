@@ -222,6 +222,8 @@
                         <summary class="button button--ghost button--small action-menu__summary">More</summary>
                         <div class="action-menu__sheet">
                           <button class="button button--ghost button--small button--block action-menu__item" id="renameSessionButton" type="button">Rename session</button>
+                          <button class="button button--ghost button--small button--block action-menu__item" id="exportTxtButton" type="button">Export TXT</button>
+                          <button class="button button--ghost button--small button--block action-menu__item" id="exportMarkdownButton" type="button">Export Markdown</button>
                           <button class="button button--ghost button--small button--block action-menu__item" type="button" data-route="history">Open history</button>
                           <button class="button button--ghost button--small button--block action-menu__item" type="button" data-route="settings">Open settings</button>
                         </div>
@@ -274,19 +276,10 @@
                 </section>
 
                 <section class="panel transcript-panel">
-                  <div class="panel__header panel__header--spread transcript-panel__header">
+                  <div class="panel__header transcript-panel__header">
                     <div>
                       <p class="eyebrow">Live transcript</p>
                       <h3>Live bilingual transcript</h3>
-                    </div>
-                    <div class="button-row transcript-export-actions">
-                      <details class="action-menu action-menu--align-end">
-                        <summary class="button button--ghost button--small transcript-export-actions__button action-menu__summary">Export</summary>
-                        <div class="action-menu__sheet">
-                          <button class="button button--ghost button--small button--block action-menu__item" id="exportMarkdownButton" type="button">Markdown</button>
-                          <button class="button button--ghost button--small button--block action-menu__item" id="exportTxtButton" type="button">TXT</button>
-                        </div>
-                      </details>
                     </div>
                   </div>
 
@@ -610,6 +603,6 @@
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-    <script type="module" src="./js/app.js?v=20260510-export-menu-fix"></script>
+    <script type="module" src="./js/app.js?v=20260510-export-more-menu"></script>
   </body>
 </html>
