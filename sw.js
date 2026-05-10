@@ -1,10 +1,10 @@
-const CACHE_NAME = 'transcripto-shell-v75';
+const CACHE_NAME = 'transcripto-shell-v76';
 const APP_SHELL = [
   './',
   './index.html',
   './styles.css',
   './manifest.webmanifest',
-  './js/app.js?v=20260510-earlier-autofollow-disengage',
+  './js/app.js?v=20260510-live-ui-cleanup',
   './js/db.js?v=20260509-storage-size',
   './js/exporters.js',
   './js/openai.js',

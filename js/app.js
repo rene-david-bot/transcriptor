@@ -273,7 +273,6 @@ const elements = {
   newSessionButton: $('#newSessionButton'),
   endSessionButton: $('#endSessionButton'),
   transcriptBoard: $('#transcriptBoard'),
-  transcriptLanguageChip: $('#transcriptLanguageChip'),
   transcriptViewSourceButton: $('#transcriptViewSource'),
   transcriptViewBothButton: $('#transcriptViewBoth'),
   transcriptViewTargetButton: $('#transcriptViewTarget'),
@@ -901,11 +900,6 @@ function applySettingsToForms() {
   }
   if (elements.transcriptTargetHeading) {
     elements.transcriptTargetHeading.textContent = getLanguageName(state.currentSession?.targetLanguage || settings.targetLanguage || '');
-  }
-  if (elements.transcriptLanguageChip) {
-    const sourceCode = formatLanguageCode(state.currentSession?.sourceLanguage || settings.sourceLanguage || '');
-    const targetCode = formatLanguageCode(state.currentSession?.targetLanguage || settings.targetLanguage || '');
-    elements.transcriptLanguageChip.textContent = `${sourceCode || 'source'} ↔ ${targetCode || 'target'}`;
   }
   applyTranscriptViewButtonLabels();
   applyTranscriptView();
