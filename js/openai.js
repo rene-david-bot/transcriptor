@@ -269,6 +269,7 @@ export class RealtimeTranscriptionClient {
     this.disposed = false;
     this.reconnectAttempt = 0;
     this.lastManualCommitAt = 0;
+    this.captureMuted = false;
   }
 
   async createAnswerSdpForModel({ offerSdp, transcriptionModel, conservative = false }) {
@@ -489,6 +490,15 @@ export class RealtimeTranscriptionClient {
       type: 'input_audio_buffer.commit',
       event_id: crypto.randomUUID(),
     });
+  }
+
+  setCaptureMuted(muted = false) {
+    this.captureMuted = Boolean(muted);
+    const tracks = this.mediaStream?.getAudioTracks?.() || [];
+    tracks.forEach((track) => {
+      track.enabled = !this.captureMuted;
+    });
+    return tracks.length > 0;
   }
 
   shouldIgnoreRealtimeError(payload, message = '') {

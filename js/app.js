@@ -1150,6 +1150,40 @@ function getLiveCommitDraftText() {
   return String(activeDraft || state.currentSession?.draftSource || '').trim();
 }
 
+function isLiveTranscriptCaptureManuallyPaused() {
+  return Boolean(state.currentSession && state.currentSession.status === 'active' && state.manualSpeakerPaused && state.manualSpeakerPauseReason === 'manual');
+}
+
+function syncLiveTranscriptCaptureState({ flushCurrentUtterance = false } = {}) {
+  if (!state.client?.setCaptureMuted) return false;
+
+  const shouldPauseCapture = isLiveTranscriptCaptureManuallyPaused();
+  const changed = state.client.setCaptureMuted(shouldPauseCapture);
+
+  if (shouldPauseCapture) {
+    clearLiveCommitTimer();
+    const shouldFlush =
+      flushCurrentUtterance &&
+      !state.liveCommitInFlight &&
+      (state.speechActive || Boolean(state.activeDraftItemId));
+
+    if (shouldFlush) {
+      state.liveCommitInFlight = true;
+      const sent = state.client.commitInputAudioBuffer?.();
+      if (!sent) {
+        state.liveCommitInFlight = false;
+      }
+    }
+    return changed;
+  }
+
+  if (state.speechActive && !state.liveCommitInFlight && !state.liveCommitTimer) {
+    scheduleLiveCommit();
+  }
+
+  return changed;
+}
+
 function countDraftWords(text) {
   return normalizeTranscript(text)
     .split(' ')
@@ -1609,6 +1643,7 @@ async function pauseManualSpeakerTimerOnly({ persist = true } = {}) {
   state.manualSpeakerGroupId = activeGroupId;
   clearPendingManualSpeakerChange();
   syncManualSpeakerStateToSession();
+  syncLiveTranscriptCaptureState({ flushCurrentUtterance: true });
 
   await applyManualSpeakerEventsToCurrentSession();
   if (persist) {
@@ -5854,6 +5889,7 @@ async function startListening({ silent = false } = {}) {
 
   try {
     await client.connect();
+    syncLiveTranscriptCaptureState();
     await ensureScreenWakeLock(true);
     refreshMicrophoneOptions({ silent: true }).catch(() => {});
     markListeningStart();
@@ -6036,6 +6072,7 @@ async function resumeManualSpeakerTimer({ persist = true, allowGroupContinuation
   state.manualSpeakerGroupId = shouldContinueGroup ? String(state.manualSpeakerGroupId || '').trim() : createManualSpeakerGroupId();
   clearPendingManualSpeakerChange();
   syncManualSpeakerStateToSession();
+  syncLiveTranscriptCaptureState();
 
   if (persist) {
     await persistManualSpeakerStateNow();
@@ -7140,6 +7177,8 @@ function buildDebugSnapshot() {
     liveState: elements.transcriptLiveState?.textContent || '',
     route: state.route,
     runtimeStatus: state.runtimeStatus,
+    manualSpeakerPauseReason: state.manualSpeakerPauseReason,
+    captureMuted: Boolean(state.client?.captureMuted),
     realtimeTranscriptionModel: state.settings.realtimeTranscriptionModel,
     clientTranscriptionModel: state.client?.transcriptionModel || '',
     segmentCount: state.currentSegments.length,
