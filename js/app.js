@@ -99,6 +99,8 @@ const STATUS_COPY = {
 const DRAFT_TRANSLATION_MIN_CHARS = 4;
 const DRAFT_TRANSLATION_INTERVAL_MS = 450;
 const DRAFT_TRANSLATION_ABORT_GROWTH_CHARS = 18;
+const MOBILE_DRAFT_TRANSLATION_INTERVAL_MS = 320;
+const MOBILE_DRAFT_TRANSLATION_ABORT_GROWTH_CHARS = 12;
 const LIVE_COMMIT_WARMUP_MS = 2200;
 const LIVE_COMMIT_INTERVAL_MS = 3800;
 const LIVE_COMMIT_RETRY_MS = 650;
@@ -109,6 +111,15 @@ const LIVE_COMMIT_SENTENCE_MIN_WORDS = 5;
 const LIVE_COMMIT_MAX_HOLD_MS = 6500;
 const LIVE_COMMIT_FALLBACK_MIN_CHARS = 18;
 const LIVE_COMMIT_FALLBACK_MIN_WORDS = 4;
+const MOBILE_LIVE_COMMIT_WARMUP_MS = 1800;
+const MOBILE_LIVE_COMMIT_INTERVAL_MS = 3200;
+const MOBILE_LIVE_COMMIT_MIN_CHARS = 36;
+const MOBILE_LIVE_COMMIT_MIN_WORDS = 6;
+const MOBILE_LIVE_COMMIT_SENTENCE_MIN_CHARS = 20;
+const MOBILE_LIVE_COMMIT_SENTENCE_MIN_WORDS = 4;
+const MOBILE_LIVE_COMMIT_MAX_HOLD_MS = 5200;
+const MOBILE_LIVE_COMMIT_FALLBACK_MIN_CHARS = 16;
+const MOBILE_LIVE_COMMIT_FALLBACK_MIN_WORDS = 3;
 const DISPLAY_ROW_TARGET_MS = 7000;
 const DISPLAY_ROW_MAX_MS = 10000;
 const DISPLAY_ROW_MAX_GAP_MS = 1800;
@@ -949,6 +960,50 @@ function isCompactTranscriptLayout() {
   return typeof window !== 'undefined' && window.matchMedia('(max-width: 720px)').matches;
 }
 
+function getDraftTranslationConfig() {
+  if (isCompactTranscriptLayout()) {
+    return {
+      intervalMs: MOBILE_DRAFT_TRANSLATION_INTERVAL_MS,
+      abortGrowthChars: MOBILE_DRAFT_TRANSLATION_ABORT_GROWTH_CHARS,
+    };
+  }
+
+  return {
+    intervalMs: DRAFT_TRANSLATION_INTERVAL_MS,
+    abortGrowthChars: DRAFT_TRANSLATION_ABORT_GROWTH_CHARS,
+  };
+}
+
+function getLiveCommitConfig() {
+  if (isCompactTranscriptLayout()) {
+    return {
+      warmupMs: MOBILE_LIVE_COMMIT_WARMUP_MS,
+      intervalMs: MOBILE_LIVE_COMMIT_INTERVAL_MS,
+      retryMs: LIVE_COMMIT_RETRY_MS,
+      minChars: MOBILE_LIVE_COMMIT_MIN_CHARS,
+      minWords: MOBILE_LIVE_COMMIT_MIN_WORDS,
+      sentenceMinChars: MOBILE_LIVE_COMMIT_SENTENCE_MIN_CHARS,
+      sentenceMinWords: MOBILE_LIVE_COMMIT_SENTENCE_MIN_WORDS,
+      maxHoldMs: MOBILE_LIVE_COMMIT_MAX_HOLD_MS,
+      fallbackMinChars: MOBILE_LIVE_COMMIT_FALLBACK_MIN_CHARS,
+      fallbackMinWords: MOBILE_LIVE_COMMIT_FALLBACK_MIN_WORDS,
+    };
+  }
+
+  return {
+    warmupMs: LIVE_COMMIT_WARMUP_MS,
+    intervalMs: LIVE_COMMIT_INTERVAL_MS,
+    retryMs: LIVE_COMMIT_RETRY_MS,
+    minChars: LIVE_COMMIT_MIN_CHARS,
+    minWords: LIVE_COMMIT_MIN_WORDS,
+    sentenceMinChars: LIVE_COMMIT_SENTENCE_MIN_CHARS,
+    sentenceMinWords: LIVE_COMMIT_SENTENCE_MIN_WORDS,
+    maxHoldMs: LIVE_COMMIT_MAX_HOLD_MS,
+    fallbackMinChars: LIVE_COMMIT_FALLBACK_MIN_CHARS,
+    fallbackMinWords: LIVE_COMMIT_FALLBACK_MIN_WORDS,
+  };
+}
+
 function getTranscriptModeNote(mode = state.liveTranscriptView) {
   if (mode === 'source') {
     return 'A rolling reading window keeps the current source chunk steady while older history stays collapsed below.';
@@ -1265,6 +1320,7 @@ function countDraftWords(text) {
 }
 
 function shouldCommitLiveDraftText(text = '', sinceLastCommitMs = 0) {
+  const liveCommitConfig = getLiveCommitConfig();
   const trimmed = String(text || '').trim();
   if (!trimmed) return false;
 
@@ -1272,17 +1328,17 @@ function shouldCommitLiveDraftText(text = '', sinceLastCommitMs = 0) {
   const words = countDraftWords(trimmed);
   const sentenceLike = /[.!?…:;]\s*$/.test(trimmed);
 
-  if (sentenceLike && (chars >= LIVE_COMMIT_SENTENCE_MIN_CHARS || words >= LIVE_COMMIT_SENTENCE_MIN_WORDS)) {
+  if (sentenceLike && (chars >= liveCommitConfig.sentenceMinChars || words >= liveCommitConfig.sentenceMinWords)) {
     return true;
   }
 
-  if (chars >= LIVE_COMMIT_MIN_CHARS || words >= LIVE_COMMIT_MIN_WORDS) {
+  if (chars >= liveCommitConfig.minChars || words >= liveCommitConfig.minWords) {
     return true;
   }
 
   return Boolean(
-    sinceLastCommitMs >= LIVE_COMMIT_MAX_HOLD_MS &&
-      (chars >= LIVE_COMMIT_FALLBACK_MIN_CHARS || words >= LIVE_COMMIT_FALLBACK_MIN_WORDS)
+    sinceLastCommitMs >= liveCommitConfig.maxHoldMs &&
+      (chars >= liveCommitConfig.fallbackMinChars || words >= liveCommitConfig.fallbackMinWords)
   );
 }
 
@@ -1296,6 +1352,7 @@ function canSendLiveCommit(text = getLiveCommitDraftText()) {
 }
 
 function requestLiveCommit() {
+  const liveCommitConfig = getLiveCommitConfig();
   clearLiveCommitTimer();
   if (!state.client || !state.speechActive || state.liveCommitInFlight) return;
 
@@ -1303,7 +1360,7 @@ function requestLiveCommit() {
     if (state.client && state.speechActive) {
       state.liveCommitTimer = window.setTimeout(() => {
         requestLiveCommit();
-      }, LIVE_COMMIT_RETRY_MS);
+      }, liveCommitConfig.retryMs);
     }
     return;
   }
@@ -1317,10 +1374,11 @@ function requestLiveCommit() {
   state.liveCommitInFlight = false;
   state.liveCommitTimer = window.setTimeout(() => {
     requestLiveCommit();
-  }, LIVE_COMMIT_RETRY_MS);
+  }, liveCommitConfig.retryMs);
 }
 
 function scheduleLiveCommit() {
+  const liveCommitConfig = getLiveCommitConfig();
   if (state.liveCommitInFlight) return;
   clearLiveCommitTimer();
   if (!state.client || !state.currentSession || !state.speechActive || state.currentSession.status === 'ended') {
@@ -1328,10 +1386,10 @@ function scheduleLiveCommit() {
   }
 
   const now = Date.now();
-  const warmupRemaining = Math.max(0, LIVE_COMMIT_WARMUP_MS - (state.speechStartedAtMs ? now - state.speechStartedAtMs : 0));
+  const warmupRemaining = Math.max(0, liveCommitConfig.warmupMs - (state.speechStartedAtMs ? now - state.speechStartedAtMs : 0));
   const intervalRemaining = Math.max(
     0,
-    LIVE_COMMIT_INTERVAL_MS - (state.lastLiveCommitAtMs ? now - state.lastLiveCommitAtMs : LIVE_COMMIT_INTERVAL_MS)
+    liveCommitConfig.intervalMs - (state.lastLiveCommitAtMs ? now - state.lastLiveCommitAtMs : liveCommitConfig.intervalMs)
   );
   const delay = Math.max(warmupRemaining, intervalRemaining);
 
@@ -6248,6 +6306,7 @@ function clearDraftState(itemId, { preserveVisibleDraft = false } = {}) {
 
 function scheduleDraftTranslation(itemId, text) {
   if (!state.currentSession) return;
+  const draftTranslationConfig = getDraftTranslationConfig();
 
   const trimmedText = text.trim();
   if (!trimmedText || trimmedText.length < DRAFT_TRANSLATION_MIN_CHARS) {
@@ -6272,7 +6331,7 @@ function scheduleDraftTranslation(itemId, text) {
     (
       active.itemId !== itemId ||
       (trimmedText !== active.text &&
-        (trimmedText.length - (active.text?.length || 0) >= DRAFT_TRANSLATION_ABORT_GROWTH_CHARS ||
+        (trimmedText.length - (active.text?.length || 0) >= draftTranslationConfig.abortGrowthChars ||
           /[.!?,:;]\s*$/.test(trimmedText)))
     );
 
@@ -6286,8 +6345,9 @@ function scheduleDraftTranslation(itemId, text) {
 function processDraftTranslationQueue() {
   if (!state.currentSession || !state.draftTranslationPending) return;
   if (state.draftTranslationInFlight) return;
+  const draftTranslationConfig = getDraftTranslationConfig();
 
-  const waitMs = Math.max(0, DRAFT_TRANSLATION_INTERVAL_MS - (Date.now() - state.draftTranslationLastStartedAt));
+  const waitMs = Math.max(0, draftTranslationConfig.intervalMs - (Date.now() - state.draftTranslationLastStartedAt));
   window.clearTimeout(state.draftTranslationTimer);
   state.draftTranslationTimer = window.setTimeout(async () => {
     const snapshot = state.draftTranslationPending;
@@ -7261,6 +7321,10 @@ function buildDebugSnapshot() {
   const transcriptListText = elements.transcriptList?.innerText || '';
   const liveBandText = elements.transcriptLiveBand?.innerText || '';
   return {
+    compactLayout: isCompactTranscriptLayout(),
+    viewportWidth: typeof window !== 'undefined' ? window.innerWidth || 0 : 0,
+    liveCommitConfig: getLiveCommitConfig(),
+    draftTranslationConfig: getDraftTranslationConfig(),
     sourceDraft: elements.sourceDraftText?.textContent || '',
     sourceState: elements.sourceDraftState?.textContent || '',
     sourceCarry: elements.sourceDraftCarryText?.textContent || '',
