@@ -1,10 +1,10 @@
-const CACHE_NAME = 'transcripto-shell-v71';
+const CACHE_NAME = 'transcripto-shell-v72';
 const APP_SHELL = [
   './',
   './index.html',
   './styles.css',
   './manifest.webmanifest',
-  './js/app.js?v=20260510-manual-transcript-pause',
+  './js/app.js?v=20260510-manual-pause-suppress-transcript',
   './js/db.js?v=20260509-storage-size',
   './js/exporters.js',
   './js/openai.js',

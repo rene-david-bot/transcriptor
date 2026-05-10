@@ -152,6 +152,9 @@ const state = {
   liveCommitTimer: null,
   liveCommitInFlight: false,
   lastLiveCommitAtMs: 0,
+  manualTranscriptBlockedItemIds: new Set(),
+  manualTranscriptAllowedItemIds: new Set(),
+  manualTranscriptAllowNextCommittedItem: false,
   liveDraftCarryItemId: null,
   liveDraftCarrySource: '',
   liveDraftCarryTranslation: '',
@@ -326,7 +329,6 @@ const elements = {
   speakerChangePendingHint: $('#speakerChangePendingHint'),
   speakerChangeButton: $('#speakerChangeButton'),
   speakerChangePauseButton: $('#speakerChangePauseButton'),
-  speakerChangeStopButton: $('#speakerChangeStopButton'),
   speakerChangeResetButton: $('#speakerChangeResetButton'),
   speakerChangeCurrentSelect: $('#speakerChangeCurrentSelect'),
   speakerChangeCustomInput: $('#speakerChangeCustomInput'),
@@ -1150,6 +1152,82 @@ function getLiveCommitDraftText() {
   return String(activeDraft || state.currentSession?.draftSource || '').trim();
 }
 
+function resetManualTranscriptSuppressionState() {
+  state.manualTranscriptBlockedItemIds.clear();
+  state.manualTranscriptAllowedItemIds.clear();
+  state.manualTranscriptAllowNextCommittedItem = false;
+}
+
+function allowManualTranscriptItem(itemId) {
+  const normalizedItemId = String(itemId || '').trim();
+  if (!normalizedItemId) return false;
+  state.manualTranscriptBlockedItemIds.delete(normalizedItemId);
+  state.manualTranscriptAllowedItemIds.add(normalizedItemId);
+  return true;
+}
+
+function suppressManualTranscriptItem(itemId) {
+  const normalizedItemId = String(itemId || '').trim();
+  if (!normalizedItemId) return false;
+  state.manualTranscriptAllowedItemIds.delete(normalizedItemId);
+  state.manualTranscriptBlockedItemIds.add(normalizedItemId);
+  state.commitMetaByItemId.delete(normalizedItemId);
+  clearDraftState(normalizedItemId);
+  return true;
+}
+
+function releaseManualTranscriptItem(itemId) {
+  const normalizedItemId = String(itemId || '').trim();
+  if (!normalizedItemId) return false;
+  state.manualTranscriptAllowedItemIds.delete(normalizedItemId);
+  state.manualTranscriptBlockedItemIds.delete(normalizedItemId);
+  return true;
+}
+
+function shouldSuppressManualTranscriptItem(itemId) {
+  const normalizedItemId = String(itemId || '').trim();
+  if (!normalizedItemId) return false;
+  if (state.manualTranscriptBlockedItemIds.has(normalizedItemId)) return true;
+  if (!isLiveTranscriptCaptureManuallyPaused()) return false;
+  return !state.manualTranscriptAllowedItemIds.has(normalizedItemId);
+}
+
+function trackManualTranscriptPauseStart({ flushCurrentUtterance = false } = {}) {
+  const activeItemId = String(state.activeDraftItemId || '').trim();
+  if (activeItemId) {
+    allowManualTranscriptItem(activeItemId);
+  }
+  state.manualTranscriptAllowNextCommittedItem = Boolean(flushCurrentUtterance && !activeItemId && state.speechActive);
+  clearLiveCommitTimer();
+  flushSpeechClock();
+  state.speechActive = false;
+  renderSessionSummary();
+  renderDrafts();
+}
+
+function trackManualTranscriptPauseEnd() {
+  state.manualTranscriptAllowNextCommittedItem = false;
+}
+
+function allowCommittedTranscriptItemDuringManualPause(itemId) {
+  const normalizedItemId = String(itemId || '').trim();
+  if (!normalizedItemId) {
+    state.manualTranscriptAllowNextCommittedItem = false;
+    return false;
+  }
+  if (state.manualTranscriptBlockedItemIds.has(normalizedItemId)) {
+    state.manualTranscriptAllowNextCommittedItem = false;
+    return false;
+  }
+  const alreadyAllowed = state.manualTranscriptAllowedItemIds.has(normalizedItemId);
+  const shouldAllow = alreadyAllowed || state.manualTranscriptAllowNextCommittedItem;
+  state.manualTranscriptAllowNextCommittedItem = false;
+  if (shouldAllow) {
+    allowManualTranscriptItem(normalizedItemId);
+  }
+  return shouldAllow;
+}
+
 function isLiveTranscriptCaptureManuallyPaused() {
   return Boolean(state.currentSession && state.currentSession.status === 'active' && state.manualSpeakerPaused && state.manualSpeakerPauseReason === 'manual');
 }
@@ -1644,6 +1722,7 @@ async function pauseManualSpeakerTimerOnly({ persist = true } = {}) {
   clearPendingManualSpeakerChange();
   syncManualSpeakerStateToSession();
   syncLiveTranscriptCaptureState({ flushCurrentUtterance: true });
+  trackManualTranscriptPauseStart({ flushCurrentUtterance: true });
 
   await applyManualSpeakerEventsToCurrentSession();
   if (persist) {
@@ -3934,17 +4013,6 @@ function renderManualSpeakerControls() {
     elements.speakerChangePauseButton.classList.toggle('speaker-change-action--pause', mode === 'pause');
     elements.speakerChangePauseButton.classList.toggle('speaker-change-action--resume', mode === 'resume');
   }
-  if (elements.speakerChangeStopButton) {
-    const runtime = state.runtimeStatus;
-    const canStop = Boolean(session && ['listening', 'connecting', 'reconnecting'].includes(runtime));
-    const canResume = Boolean(session && session.status !== 'ended' && ['paused', 'stopped', 'error', 'idle'].includes(runtime));
-    const mode = canStop ? 'stop' : 'resume';
-    elements.speakerChangeStopButton.textContent = canStop ? 'Stop' : 'Resume';
-    elements.speakerChangeStopButton.disabled = !(canStop || canResume);
-    elements.speakerChangeStopButton.dataset.mode = mode;
-    elements.speakerChangeStopButton.classList.toggle('speaker-change-action--stop', mode === 'stop');
-    elements.speakerChangeStopButton.classList.toggle('speaker-change-action--resume', mode === 'resume');
-  }
   if (elements.speakerChangeMarkers) {
     if (!manualRows.rows.length) {
       elements.speakerChangeMarkers.innerHTML = '';
@@ -4204,6 +4272,7 @@ async function loadSession(sessionId) {
     : 'This browser does not support background speaker detection.';
   state.draftByItemId.clear();
   state.commitMetaByItemId.clear();
+  resetManualTranscriptSuppressionState();
   state.activeDraftItemId = null;
   state.transcriptPinnedToBottom = true;
   flushListeningClock();
@@ -5743,6 +5812,7 @@ async function handleStartFromSetup(event) {
   state.manualSpeakerCustomNameDraft = '';
   state.manualSpeakerEditingEventId = '';
   state.transcriptPinnedToBottom = true;
+  resetManualTranscriptSuppressionState();
   clearLiveDraftCarry();
   state.currentSession.status = 'active';
   state.currentSession.runtimeStatus = 'connecting';
@@ -6023,6 +6093,7 @@ async function pauseManualSpeakerTimer({ persist = true } = {}) {
     state.manualSpeakerPauseReason = 'session';
     state.manualSpeakerGroupId = '';
     state.manualSpeakerActiveLabel = '';
+    trackManualTranscriptPauseEnd();
     clearPendingManualSpeakerChange();
     syncManualSpeakerStateToSession();
     if (persist) {
@@ -6038,6 +6109,7 @@ async function pauseManualSpeakerTimer({ persist = true } = {}) {
   state.manualSpeakerPaused = true;
   state.manualSpeakerPauseReason = 'session';
   state.manualSpeakerGroupId = '';
+  trackManualTranscriptPauseEnd();
   syncManualSpeakerStateToSession();
 
   if (persist) {
@@ -6072,6 +6144,7 @@ async function resumeManualSpeakerTimer({ persist = true, allowGroupContinuation
   state.manualSpeakerGroupId = shouldContinueGroup ? String(state.manualSpeakerGroupId || '').trim() : createManualSpeakerGroupId();
   clearPendingManualSpeakerChange();
   syncManualSpeakerStateToSession();
+  trackManualTranscriptPauseEnd();
   syncLiveTranscriptCaptureState();
 
   if (persist) {
@@ -6427,6 +6500,8 @@ async function finalizeSegmentFromEvent(event) {
 
 async function handleRealtimeEvent(event) {
   if (!state.currentSession) return;
+  const manualTranscriptPauseActive = isLiveTranscriptCaptureManuallyPaused();
+  const itemId = String(event?.item_id || '').trim();
 
   if (event.type === 'session.created') {
     state.currentSession.activeConnectionId = event.session?.id || event.session_id || crypto.randomUUID();
@@ -6435,6 +6510,13 @@ async function handleRealtimeEvent(event) {
   }
 
   if (event.type === 'input_audio_buffer.speech_started') {
+    if (manualTranscriptPauseActive) {
+      state.speechActive = false;
+      state.liveCommitInFlight = false;
+      clearLiveCommitTimer();
+      renderDrafts();
+      return;
+    }
     state.speechActive = true;
     state.liveCommitInFlight = false;
     state.lastLiveCommitAtMs = 0;
@@ -6457,9 +6539,14 @@ async function handleRealtimeEvent(event) {
 
   if (event.type === 'input_audio_buffer.committed') {
     state.liveCommitInFlight = false;
+    const allowedDuringManualPause = manualTranscriptPauseActive ? allowCommittedTranscriptItemDuringManualPause(itemId) : false;
+    if (manualTranscriptPauseActive && itemId && !allowedDuringManualPause) {
+      suppressManualTranscriptItem(itemId);
+      return;
+    }
     state.lastLiveCommitAtMs = Date.now();
     buildCommitMeta(event.item_id, event.previous_item_id);
-    if (state.speechActive) {
+    if (state.speechActive && !manualTranscriptPauseActive) {
       scheduleLiveCommit();
     }
     return;
@@ -6468,6 +6555,10 @@ async function handleRealtimeEvent(event) {
   if (event.type === 'transcripto.manual_commit.rejected') {
     state.liveCommitInFlight = false;
     state.lastLiveCommitAtMs = Date.now();
+    if (manualTranscriptPauseActive) {
+      state.manualTranscriptAllowNextCommittedItem = false;
+      return;
+    }
     if (state.speechActive) {
       scheduleLiveCommit();
     }
@@ -6480,15 +6571,28 @@ async function handleRealtimeEvent(event) {
   }
 
   if (event.type === 'conversation.item.input_audio_transcription.delta') {
+    if (shouldSuppressManualTranscriptItem(itemId)) {
+      suppressManualTranscriptItem(itemId);
+      return;
+    }
     updateDraft(event.item_id, event.delta || '');
     return;
   }
 
   if (event.type === 'conversation.item.input_audio_transcription.completed') {
-    finalizeSegmentFromEvent(event).catch((error) => {
-      console.error('Segment finalization failed', error);
-      showToast(error?.message || 'A segment failed to finalize.', 5000);
-    });
+    if (shouldSuppressManualTranscriptItem(itemId)) {
+      suppressManualTranscriptItem(itemId);
+      releaseManualTranscriptItem(itemId);
+      return;
+    }
+    finalizeSegmentFromEvent(event)
+      .catch((error) => {
+        console.error('Segment finalization failed', error);
+        showToast(error?.message || 'A segment failed to finalize.', 5000);
+      })
+      .finally(() => {
+        releaseManualTranscriptItem(itemId);
+      });
     return;
   }
 
@@ -6901,11 +7005,6 @@ function bindEvents() {
     const mode = elements.speakerChangePauseButton?.dataset.mode || 'resume';
     const action = mode === 'pause' ? pauseManualSpeakerTimerOnly() : resumeManualSpeakerTimer({ allowGroupContinuation: true });
     action.catch((error) => console.warn('Unable to update manual speaker pause state', error));
-  });
-  elements.speakerChangeStopButton?.addEventListener('click', () => {
-    const mode = elements.speakerChangeStopButton?.dataset.mode || 'resume';
-    const action = mode === 'stop' ? stopListening() : startListening();
-    action.catch((error) => console.warn('Unable to update manual speaker timer', error));
   });
   elements.speakerChangeResetButton?.addEventListener('click', () => {
     resetManualSpeakerChanges().catch((error) => console.warn('Unable to reset manual speaker changes', error));
@@ -7383,6 +7482,7 @@ async function createDebugSession({
   state.manualSpeakerCurrentLabel = getSpeakerOptionsForManualControls(session)[0] || 'Speaker A';
   state.manualSpeakerCustomNameDraft = '';
   state.transcriptPinnedToBottom = true;
+  resetManualTranscriptSuppressionState();
   clearLiveDraftCarry();
   await syncLastActiveSession();
   renderCurrentView();
