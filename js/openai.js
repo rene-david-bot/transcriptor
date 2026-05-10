@@ -543,6 +543,7 @@ export async function diarizeAudioChunk({ apiKey, audioBlob, filename, language,
   formData.set('file', audioBlob, filename || 'speaker-chunk.webm');
   formData.set('model', SPEAKER_DIARIZATION_MODEL);
   formData.set('response_format', 'diarized_json');
+  formData.set('chunking_strategy', 'auto');
   formData.set('temperature', '0');
   if (language) {
     formData.set('language', normalizeLanguageCode(language));

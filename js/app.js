@@ -191,6 +191,7 @@ const state = {
   micLevelStereo: false,
   micLevelTimer: null,
   sessionRecordingPersistTasks: new Set(),
+  sessionRecordingFlushPromise: null,
   sessionRecordings: [],
   sessionPlaybackClipIndex: -1,
   sessionPlaybackObjectUrl: '',
@@ -544,6 +545,23 @@ function getManualSpeakerEventsForSession(session = state.currentSession) {
 
 function recordingTimeToLocalOffset(recording, absoluteMs) {
   return Math.max(0, (absoluteMs || 0) - Number(recording?.startMs || 0));
+}
+
+function getRecordingDurationMs(recording) {
+  const startMs = Number(recording?.startMs || 0);
+  const endMs = Number(recording?.endMs || startMs);
+  return Math.max(0, endMs - startMs);
+}
+
+function clampRecordingSeekOffsetMs(recording, absoluteMs) {
+  return Math.min(recordingTimeToLocalOffset(recording, absoluteMs), getRecordingDurationMs(recording));
+}
+
+function getLatestSavedRecordingEndMs(recordings = state.sessionRecordings) {
+  return recordings.reduce((max, recording) => {
+    if (!hasRecordingBlob(recording)) return max;
+    return Math.max(max, Number(recording?.endMs || recording?.startMs || 0));
+  }, 0);
 }
 
 function getSessionRecordingDurationMs(recordings = state.sessionRecordings, session = state.currentSession) {
@@ -3327,20 +3345,13 @@ function updatePlaybackHighlight({ shouldScroll = false, forceScroll = false } =
 }
 
 function findRecordingIndexForTime(absoluteMs) {
-  const targetMs = Number(absoluteMs || 0);
-  const exactIndex = state.sessionRecordings.findIndex((recording) => {
-    if (!hasRecordingBlob(recording)) return false;
-    const startMs = Number(recording.startMs || 0);
-    const endMs = Number(recording.endMs || startMs);
-    return targetMs >= startMs && targetMs <= endMs + 300;
-  });
-
+  const exactIndex = findRecordingIndexCoveringTime(absoluteMs);
   if (exactIndex !== -1) return exactIndex;
 
   let fallbackIndex = -1;
   state.sessionRecordings.forEach((recording, index) => {
     if (!hasRecordingBlob(recording)) return;
-    if (targetMs >= Number(recording.startMs || 0)) {
+    if (Number(absoluteMs || 0) >= Number(recording.startMs || 0)) {
       fallbackIndex = index;
     }
   });
@@ -3348,6 +3359,97 @@ function findRecordingIndexForTime(absoluteMs) {
   if (fallbackIndex !== -1) return fallbackIndex;
 
   return state.sessionRecordings.findIndex((recording) => hasRecordingBlob(recording));
+}
+
+function findRecordingIndexCoveringTime(absoluteMs) {
+  const targetMs = Number(absoluteMs || 0);
+  return state.sessionRecordings.findIndex((recording) => {
+    if (!hasRecordingBlob(recording)) return false;
+    const startMs = Number(recording.startMs || 0);
+    const endMs = Number(recording.endMs || startMs);
+    return targetMs >= startMs && targetMs <= endMs + 300;
+  });
+}
+
+async function flushSessionRecordingData({ targetMs = null, timeoutMs = 2500 } = {}) {
+  if (state.sessionRecordingFlushPromise) {
+    return state.sessionRecordingFlushPromise;
+  }
+
+  const recorder = state.sessionRecorder;
+  if (!recorder || recorder.state === 'inactive' || typeof recorder.requestData !== 'function') {
+    return false;
+  }
+
+  const flushPromise = (async () => {
+    const desiredTargetMs = targetMs === null ? null : clampSessionPlaybackMs(targetMs);
+    const initialRecordingCount = state.sessionRecordings.length;
+    const initialLatestEndMs = getLatestSavedRecordingEndMs();
+
+    try {
+      recorder.requestData();
+    } catch (error) {
+      console.warn('Unable to flush the current session recording chunk', error);
+      return false;
+    }
+
+    const deadline = Date.now() + Math.max(400, Number(timeoutMs || 0));
+    while (Date.now() < deadline) {
+      await wait(120);
+      if (state.sessionRecordingPersistTasks.size) {
+        await waitForPendingSessionRecordingWrites();
+      }
+
+      if (desiredTargetMs !== null && findRecordingIndexCoveringTime(desiredTargetMs) !== -1) {
+        return true;
+      }
+
+      if (
+        desiredTargetMs === null &&
+        (state.sessionRecordings.length > initialRecordingCount || getLatestSavedRecordingEndMs() > initialLatestEndMs)
+      ) {
+        return true;
+      }
+    }
+
+    if (desiredTargetMs !== null) {
+      return findRecordingIndexCoveringTime(desiredTargetMs) !== -1;
+    }
+
+    return state.sessionRecordings.length > initialRecordingCount || getLatestSavedRecordingEndMs() > initialLatestEndMs;
+  })();
+
+  state.sessionRecordingFlushPromise = flushPromise;
+  try {
+    return await flushPromise;
+  } finally {
+    if (state.sessionRecordingFlushPromise === flushPromise) {
+      state.sessionRecordingFlushPromise = null;
+    }
+  }
+}
+
+async function ensureSessionAudioCoverage(targetMs) {
+  const desiredTargetMs = clampSessionPlaybackMs(targetMs);
+  if (findRecordingIndexCoveringTime(desiredTargetMs) !== -1) {
+    return true;
+  }
+
+  const session = state.currentSession;
+  const livePositionMs = session?.status === 'active' ? getEffectiveActiveDuration() : Number(session?.activeDurationMs || 0);
+  const latestSavedEndMs = getLatestSavedRecordingEndMs();
+  const canFlushLiveRecorder = Boolean(
+    session?.status === 'active' &&
+      state.sessionRecorder &&
+      state.sessionRecorder.state !== 'inactive' &&
+      livePositionMs > latestSavedEndMs + 250
+  );
+
+  if (!canFlushLiveRecorder) {
+    return false;
+  }
+
+  return flushSessionRecordingData({ targetMs: desiredTargetMs });
 }
 
 async function loadRecordingClip(index, { autoplay = false, seekMs = null, forceScroll = false, userGesture = false } = {}) {
@@ -3358,7 +3460,7 @@ async function loadRecordingClip(index, { autoplay = false, seekMs = null, force
   state.sessionPlaybackPreviewMs = null;
   if (state.sessionPlaybackClipIndex === index && audio.src) {
     if (seekMs !== null) {
-      audio.currentTime = Math.max(0, recordingTimeToLocalOffset(recording, seekMs) / 1000);
+      audio.currentTime = Math.max(0, clampRecordingSeekOffsetMs(recording, seekMs) / 1000);
     }
     renderRecordingReview();
     if (autoplay) {
@@ -3392,7 +3494,7 @@ async function loadRecordingClip(index, { autoplay = false, seekMs = null, force
   }).catch(() => {});
   ensureReviewAudioPlaybackDefaults();
   if (seekMs !== null) {
-    audio.currentTime = Math.max(0, recordingTimeToLocalOffset(recording, seekMs) / 1000);
+    audio.currentTime = Math.max(0, clampRecordingSeekOffsetMs(recording, seekMs) / 1000);
   }
   renderRecordingReview();
   updatePlaybackHighlight({ shouldScroll: true, forceScroll });
@@ -3408,7 +3510,8 @@ async function loadRecordingClip(index, { autoplay = false, seekMs = null, force
 
 async function playSessionAudioAtMs(absoluteMs, { autoplay = true, userGesture = false } = {}) {
   const targetMs = clampSessionPlaybackMs(absoluteMs);
-  const clipIndex = findRecordingIndexForTime(targetMs);
+  const hasCoverage = await ensureSessionAudioCoverage(targetMs);
+  const clipIndex = hasCoverage ? findRecordingIndexCoveringTime(targetMs) : -1;
   if (clipIndex === -1) return false;
   return loadRecordingClip(clipIndex, { autoplay, seekMs: targetMs, forceScroll: true, userGesture });
 }
@@ -3425,7 +3528,7 @@ function primeReviewAudioPlaybackForUserGesture(targetMs = null) {
     const recording = state.sessionRecordings[clipIndex];
     if (recording) {
       try {
-        audio.currentTime = Math.max(0, recordingTimeToLocalOffset(recording, desiredMs) / 1000);
+        audio.currentTime = Math.max(0, clampRecordingSeekOffsetMs(recording, desiredMs) / 1000);
       } catch {
         // ignore seek priming errors
       }
@@ -3466,7 +3569,11 @@ async function seekSessionAudioToMs(absoluteMs, { autoplay = null, forceScroll =
 async function seekSessionAudioByDeltaMs(deltaMs, { autoplay = true, userGesture = false } = {}) {
   const currentPlaybackMs = getVisibleSessionPlaybackMs();
   const baseMs = currentPlaybackMs === null ? 0 : currentPlaybackMs;
-  return seekSessionAudioToMs(baseMs + Number(deltaMs || 0), { autoplay, forceScroll: true, userGesture });
+  const played = await seekSessionAudioToMs(baseMs + Number(deltaMs || 0), { autoplay, forceScroll: true, userGesture });
+  if (!played) {
+    showToast('No saved audio clip covers that part yet.', 3000);
+  }
+  return played;
 }
 
 async function playReviewAudio({ userGesture = false } = {}) {
@@ -3475,8 +3582,10 @@ async function playReviewAudio({ userGesture = false } = {}) {
   ensureReviewAudioPlaybackDefaults();
   if (state.sessionPlaybackClipIndex < 0) {
     const initialPlaybackMs = getVisibleSessionPlaybackMs() || 0;
-    const initialIndex = Math.max(0, findRecordingIndexForTime(initialPlaybackMs));
-    await loadRecordingClip(initialIndex, { autoplay: true, seekMs: initialPlaybackMs, forceScroll: true, userGesture });
+    const played = await playSessionAudioAtMs(initialPlaybackMs, { autoplay: true, userGesture });
+    if (!played) {
+      showToast('No saved audio clip covers that part yet.', 3000);
+    }
     return;
   }
   if (audio.ended && state.sessionPlaybackClipIndex >= state.sessionRecordings.length - 1) {
@@ -3523,9 +3632,13 @@ async function toggleReviewAudioPlayback() {
   await playReviewAudio({ userGesture: true });
 }
 
-function commitReviewAudioSeekFromControl({ userGesture = false } = {}) {
+async function commitReviewAudioSeekFromControl({ userGesture = false } = {}) {
   const nextValue = Number(elements.reviewProgressInput?.value || 0);
-  return seekSessionAudioToMs(nextValue, { autoplay: true, forceScroll: true, userGesture });
+  const played = await seekSessionAudioToMs(nextValue, { autoplay: true, forceScroll: true, userGesture });
+  if (!played) {
+    showToast('No saved audio clip covers that part yet.', 3000);
+  }
+  return played;
 }
 
 function renderRecordingReview() {
@@ -4723,6 +4836,7 @@ async function stopSessionRecording() {
   await waitForPendingSessionRecordingWrites();
 
   stopSpeakerTracks(state.sessionRecordingStream);
+  state.sessionRecordingFlushPromise = null;
   state.sessionRecorder = null;
   state.sessionRecordingStream = null;
   state.sessionRecordingMimeType = '';
@@ -4746,6 +4860,7 @@ async function startSessionRecording(stream) {
     let chunkStartMs = getEffectiveActiveDuration();
 
     state.sessionRecorder = recorder;
+    state.sessionRecordingFlushPromise = null;
     state.sessionRecordingStream = stream;
     state.sessionRecordingMimeType = effectiveMimeType;
     state.sessionRecordingChunkStartMs = chunkStartMs;
