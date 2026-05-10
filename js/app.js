@@ -207,9 +207,11 @@ const state = {
   manualSpeakerEvents: [],
   manualSpeakerOpenStartMs: null,
   manualSpeakerActiveLabel: '',
+  manualSpeakerGroupId: '',
   manualSpeakerBaseOffsetMs: 0,
   manualSpeakerElapsedMs: 0,
   manualSpeakerPaused: true,
+  manualSpeakerPauseReason: 'idle',
   manualSpeakerCurrentLabel: '',
   manualSpeakerPendingChangeAtMs: null,
   manualSpeakerCustomNameDraft: '',
@@ -324,6 +326,7 @@ const elements = {
   speakerChangePendingHint: $('#speakerChangePendingHint'),
   speakerChangeButton: $('#speakerChangeButton'),
   speakerChangePauseButton: $('#speakerChangePauseButton'),
+  speakerChangeStopButton: $('#speakerChangeStopButton'),
   speakerChangeResetButton: $('#speakerChangeResetButton'),
   speakerChangeCurrentSelect: $('#speakerChangeCurrentSelect'),
   speakerChangeCustomInput: $('#speakerChangeCustomInput'),
@@ -495,6 +498,7 @@ function normalizeManualSpeakerSegments(entries = [], session = state.currentSes
       .map((entry, index) => ({
         ...entry,
         id: getManualSpeakerEntryId(entry, index),
+        groupId: String(entry?.groupId || entry?.id || `manual-speaker-group-${index + 1}`).trim(),
         speakerLabel: String(entry?.speakerLabel || '').trim(),
         startMs: Math.max(0, Number(entry?.startMs || 0)),
         endMs: Math.max(0, Number(entry?.endMs || entry?.startMs || 0)),
@@ -525,6 +529,7 @@ function normalizeManualSpeakerSegments(entries = [], session = state.currentSes
       if (endMs <= startMs) return null;
       return {
         id: entry.id,
+        groupId: entry.id,
         speakerLabel: entry.speakerLabel,
         startMs,
         endMs,
@@ -599,6 +604,10 @@ function getManualSpeakerElapsedMs() {
 
 function isManualSpeakerTimerRunning() {
   return Boolean(state.currentSession && state.currentSession.status === 'active' && !state.manualSpeakerPaused);
+}
+
+function isManualSpeakerOnlyPaused() {
+  return Boolean(state.currentSession && state.currentSession.status === 'active' && state.manualSpeakerPaused);
 }
 
 function formatShortTime(isoString) {
@@ -1489,17 +1498,23 @@ function updatePendingManualSpeakerChangeForCurrentLabel(session = state.current
   return setPendingManualSpeakerChangeAtCurrentPosition(session);
 }
 
-function addManualSpeakerSegment(speakerLabel, startMs, endMs) {
+function createManualSpeakerGroupId() {
+  return crypto.randomUUID();
+}
+
+function addManualSpeakerSegment(speakerLabel, startMs, endMs, { groupId = state.manualSpeakerGroupId || '' } = {}) {
   const normalizedLabel = normalizeManualSpeakerName(speakerLabel);
   const normalizedStartMs = Math.max(0, Math.round(Number(startMs || 0)));
   const normalizedEndMs = Math.max(normalizedStartMs, Math.round(Number(endMs || 0)));
   if (!normalizedLabel || normalizedEndMs <= normalizedStartMs) return false;
+  const normalizedGroupId = String(groupId || '').trim() || createManualSpeakerGroupId();
 
   state.manualSpeakerEvents = normalizeManualSpeakerSegments(
     [
       ...state.manualSpeakerEvents,
       {
         id: crypto.randomUUID(),
+        groupId: normalizedGroupId,
         speakerLabel: normalizedLabel,
         startMs: normalizedStartMs,
         endMs: normalizedEndMs,
@@ -1520,10 +1535,13 @@ async function splitManualSpeakerSpan({ atMs = getManualSpeakerSessionPositionMs
   const currentLabel = syncManualSpeakerSelectionFromUi();
   const openStartMs = Math.max(0, Number(state.manualSpeakerOpenStartMs || 0));
   const splitAtMs = Math.max(openStartMs, absoluteAtMs);
+  const activeGroupId = String(state.manualSpeakerGroupId || '').trim() || createManualSpeakerGroupId();
 
-  const didAddSegment = addManualSpeakerSegment(currentLabel, openStartMs, splitAtMs);
+  const didAddSegment = addManualSpeakerSegment(currentLabel, openStartMs, splitAtMs, { groupId: activeGroupId });
   state.manualSpeakerOpenStartMs = splitAtMs;
   state.manualSpeakerActiveLabel = normalizeManualSpeakerName(currentLabel);
+  state.manualSpeakerGroupId = createManualSpeakerGroupId();
+  state.manualSpeakerPauseReason = 'none';
   clearPendingManualSpeakerChange();
   syncManualSpeakerStateToSession();
 
@@ -1544,9 +1562,51 @@ async function commitCurrentManualSpeakerSpan({ atMs = getManualSpeakerSessionPo
   const stopAtMs = Math.max(0, Math.round(Number(atMs || 0)));
   const currentLabel = syncManualSpeakerSelectionFromUi();
   const openStartMs = Math.max(0, Number(state.manualSpeakerOpenStartMs || 0));
-  const changed = addManualSpeakerSegment(currentLabel, openStartMs, stopAtMs);
+  const activeGroupId = String(state.manualSpeakerGroupId || '').trim() || createManualSpeakerGroupId();
+  const changed = addManualSpeakerSegment(currentLabel, openStartMs, stopAtMs, { groupId: activeGroupId });
   state.manualSpeakerOpenStartMs = null;
   state.manualSpeakerActiveLabel = '';
+  state.manualSpeakerGroupId = '';
+  state.manualSpeakerPauseReason = 'session';
+  clearPendingManualSpeakerChange();
+  syncManualSpeakerStateToSession();
+
+  await applyManualSpeakerEventsToCurrentSession();
+  if (persist) {
+    await persistManualSpeakerStateNow();
+  }
+  renderManualSpeakerControls();
+  return changed;
+}
+
+async function pauseManualSpeakerTimerOnly({ persist = true } = {}) {
+  if (!state.currentSession || state.currentSession.status !== 'active') {
+    renderManualSpeakerControls();
+    return false;
+  }
+  if (state.manualSpeakerPaused) {
+    state.manualSpeakerPauseReason = 'manual';
+    syncManualSpeakerStateToSession();
+    if (persist) {
+      await persistManualSpeakerStateNow();
+    }
+    renderManualSpeakerControls();
+    return false;
+  }
+
+  syncManualSpeakerSelectionFromUi();
+  const pauseAtMs = Math.max(0, getManualSpeakerSessionPositionMs());
+  const currentLabel = normalizeManualSpeakerName(state.manualSpeakerCurrentLabel || state.manualSpeakerActiveLabel || getResolvedManualSpeakerSelection());
+  const openStartMs = state.manualSpeakerOpenStartMs === null ? null : Math.max(0, Number(state.manualSpeakerOpenStartMs || 0));
+  const activeGroupId = String(state.manualSpeakerGroupId || '').trim() || createManualSpeakerGroupId();
+  const changed = openStartMs === null ? false : addManualSpeakerSegment(currentLabel, openStartMs, pauseAtMs, { groupId: activeGroupId });
+
+  state.manualSpeakerElapsedMs = getManualSpeakerElapsedMs();
+  state.manualSpeakerPaused = true;
+  state.manualSpeakerPauseReason = 'manual';
+  state.manualSpeakerOpenStartMs = null;
+  state.manualSpeakerActiveLabel = currentLabel;
+  state.manualSpeakerGroupId = activeGroupId;
   clearPendingManualSpeakerChange();
   syncManualSpeakerStateToSession();
 
@@ -3730,23 +3790,40 @@ function renderRecordingReview() {
 function buildManualSpeakerRowsForDisplay() {
   const segments = getManualSpeakerEventsForSession(state.currentSession);
   let runningTotalMs = 0;
-  const eventRows = segments
-    .map((segment, index) => {
-      const durationMs = Math.max(0, Number(segment.endMs || 0) - Number(segment.startMs || 0));
-      runningTotalMs += durationMs;
-      return {
-        ...segment,
-        id: getManualSpeakerEntryId(segment, index),
-        speakerLabel: String(segment.speakerLabel || '').trim() || 'Speaker',
-        changeMs: durationMs,
-        overallMs: runningTotalMs,
-        playMs: Math.max(0, Number(segment.startMs || 0)),
-        displayMode: 'segment',
-        isBaseline: false,
-      };
-    })
-    .filter((segment) => segment.changeMs > 0)
-    .reverse();
+  const eventRows = [];
+
+  segments.forEach((segment, index) => {
+    const durationMs = Math.max(0, Number(segment.endMs || 0) - Number(segment.startMs || 0));
+    if (durationMs <= 0) return;
+
+    runningTotalMs += durationMs;
+    const segmentId = getManualSpeakerEntryId(segment, index);
+    const groupId = String(segment.groupId || segmentId).trim() || segmentId;
+    const existingRow = eventRows[eventRows.length - 1];
+
+    if (existingRow && existingRow.groupId === groupId) {
+      existingRow.changeMs += durationMs;
+      existingRow.overallMs = runningTotalMs;
+      existingRow.segmentIds.push(segmentId);
+      existingRow.playMs = Math.min(existingRow.playMs, Math.max(0, Number(segment.startMs || 0)));
+      return;
+    }
+
+    eventRows.push({
+      ...segment,
+      id: groupId,
+      groupId,
+      segmentIds: [segmentId],
+      speakerLabel: String(segment.speakerLabel || '').trim() || 'Speaker',
+      changeMs: durationMs,
+      overallMs: runningTotalMs,
+      playMs: Math.max(0, Number(segment.startMs || 0)),
+      displayMode: 'segment',
+      isBaseline: false,
+    });
+  });
+
+  eventRows.reverse();
 
   return {
     headings: ['Speaker', 'Change', 'Overall'],
@@ -3757,9 +3834,11 @@ function buildManualSpeakerRowsForDisplay() {
 
 function renderManualSpeakerControls() {
   if (!elements.speakerChangeTimer) return;
+  const session = state.currentSession;
   const options = getSpeakerOptionsForManualControls();
   const currentLabel = state.manualSpeakerCurrentLabel || options[0] || 'Speaker A';
   const timerRunning = isManualSpeakerTimerRunning();
+  const manualPauseOnly = isManualSpeakerOnlyPaused();
   const manualRows = buildManualSpeakerRowsForDisplay();
   const activeLabel = normalizeManualSpeakerName(state.manualSpeakerActiveLabel || currentLabel || options[0] || 'Speaker A');
   const liveLabel = normalizeManualSpeakerName(currentLabel || activeLabel || options[0] || 'Speaker A');
@@ -3796,25 +3875,40 @@ function renderManualSpeakerControls() {
       !normalizeManualSpeakerName(state.manualSpeakerCustomNameDraft);
   }
   if (elements.speakerChangeButton) {
-    elements.speakerChangeButton.textContent = timerRunning ? '👥 Mark' : 'Reset';
-    elements.speakerChangeButton.disabled = timerRunning
-      ? !state.currentSession || state.currentSession.status === 'ended'
-      : !state.currentSession || (manualRows.rows.length === 0 && getManualSpeakerElapsedMs() === 0);
-    elements.speakerChangeButton.dataset.mode = timerRunning ? 'mark' : 'reset';
-    elements.speakerChangeButton.classList.toggle('speaker-change-action--mark', timerRunning);
-    elements.speakerChangeButton.classList.toggle('speaker-change-action--reset', !timerRunning);
+    if (session && session.status === 'active') {
+      elements.speakerChangeButton.textContent = '👥 Mark';
+      elements.speakerChangeButton.disabled = manualPauseOnly || session.status === 'ended';
+      elements.speakerChangeButton.dataset.mode = 'mark';
+      elements.speakerChangeButton.classList.add('speaker-change-action--mark');
+      elements.speakerChangeButton.classList.remove('speaker-change-action--reset');
+    } else {
+      elements.speakerChangeButton.textContent = 'Reset';
+      elements.speakerChangeButton.disabled = !session || (manualRows.rows.length === 0 && getManualSpeakerElapsedMs() === 0);
+      elements.speakerChangeButton.dataset.mode = 'reset';
+      elements.speakerChangeButton.classList.remove('speaker-change-action--mark');
+      elements.speakerChangeButton.classList.add('speaker-change-action--reset');
+    }
   }
   if (elements.speakerChangePauseButton) {
-    const session = state.currentSession;
+    const canPause = Boolean(session && session.status === 'active' && !state.manualSpeakerPaused);
+    const canResume = Boolean(session && session.status === 'active' && state.manualSpeakerPaused);
+    const mode = canPause ? 'pause' : 'resume';
+    elements.speakerChangePauseButton.textContent = canPause ? 'Pause' : 'Resume';
+    elements.speakerChangePauseButton.disabled = !(canPause || canResume);
+    elements.speakerChangePauseButton.dataset.mode = mode;
+    elements.speakerChangePauseButton.classList.toggle('speaker-change-action--pause', mode === 'pause');
+    elements.speakerChangePauseButton.classList.toggle('speaker-change-action--resume', mode === 'resume');
+  }
+  if (elements.speakerChangeStopButton) {
     const runtime = state.runtimeStatus;
     const canStop = Boolean(session && ['listening', 'connecting', 'reconnecting'].includes(runtime));
     const canResume = Boolean(session && session.status !== 'ended' && ['paused', 'stopped', 'error', 'idle'].includes(runtime));
     const mode = canStop ? 'stop' : 'resume';
-    elements.speakerChangePauseButton.textContent = canStop ? 'Stop' : 'Resume';
-    elements.speakerChangePauseButton.disabled = !(canStop || canResume);
-    elements.speakerChangePauseButton.dataset.mode = mode;
-    elements.speakerChangePauseButton.classList.toggle('speaker-change-action--stop', mode === 'stop');
-    elements.speakerChangePauseButton.classList.toggle('speaker-change-action--resume', mode === 'resume');
+    elements.speakerChangeStopButton.textContent = canStop ? 'Stop' : 'Resume';
+    elements.speakerChangeStopButton.disabled = !(canStop || canResume);
+    elements.speakerChangeStopButton.dataset.mode = mode;
+    elements.speakerChangeStopButton.classList.toggle('speaker-change-action--stop', mode === 'stop');
+    elements.speakerChangeStopButton.classList.toggle('speaker-change-action--resume', mode === 'resume');
   }
   if (elements.speakerChangeMarkers) {
     if (!manualRows.rows.length) {
@@ -4031,9 +4125,11 @@ async function createSession({ sourceLanguage, targetLanguage, glossary, speaker
     manualSpeakerEvents: [],
     manualSpeakerOpenStartMs: null,
     manualSpeakerActiveLabel: '',
+    manualSpeakerGroupId: '',
     manualSpeakerBaseOffsetMs: 0,
     manualSpeakerElapsedMs: 0,
     manualSpeakerPaused: true,
+    manualSpeakerPauseReason: 'idle',
     manualSpeakerCurrentLabel: '',
     manualSpeakerPendingChangeAtMs: null,
     speakerFinalizedAt: '',
@@ -4058,12 +4154,14 @@ async function loadSession(sessionId) {
     ? null
     : Math.max(0, Number(session.manualSpeakerOpenStartMs || 0));
   state.manualSpeakerActiveLabel = String(session.manualSpeakerActiveLabel || '').trim();
+  state.manualSpeakerGroupId = String(session.manualSpeakerGroupId || '').trim();
   state.manualSpeakerBaseOffsetMs = Number(session.manualSpeakerBaseOffsetMs || 0);
   state.manualSpeakerCurrentLabel = String(session.manualSpeakerCurrentLabel || '').trim();
   state.manualSpeakerPendingChangeAtMs = session.manualSpeakerPendingChangeAtMs === null ? null : Number(session.manualSpeakerPendingChangeAtMs || 0);
   state.manualSpeakerCustomNameDraft = '';
   state.manualSpeakerElapsedMs = Math.max(0, Number(session.manualSpeakerElapsedMs || 0));
   state.manualSpeakerPaused = session.manualSpeakerPaused !== false;
+  state.manualSpeakerPauseReason = String(session.manualSpeakerPauseReason || (state.currentSession?.status === 'active' && state.manualSpeakerPaused ? 'manual' : 'idle')).trim() || 'idle';
   state.manualSpeakerEditingEventId = '';
   state.currentSession.speakerFinalizedAt = String(session.speakerFinalizedAt || '').trim();
   state.speakerTrackingStatus = state.speakerTrackingSupported
@@ -5376,10 +5474,12 @@ function syncManualSpeakerStateToSession(session = state.currentSession) {
   }));
   session.manualSpeakerOpenStartMs = state.manualSpeakerOpenStartMs === null ? null : Math.max(0, Number(state.manualSpeakerOpenStartMs || 0));
   session.manualSpeakerActiveLabel = String(state.manualSpeakerActiveLabel || '').trim();
+  session.manualSpeakerGroupId = String(state.manualSpeakerGroupId || '').trim();
   session.manualSpeakerCurrentLabel = String(state.manualSpeakerCurrentLabel || '').trim();
   session.manualSpeakerBaseOffsetMs = Math.max(0, Number(state.manualSpeakerBaseOffsetMs || 0));
   session.manualSpeakerElapsedMs = Math.max(0, Number(state.manualSpeakerElapsedMs || 0));
   session.manualSpeakerPaused = Boolean(state.manualSpeakerPaused);
+  session.manualSpeakerPauseReason = String(state.manualSpeakerPauseReason || 'idle').trim() || 'idle';
   session.manualSpeakerPendingChangeAtMs = state.manualSpeakerPendingChangeAtMs === null ? null : Math.max(0, Number(state.manualSpeakerPendingChangeAtMs || 0));
 }
 
@@ -5597,9 +5697,11 @@ async function handleStartFromSetup(event) {
   state.manualSpeakerEvents = [];
   state.manualSpeakerOpenStartMs = null;
   state.manualSpeakerActiveLabel = '';
+  state.manualSpeakerGroupId = '';
   state.manualSpeakerBaseOffsetMs = 0;
   state.manualSpeakerElapsedMs = 0;
   state.manualSpeakerPaused = true;
+  state.manualSpeakerPauseReason = 'idle';
   state.manualSpeakerPendingChangeAtMs = null;
   state.speakerFinalizeProgress = null;
   state.manualSpeakerCurrentLabel = getSpeakerOptionsForManualControls(session)[0] || 'Speaker A';
@@ -5737,7 +5839,7 @@ async function startListening({ silent = false } = {}) {
   state.currentSession.runtimeStatus = 'connecting';
   state.currentSession.speakerFinalizedAt = '';
   state.currentSession.updatedAt = nowIso();
-  if (state.manualSpeakerPaused) {
+  if (state.manualSpeakerPaused && state.manualSpeakerPauseReason !== 'manual') {
     await resumeManualSpeakerTimer({ persist: false });
   }
   await persistCurrentSessionNow();
@@ -5786,9 +5888,7 @@ async function pauseListening() {
   flushListeningClock();
   flushSpeechClock();
   state.speechActive = false;
-  if (!state.manualSpeakerPaused) {
-    await pauseManualSpeakerTimer({ persist: false });
-  }
+  await pauseManualSpeakerTimer({ persist: false });
   await stopSpeakerTracking({ statusMessage: 'Paused. Speaker timing may keep catching up briefly.' });
   await stopMicLevelMeter();
   await stopSessionRecording();
@@ -5813,9 +5913,7 @@ async function stopListening() {
   flushListeningClock();
   flushSpeechClock();
   state.speechActive = false;
-  if (!state.manualSpeakerPaused) {
-    await pauseManualSpeakerTimer({ persist: false });
-  }
+  await pauseManualSpeakerTimer({ persist: false });
   await stopSpeakerTracking({ statusMessage: 'Stopped. Run the final speaker pass for the last buffered audio.' });
   await stopMicLevelMeter();
   await stopSessionRecording();
@@ -5843,9 +5941,7 @@ async function endCurrentSession() {
   flushListeningClock();
   flushSpeechClock();
   state.speechActive = false;
-  if (!state.manualSpeakerPaused) {
-    await pauseManualSpeakerTimer({ persist: false });
-  }
+  await pauseManualSpeakerTimer({ persist: false });
   await stopSpeakerTracking({ statusMessage: 'Ending session. Run the final speaker pass for the last buffered audio.' });
   await stopMicLevelMeter();
   await stopSessionRecording();
@@ -5888,6 +5984,14 @@ async function createFreshSessionFromLive() {
 
 async function pauseManualSpeakerTimer({ persist = true } = {}) {
   if (state.manualSpeakerPaused) {
+    state.manualSpeakerPauseReason = 'session';
+    state.manualSpeakerGroupId = '';
+    state.manualSpeakerActiveLabel = '';
+    clearPendingManualSpeakerChange();
+    syncManualSpeakerStateToSession();
+    if (persist) {
+      await persistManualSpeakerStateNow();
+    }
     renderManualSpeakerControls();
     return;
   }
@@ -5896,6 +6000,8 @@ async function pauseManualSpeakerTimer({ persist = true } = {}) {
   await commitCurrentManualSpeakerSpan({ atMs: getManualSpeakerSessionPositionMs(), persist: false });
   state.manualSpeakerElapsedMs = getManualSpeakerElapsedMs();
   state.manualSpeakerPaused = true;
+  state.manualSpeakerPauseReason = 'session';
+  state.manualSpeakerGroupId = '';
   syncManualSpeakerStateToSession();
 
   if (persist) {
@@ -5905,17 +6011,29 @@ async function pauseManualSpeakerTimer({ persist = true } = {}) {
   renderManualSpeakerControls();
 }
 
-async function resumeManualSpeakerTimer({ persist = true } = {}) {
+async function resumeManualSpeakerTimer({ persist = true, allowGroupContinuation = false } = {}) {
   if (!state.currentSession || state.currentSession.status !== 'active') {
     renderManualSpeakerControls();
     return;
   }
 
   syncManualSpeakerSelectionFromUi();
+  const currentLabel = normalizeManualSpeakerName(state.manualSpeakerCurrentLabel || getResolvedManualSpeakerSelection());
+  const previousActiveLabel = normalizeManualSpeakerName(state.manualSpeakerActiveLabel || '');
+  const shouldContinueGroup = Boolean(
+    allowGroupContinuation &&
+      state.manualSpeakerPauseReason === 'manual' &&
+      String(state.manualSpeakerGroupId || '').trim() &&
+      currentLabel &&
+      currentLabel === previousActiveLabel
+  );
+
   state.manualSpeakerPaused = false;
+  state.manualSpeakerPauseReason = 'none';
   state.manualSpeakerBaseOffsetMs = Math.max(0, getManualSpeakerSessionPositionMs() - Number(state.manualSpeakerElapsedMs || 0));
   state.manualSpeakerOpenStartMs = Math.max(0, getManualSpeakerSessionPositionMs());
-  state.manualSpeakerActiveLabel = normalizeManualSpeakerName(state.manualSpeakerCurrentLabel || getResolvedManualSpeakerSelection());
+  state.manualSpeakerActiveLabel = currentLabel;
+  state.manualSpeakerGroupId = shouldContinueGroup ? String(state.manualSpeakerGroupId || '').trim() : createManualSpeakerGroupId();
   clearPendingManualSpeakerChange();
   syncManualSpeakerStateToSession();
 
@@ -5945,8 +6063,10 @@ async function resetManualSpeakerChanges() {
   state.manualSpeakerEvents = [];
   state.manualSpeakerOpenStartMs = null;
   state.manualSpeakerActiveLabel = '';
+  state.manualSpeakerGroupId = '';
   state.manualSpeakerBaseOffsetMs = getManualSpeakerSessionPositionMs();
   state.manualSpeakerElapsedMs = 0;
+  state.manualSpeakerPauseReason = 'idle';
   clearPendingManualSpeakerChange();
   state.manualSpeakerEditingEventId = '';
   await applyManualSpeakerEventsToCurrentSession();
@@ -6742,6 +6862,11 @@ function bindEvents() {
   });
   elements.speakerChangePauseButton?.addEventListener('click', () => {
     const mode = elements.speakerChangePauseButton?.dataset.mode || 'resume';
+    const action = mode === 'pause' ? pauseManualSpeakerTimerOnly() : resumeManualSpeakerTimer({ allowGroupContinuation: true });
+    action.catch((error) => console.warn('Unable to update manual speaker pause state', error));
+  });
+  elements.speakerChangeStopButton?.addEventListener('click', () => {
+    const mode = elements.speakerChangeStopButton?.dataset.mode || 'resume';
     const action = mode === 'stop' ? stopListening() : startListening();
     action.catch((error) => console.warn('Unable to update manual speaker timer', error));
   });
@@ -6775,14 +6900,20 @@ function bindEvents() {
     if (choiceButton) {
       const markerId = String(choiceButton.dataset.speakerMarkerChoiceId || '').trim();
       const nextSpeakerLabel = String(choiceButton.dataset.speakerLabel || '').trim();
-      const index = state.manualSpeakerEvents.findIndex(
-        (item, itemIndex) => getManualSpeakerEntryId(item, itemIndex) === markerId
-      );
-      if (!Number.isInteger(index) || index < 0 || !state.manualSpeakerEvents[index] || !nextSpeakerLabel) return;
-      state.manualSpeakerEvents[index] = {
-        ...state.manualSpeakerEvents[index],
-        speakerLabel: nextSpeakerLabel,
-      };
+      const matchingIndexes = state.manualSpeakerEvents
+        .map((item, itemIndex) => {
+          const entryId = getManualSpeakerEntryId(item, itemIndex);
+          const groupId = String(item?.groupId || entryId).trim() || entryId;
+          return groupId === markerId || entryId === markerId ? itemIndex : -1;
+        })
+        .filter((itemIndex) => itemIndex >= 0);
+      if (!matchingIndexes.length || !nextSpeakerLabel) return;
+      matchingIndexes.forEach((itemIndex) => {
+        state.manualSpeakerEvents[itemIndex] = {
+          ...state.manualSpeakerEvents[itemIndex],
+          speakerLabel: nextSpeakerLabel,
+        };
+      });
       state.manualSpeakerEditingEventId = '';
       await applyManualSpeakerEventsToCurrentSession().catch((error) => console.warn('Unable to apply manual speaker labels', error));
       return;
@@ -7187,9 +7318,11 @@ async function createDebugSession({
     manualSpeakerEvents: [],
     manualSpeakerOpenStartMs: null,
     manualSpeakerActiveLabel: '',
+    manualSpeakerGroupId: '',
     manualSpeakerBaseOffsetMs: 0,
     manualSpeakerElapsedMs: 0,
     manualSpeakerPaused: true,
+    manualSpeakerPauseReason: 'idle',
     manualSpeakerCurrentLabel: '',
     manualSpeakerPendingChangeAtMs: null,
     speakerFinalizedAt: '',
@@ -7201,9 +7334,11 @@ async function createDebugSession({
   state.manualSpeakerEvents = [];
   state.manualSpeakerOpenStartMs = null;
   state.manualSpeakerActiveLabel = '';
+  state.manualSpeakerGroupId = '';
   state.manualSpeakerBaseOffsetMs = 0;
   state.manualSpeakerElapsedMs = 0;
   state.manualSpeakerPaused = true;
+  state.manualSpeakerPauseReason = 'idle';
   state.manualSpeakerPendingChangeAtMs = null;
   state.speakerFinalizeProgress = null;
   state.manualSpeakerCurrentLabel = getSpeakerOptionsForManualControls(session)[0] || 'Speaker A';

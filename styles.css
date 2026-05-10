@@ -2722,8 +2722,8 @@ body[data-review-audio-floating='true'][data-route='live'] .transcript-list {
 
 .speaker-change-dock__actions {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0.85rem;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.65rem;
 }
 
 .speaker-change-action {
@@ -2744,6 +2744,12 @@ body[data-review-audio-floating='true'][data-route='live'] .transcript-list {
   background: rgba(239, 68, 68, 0.88);
   color: #fff;
   border-color: rgba(248, 113, 113, 0.4);
+}
+
+.speaker-change-action--pause {
+  background: rgba(245, 158, 11, 0.18);
+  color: var(--text);
+  border-color: rgba(245, 158, 11, 0.35);
 }
 
 .speaker-change-action--resume {
