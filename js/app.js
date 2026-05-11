@@ -214,6 +214,7 @@ const state = {
   sessionPlaybackMode: 'clip',
   sessionPlaybackBaseStartMs: 0,
   sessionPlaybackCombinedSignature: '',
+  sessionPlaybackBuildPromise: null,
   sessionPlaybackSegmentId: '',
   sessionPlaybackAutoScroll: true,
   sessionPlaybackPreviewMs: null,
@@ -2611,13 +2612,14 @@ function renderSpeakerTimingSummary(slotRollup, summary, { final = false } = {})
 
   return `
     <div class="speaker-timing-summary">
+      <p class="eyebrow">Manual speaker timing summary</p>
       <div class="speaker-timing-summary__totals">
         <div class="speaker-timing-summary__total speaker-timing-summary__total--manual">
           <span>Manual stopwatch</span>
           <strong>${formatSpeakerTimingSummaryDuration(slotRollup?.totalWindowMs || 0)}</strong>
         </div>
         <div class="speaker-timing-summary__total speaker-timing-summary__total--auto">
-          <span>${final ? 'Auto matched speech' : 'Auto matched speech'}</span>
+          <span>${final ? 'Auto inside manual slots' : 'Auto inside manual slots'}</span>
           <strong>${formatSpeakerTimingSummaryDuration(slotRollup?.totalSpeechMs || 0)}</strong>
         </div>
       </div>
@@ -2654,6 +2656,121 @@ function renderSpeakerTimingSummary(slotRollup, summary, { final = false } = {})
             <span role="cell">Σ</span>
             <span role="cell">${formatSpeakerTimingSummaryDuration(slotRollup?.totalWindowMs || 0)}</span>
             <span role="cell">${formatSpeakerTimingSummaryDuration(slotRollup?.totalWindowMs || 0)}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function buildAutomaticSpeakerTimingRows(summary = [], segments = getRenderableTranscriptSegments()) {
+  const sortedSegments = (Array.isArray(segments) ? segments : [])
+    .filter((segment) => {
+      const rawLabel = getSegmentRawSpeakerLabel(segment);
+      const label = getTranscriptSpeakerLabel(segment) || segment?.speakerLabel || getDefaultSpeakerLabel(rawLabel);
+      return Boolean(label);
+    })
+    .sort((left, right) => {
+      const leftStart = Number(left?.startMs ?? left?.endMs ?? 0);
+      const rightStart = Number(right?.startMs ?? right?.endMs ?? 0);
+      return leftStart - rightStart || Number(left?.sequence || 0) - Number(right?.sequence || 0);
+    });
+
+  if (!sortedSegments.length) return [];
+
+  const speakerTotalsByKey = new Map(
+    (Array.isArray(summary) ? summary : []).map((speaker) => [speaker.key, Math.max(0, Number(speaker?.durationMs || 0))])
+  );
+  const speakerPartIndex = new Map();
+  const rows = [];
+
+  sortedSegments.forEach((segment) => {
+    const rawLabel = getSegmentRawSpeakerLabel(segment);
+    const label = getTranscriptSpeakerLabel(segment) || segment?.speakerLabel || getDefaultSpeakerLabel(rawLabel);
+    if (!label) return;
+
+    const speakerKey = getSpeakerSummaryKey(rawLabel, label);
+    const startMs = Math.max(0, Number(segment?.startMs ?? segment?.endMs ?? 0));
+    const endMs = Math.max(startMs, Number(segment?.speechEndMs ?? segment?.endMs ?? segment?.startMs ?? 0));
+    const durationMs = Math.max(0, Number(segment?.speakerDurationMs || endMs - startMs));
+    if (durationMs <= 0 && endMs <= startMs) return;
+
+    const previousRow = rows[rows.length - 1];
+    if (previousRow && previousRow.speakerKey === speakerKey && startMs <= previousRow.endMs + 800) {
+      previousRow.autoMs += Math.max(durationMs, endMs - startMs);
+      previousRow.endMs = Math.max(previousRow.endMs, endMs);
+      return;
+    }
+
+    const nextPart = (speakerPartIndex.get(speakerKey) || 0) + 1;
+    speakerPartIndex.set(speakerKey, nextPart);
+
+    rows.push({
+      key: `${speakerKey}:auto:${nextPart}`,
+      speakerKey,
+      label,
+      note: `Part ${nextPart}`,
+      autoMs: Math.max(durationMs, endMs - startMs),
+      totalMs: Math.max(0, Number(speakerTotalsByKey.get(speakerKey) || durationMs)),
+      startMs,
+      endMs,
+    });
+  });
+
+  return rows;
+}
+
+function renderAutomaticSpeakerTimingSummary(summary = []) {
+  const rows = buildAutomaticSpeakerTimingRows(summary);
+  if (!rows.length) return '';
+
+  const totalAutoMs = rows.reduce((total, row) => total + Math.max(0, Number(row.autoMs || 0)), 0);
+
+  return `
+    <div class="speaker-timing-summary speaker-timing-summary--automatic">
+      <p class="eyebrow">Automatic speaker timing summary</p>
+      <div class="speaker-timing-summary__totals">
+        <div class="speaker-timing-summary__total speaker-timing-summary__total--auto">
+          <span>Auto diarized speech</span>
+          <strong>${formatSpeakerTimingSummaryDuration(totalAutoMs)}</strong>
+        </div>
+        <div class="speaker-timing-summary__total">
+          <span>Detected parts</span>
+          <strong>${rows.length}</strong>
+        </div>
+      </div>
+      <div class="speaker-timing-summary__table-wrap">
+        <div class="speaker-timing-summary__table" role="table" aria-label="Automatic speaker timing summary">
+          <div class="speaker-timing-summary__head" role="row">
+            <span role="columnheader">Speaker</span>
+            <span role="columnheader">Part</span>
+            <span role="columnheader">Auto</span>
+            <span role="columnheader">Total</span>
+          </div>
+          ${rows
+            .map(
+              (row) => `
+                <div class="speaker-timing-summary__row" role="row">
+                  <button
+                    class="speaker-timing-summary__speaker"
+                    type="button"
+                    data-speaker-action="play-slot"
+                    data-start-ms="${Number(row.startMs || 0)}"
+                    aria-label="Play ${escapeHtml(row.label)} ${escapeHtml(row.note || 'segment')}"
+                  >
+                    <strong>${escapeHtml(row.label)}</strong>
+                  </button>
+                  <span class="speaker-timing-summary__part" role="cell">${escapeHtml(row.note || '')}</span>
+                  <span role="cell">${formatSpeakerTimingSummaryDuration(row.autoMs || 0)}</span>
+                  <span role="cell">${formatSpeakerTimingSummaryDuration(row.totalMs || 0)}</span>
+                </div>`
+            )
+            .join('')}
+          <div class="speaker-timing-summary__foot" role="row">
+            <strong role="cell">All speakers</strong>
+            <span role="cell">Σ</span>
+            <span role="cell">${formatSpeakerTimingSummaryDuration(totalAutoMs)}</span>
+            <span role="cell">${formatSpeakerTimingSummaryDuration(totalAutoMs)}</span>
           </div>
         </div>
       </div>
@@ -2865,7 +2982,11 @@ function renderSpeakerInsights() {
   if (!state.speakerTrackingSupported) {
     if (elements.speakerStatusLine) elements.speakerStatusLine.textContent = '';
     elements.speakerSummary.innerHTML = summary.length
-      ? [renderSpeakerTimingSummary(slotRollup, summary, { final: hasFinalSpeakerTiming }), renderSpeakerSummaryDetailsDisclosure(summary)]
+      ? [
+          renderSpeakerTimingSummary(slotRollup, summary, { final: hasFinalSpeakerTiming }),
+          renderAutomaticSpeakerTimingSummary(summary),
+          renderSpeakerSummaryDetailsDisclosure(summary),
+        ]
           .filter(Boolean)
           .join('')
       : '<div class="note">Speaker analysis is unavailable in this browser.</div>';
@@ -2878,17 +2999,25 @@ function renderSpeakerInsights() {
   }
 
   const speakerTimingSummaryMarkup = renderSpeakerTimingSummary(slotRollup, summary, { final: hasFinalSpeakerTiming });
+  const automaticSpeakerTimingSummaryMarkup = renderAutomaticSpeakerTimingSummary(summary);
   const speakerDetailsMarkup = renderSpeakerSummaryDetailsDisclosure(summary);
 
   if (!summary.length) {
-    elements.speakerSummary.innerHTML = [speakerProcessingCard, speakerTimingSummaryMarkup]
+    elements.speakerSummary.innerHTML = [speakerProcessingCard, speakerTimingSummaryMarkup, automaticSpeakerTimingSummaryMarkup]
       .filter(Boolean)
       .join('');
     renderSpeakerFinalizeButton();
     return;
   }
 
-  elements.speakerSummary.innerHTML = [speakerProcessingCard, speakerTimingSummaryMarkup, speakerDetailsMarkup].filter(Boolean).join('');
+  elements.speakerSummary.innerHTML = [
+    speakerProcessingCard,
+    speakerTimingSummaryMarkup,
+    automaticSpeakerTimingSummaryMarkup,
+    speakerDetailsMarkup,
+  ]
+    .filter(Boolean)
+    .join('');
   updateSpeakerPlaybackIndicator();
   renderSpeakerFinalizeButton();
 }
@@ -3723,6 +3852,7 @@ function resetSessionPlaybackState() {
   state.sessionPlaybackMode = 'clip';
   state.sessionPlaybackBaseStartMs = 0;
   state.sessionPlaybackCombinedSignature = '';
+  state.sessionPlaybackBuildPromise = null;
   state.sessionPlaybackSegmentId = '';
   state.sessionPlaybackPreviewMs = null;
   state.reviewAudioFloatingActive = false;
@@ -3768,18 +3898,22 @@ async function waitForReviewAudioReady(audio, timeoutMs = 2500) {
 
 async function loadCombinedSessionPlayback({ autoplay = false, seekMs = null, forceScroll = false, userGesture = false } = {}) {
   const audio = elements.reviewAudio;
-  const combined = buildCombinedSessionRecordingBlob();
-  if (!audio || !combined?.blob) return false;
+  const recordings = state.sessionRecordings.filter((recording) => hasRecordingBlob(recording));
+  if (!audio || !recordings.length) return false;
+
+  const signature = buildSessionRecordingBlobSignature(recordings);
+  const firstRecording = recordings[0];
+  const startMs = Number(firstRecording?.startMs || 0);
 
   ensureReviewAudioPlaybackDefaults();
   state.sessionPlaybackPreviewMs = null;
 
-  const targetMs = seekMs === null ? combined.startMs : clampSessionPlaybackMs(seekMs);
+  const targetMs = seekMs === null ? startMs : clampSessionPlaybackMs(seekMs);
 
   if (
     state.sessionPlaybackMode === 'combined' &&
     state.sessionPlaybackObjectUrl &&
-    state.sessionPlaybackCombinedSignature === combined.signature &&
+    state.sessionPlaybackCombinedSignature === signature &&
     audio.src
   ) {
     audio.currentTime = Math.max(0, getCombinedSessionPlaybackOffsetMs(targetMs) / 1000);
@@ -3792,7 +3926,19 @@ async function loadCombinedSessionPlayback({ autoplay = false, seekMs = null, fo
     return true;
   }
 
-  const objectUrl = URL.createObjectURL(combined.blob);
+  let playbackBlob = null;
+  try {
+    playbackBlob = await mergeRecordingBatchToWav(recordings);
+  } catch (error) {
+    console.warn('Unable to build normalized whole-session playback audio, trying raw combined playback.', error);
+    playbackBlob = buildCombinedSessionRecordingBlob(recordings)?.blob || null;
+  }
+
+  if (!playbackBlob) {
+    return false;
+  }
+
+  const objectUrl = URL.createObjectURL(playbackBlob);
   audio.src = objectUrl;
   audio.load();
 
@@ -3820,8 +3966,8 @@ async function loadCombinedSessionPlayback({ autoplay = false, seekMs = null, fo
 
   state.sessionPlaybackObjectUrl = objectUrl;
   state.sessionPlaybackMode = 'combined';
-  state.sessionPlaybackBaseStartMs = combined.startMs;
-  state.sessionPlaybackCombinedSignature = combined.signature;
+  state.sessionPlaybackBaseStartMs = startMs;
+  state.sessionPlaybackCombinedSignature = signature;
   state.sessionPlaybackClipIndex = findRecordingIndexForTime(targetMs);
 
   audio.currentTime = Math.max(0, getCombinedSessionPlaybackOffsetMs(targetMs) / 1000);
@@ -3837,6 +3983,39 @@ async function loadCombinedSessionPlayback({ autoplay = false, seekMs = null, fo
   }
 
   return true;
+}
+
+async function ensureWholeSessionPlaybackPrepared({ seekMs = null, force = false } = {}) {
+  const recordings = state.sessionRecordings.filter((recording) => hasRecordingBlob(recording));
+  if (!recordings.length) return false;
+
+  const signature = buildSessionRecordingBlobSignature(recordings);
+  if (!force && state.sessionPlaybackObjectUrl && state.sessionPlaybackCombinedSignature === signature) {
+    return true;
+  }
+
+  if (!force && state.sessionPlaybackBuildPromise) {
+    return state.sessionPlaybackBuildPromise;
+  }
+
+  const buildPromise = loadCombinedSessionPlayback({
+    autoplay: false,
+    seekMs: seekMs === null ? Number(recordings[0]?.startMs || 0) : seekMs,
+    forceScroll: false,
+    userGesture: false,
+  })
+    .catch((error) => {
+      console.warn('Unable to prepare whole-session playback', error);
+      return false;
+    })
+    .finally(() => {
+      if (state.sessionPlaybackBuildPromise === buildPromise) {
+        state.sessionPlaybackBuildPromise = null;
+      }
+    });
+
+  state.sessionPlaybackBuildPromise = buildPromise;
+  return buildPromise;
 }
 
 function updatePlaybackHighlight({ shouldScroll = false, forceScroll = false } = {}) {
@@ -4071,7 +4250,14 @@ async function loadRecordingClip(index, { autoplay = false, seekMs = null, force
 async function playSessionAudioAtMs(absoluteMs, { autoplay = true, userGesture = false } = {}) {
   const targetMs = clampSessionPlaybackMs(absoluteMs);
   const hasCoverage = await ensureSessionAudioCoverage(targetMs);
-  const clipIndex = hasCoverage ? findRecordingIndexCoveringTime(targetMs) : -1;
+  if (!hasCoverage) return false;
+
+  const prepared = await ensureWholeSessionPlaybackPrepared({ seekMs: targetMs });
+  if (prepared) {
+    return loadCombinedSessionPlayback({ autoplay, seekMs: targetMs, forceScroll: true, userGesture });
+  }
+
+  const clipIndex = findRecordingIndexCoveringTime(targetMs);
   if (clipIndex === -1) return false;
   return loadRecordingClip(clipIndex, { autoplay, seekMs: targetMs, forceScroll: true, userGesture });
 }
@@ -4144,13 +4330,16 @@ async function playReviewAudio({ userGesture = false } = {}) {
   const audio = elements.reviewAudio;
   if (!audio || !state.sessionRecordings.length) return;
   ensureReviewAudioPlaybackDefaults();
-  if (state.sessionPlaybackClipIndex < 0) {
+  if (!audio.src || state.sessionPlaybackClipIndex < 0) {
     const initialPlaybackMs = getVisibleSessionPlaybackMs() || 0;
-    const played = await playSessionAudioAtMs(initialPlaybackMs, { autoplay: true, userGesture });
-    if (!played) {
-      showToast('No saved audio clip covers that part yet.', 3000);
+    const prepared = await ensureWholeSessionPlaybackPrepared({ seekMs: initialPlaybackMs });
+    if (!prepared) {
+      const played = await playSessionAudioAtMs(initialPlaybackMs, { autoplay: true, userGesture });
+      if (!played) {
+        showToast('No saved audio clip covers that part yet.', 3000);
+      }
+      return;
     }
-    return;
   }
   if (audio.ended && state.sessionPlaybackMode === 'combined') {
     audio.currentTime = 0;
@@ -4294,10 +4483,17 @@ function renderRecordingReview() {
     elements.reviewJumpForward5mButton.disabled = !count || durationMs <= 0 || (currentPlaybackMs || 0) >= durationMs;
   }
 
-  if (count && state.sessionPlaybackClipIndex === -1) {
+  const playbackSignature = buildSessionRecordingBlobSignature(state.sessionRecordings);
+  const shouldPrepareWholeSessionPlayback = Boolean(
+    count &&
+      state.currentSession?.status !== 'active' &&
+      !state.sessionPlaybackBuildPromise &&
+      (!state.sessionPlaybackObjectUrl || state.sessionPlaybackCombinedSignature !== playbackSignature)
+  );
+
+  if (shouldPrepareWholeSessionPlayback) {
     const initialPlaybackMs = currentPlaybackMs === null ? 0 : currentPlaybackMs;
-    const initialIndex = Math.max(0, findRecordingIndexForTime(initialPlaybackMs));
-    loadRecordingClip(initialIndex, { seekMs: initialPlaybackMs }).catch(() => {});
+    ensureWholeSessionPlaybackPrepared({ seekMs: initialPlaybackMs }).catch(() => {});
   }
 }
 
