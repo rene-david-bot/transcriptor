@@ -20,8 +20,8 @@ import {
 import { exportSessionMarkdown, exportSessionTxt } from './exporters.js';
 import {
   buildRealtimeTranscriptionSessionPreview,
-  diarizeAudioChunk,
   RealtimeTranscriptionClient,
+  runFinalSessionAnalysis,
   translateText,
 } from './openai.js';
 
@@ -183,7 +183,7 @@ const state = {
   speakerTrackingPendingChunks: 0,
   speakerTrackingStopRequested: false,
   speakerTrackingSessionId: null,
-  speakerTrackingStatus: 'Automatic speaker timing runs after you stop the session.',
+  speakerTrackingStatus: 'Final speaker analysis runs after you stop the session.',
   speakerFinalizeInProgress: false,
   speakerFinalizeProgress: null,
   speakerFinalizeAutoTimer: null,
@@ -1543,6 +1543,67 @@ function getDefaultSpeakerLabel(rawLabel) {
   return rawLabel ? formatSpeakerLabel(rawLabel) : '';
 }
 
+function buildDerivedSegmentCreatedAt(session = state.currentSession, endMs = 0) {
+  const baseMs = Date.parse(String(session?.createdAt || ''));
+  if (!Number.isFinite(baseMs)) return nowIso();
+  return new Date(baseMs + Math.max(0, Number(endMs || 0))).toISOString();
+}
+
+function normalizeFinalAnalyzedSegment(segment, session = state.currentSession, index = 0) {
+  const startMs = Math.max(0, Number(segment?.startMs || 0));
+  const endMs = Math.max(startMs, Number(segment?.endMs ?? segment?.speechEndMs ?? startMs));
+  const rawLabel = String(segment?.speakerRawLabel || segment?.speaker || segment?.rawSpeaker || '').trim();
+  const defaultLabel = getDefaultSpeakerLabel(rawLabel);
+  const storedLabel = String(segment?.speakerLabel || segment?.label || '').trim();
+  const sourceText = String(segment?.sourceText || segment?.text || '').trim();
+  const sameLanguage =
+    String(segment?.sourceLanguage || session?.sourceLanguage || '')
+      .trim()
+      .toLowerCase() ===
+    String(segment?.targetLanguage || session?.targetLanguage || '')
+      .trim()
+      .toLowerCase();
+  const translatedText = String(segment?.translatedText || segment?.translatedDraft || '').trim() || (sameLanguage ? sourceText : '');
+  const translationStatusRaw = String(segment?.translationStatus || '').trim();
+  const translationStatus = translatedText ? (translationStatusRaw === 'draft' ? 'draft' : 'done') : translationStatusRaw || 'pending';
+
+  return {
+    id: String(segment?.id || `${session?.id || 'session'}:final-segment-${index + 1}`),
+    sessionId: String(segment?.sessionId || session?.id || '').trim(),
+    sequence: Number(segment?.sequence || index + 1),
+    startMs,
+    endMs,
+    speechEndMs: Math.max(startMs, Number(segment?.speechEndMs || endMs)),
+    sourceLanguage: String(segment?.sourceLanguage || session?.sourceLanguage || '').trim(),
+    targetLanguage: String(segment?.targetLanguage || session?.targetLanguage || '').trim(),
+    sourceText,
+    translatedText,
+    sourceDraft: '',
+    translatedDraft: '',
+    translationStatus,
+    speakerRawLabel: rawLabel,
+    speakerLabel: rawLabel ? resolveSpeakerLabel(rawLabel, session, storedLabel || defaultLabel) : storedLabel,
+    speakerStatus: String(segment?.speakerStatus || (rawLabel || storedLabel ? 'done' : state.speakerTrackingSupported ? 'pending' : 'unsupported')).trim(),
+    speakerDurationMs: Math.max(1000, Number(segment?.speakerDurationMs || endMs - startMs || 0)),
+    createdAt: String(segment?.createdAt || '').trim() || buildDerivedSegmentCreatedAt(session, endMs),
+  };
+}
+
+function getStoredFinalAnalyzedSegments(session = state.currentSession) {
+  return (Array.isArray(session?.finalAnalyzedSegments) ? session.finalAnalyzedSegments : [])
+    .map((segment, index) => normalizeFinalAnalyzedSegment(segment, session, index))
+    .filter((segment) => segment.sourceText && segment.endMs >= segment.startMs)
+    .sort((left, right) => left.startMs - right.startMs || left.sequence - right.sequence || left.id.localeCompare(right.id));
+}
+
+function getRenderableTranscriptSegments(session = state.currentSession, currentSegments = state.currentSegments) {
+  const finalSegments = getStoredFinalAnalyzedSegments(session);
+  if (session && session.status !== 'active' && String(session.speakerFinalizedAt || '').trim() && finalSegments.length) {
+    return finalSegments;
+  }
+  return Array.isArray(currentSegments) ? currentSegments : [];
+}
+
 function getSegmentRawSpeakerLabel(segment) {
   if (segment?.speakerRawLabel) return String(segment.speakerRawLabel).trim();
   const match = String(segment?.speakerLabel || '')
@@ -2257,7 +2318,7 @@ function buildSpeakerSegmentsForSummary(speaker) {
   const speakerKey = speaker?.key || getSpeakerSummaryKey(speaker?.rawLabel, speaker?.label);
   if (!speakerKey) return [];
 
-  return state.currentSegments
+  return getRenderableTranscriptSegments()
     .filter((segment) => getSpeakerSummaryKeyForSegment(segment) === speakerKey)
     .sort((left, right) => {
       const leftStart = left.startMs ?? left.endMs ?? 0;
@@ -2353,7 +2414,7 @@ function renderSpeakerSummaryCards(summary, { includeTotalCard = true } = {}) {
   pruneExpandedSpeakerKeys(summary);
 
   const totalDurationMs = summary.reduce((total, speaker) => total + speaker.durationMs, 0);
-  const currentPlaybackSegment = state.currentSegments.find((segment) => segment.id === state.sessionPlaybackSegmentId);
+  const currentPlaybackSegment = getRenderableTranscriptSegments().find((segment) => segment.id === state.sessionPlaybackSegmentId);
   const currentPlaybackSpeakerKey = currentPlaybackSegment ? getSpeakerSummaryKeyForSegment(currentPlaybackSegment) : '';
   const speakerPlaybackEnabled = state.sessionRecordings.some((recording) => hasRecordingBlob(recording));
 
@@ -2581,10 +2642,16 @@ function hasRecordingBlob(recording) {
   return Boolean(recording?.blob && Number(recording.blob.size || 0) > 0);
 }
 
+function isSessionAnalysisRecording(recording) {
+  if (!hasRecordingBlob(recording)) return false;
+  const kind = String(recording?.kind || '').trim();
+  return !kind || kind === 'session-audio';
+}
+
 function getPendingRecordingPasses(sessionId = state.currentSession?.id) {
   if (!sessionId) return [];
   return state.sessionRecordings.filter(
-    (recording) => recording.sessionId === sessionId && !recording.diarizedAt && hasRecordingBlob(recording)
+    (recording) => recording.sessionId === sessionId && !recording.diarizedAt && isSessionAnalysisRecording(recording)
   );
 }
 
@@ -2612,10 +2679,10 @@ function buildSpeakerProcessingCardState({ pendingSegments = 0, pendingRecording
     const retryCount = failed || 0;
     const note = String(progress.note || '').trim() || 'This can take a moment after stopping the session.';
     return {
-      title: 'Processing speaker timing',
+      title: 'Processing speaker analysis',
       meta: determinate
         ? `${completed} of ${total} clip${total === 1 ? '' : 's'} done${retryCount ? `, ${retryCount} still queued` : ''}`
-        : 'Working through the queued speaker timing...',
+        : 'Working through the queued speaker analysis...',
       note,
       determinate,
       ratio,
@@ -2625,11 +2692,11 @@ function buildSpeakerProcessingCardState({ pendingSegments = 0, pendingRecording
   if (queueBusy) {
     const activeChunks = Math.max(0, Number(state.speakerTrackingPendingChunks || 0)) + (state.speakerTrackingInFlight ? 1 : 0);
     return {
-      title: 'Processing speaker timing',
+      title: 'Processing speaker analysis',
       meta: pendingSegments
         ? `${pendingSegments} raw segment${pendingSegments === 1 ? '' : 's'} still being labeled`
         : `${activeChunks} speaker chunk${activeChunks === 1 ? '' : 's'} in flight`,
-      note: 'Automatic speaker timing can take a moment while the saved audio is being processed.',
+      note: 'Final speaker analysis can take a moment while the saved audio is being processed.',
       determinate: false,
       ratio: 0,
     };
@@ -2675,7 +2742,7 @@ function renderSpeakerFinalizeButton() {
   const recordings = getSpeakerFinalizeRecordings(state.sessionRecordings);
   const hasSavedAudio = recordings.length > 0;
   const pendingRecordingPasses = getPendingRecordingPasses(session?.id).length;
-  const hasSummary = state.currentSegments.some((segment) => Boolean(getTranscriptSpeakerLabel(segment) || segment.speakerLabel));
+  const hasSummary = getRenderableTranscriptSegments(session).some((segment) => Boolean(getTranscriptSpeakerLabel(segment) || segment.speakerLabel));
   const hasFinalSpeakerTiming = Boolean(session?.speakerFinalizedAt);
   const canFinalize = Boolean(session && !activeCapture && state.speakerTrackingSupported && hasSavedAudio);
 
@@ -2684,12 +2751,12 @@ function renderSpeakerFinalizeButton() {
   elements.finalizeSpeakerButton.disabled = state.speakerFinalizeInProgress || !canFinalize;
 
   if (!session) {
-    elements.finalizeSpeakerButton.textContent = 'Run final speaker timing';
+    elements.finalizeSpeakerButton.textContent = 'Run final speaker analysis';
     return;
   }
 
   if (!state.speakerTrackingSupported) {
-    elements.finalizeSpeakerButton.textContent = 'Speaker timing unavailable';
+    elements.finalizeSpeakerButton.textContent = 'Speaker analysis unavailable';
     return;
   }
 
@@ -2704,9 +2771,9 @@ function renderSpeakerFinalizeButton() {
       const total = Math.max(1, Number(progress.total || 0));
       const processed = Math.min(total, Number(progress.completed || 0) + Number(progress.failed || 0));
       const current = Math.min(total, Math.max(Number(progress.currentIndex || 0), processed < total ? processed + 1 : processed, 1));
-      elements.finalizeSpeakerButton.textContent = `Finalizing speaker timing (${current}/${total})…`;
+      elements.finalizeSpeakerButton.textContent = `Finalizing speaker analysis (${current}/${total})…`;
     } else {
-      elements.finalizeSpeakerButton.textContent = 'Finalizing speaker timing…';
+      elements.finalizeSpeakerButton.textContent = 'Finalizing speaker analysis…';
     }
     return;
   }
@@ -2717,31 +2784,32 @@ function renderSpeakerFinalizeButton() {
   }
 
   if (pendingRecordingPasses) {
-    elements.finalizeSpeakerButton.textContent = `Run final speaker timing (${recordings.length} clip${recordings.length === 1 ? '' : 's'})`;
+    elements.finalizeSpeakerButton.textContent = `Run final speaker analysis (${recordings.length} clip${recordings.length === 1 ? '' : 's'})`;
     return;
   }
 
   if (pendingSegments) {
-    elements.finalizeSpeakerButton.textContent = 'Run final speaker timing';
+    elements.finalizeSpeakerButton.textContent = 'Run final speaker analysis';
     return;
   }
 
   elements.finalizeSpeakerButton.textContent = hasFinalSpeakerTiming
-    ? 'Run final speaker timing again'
+    ? 'Run final speaker analysis again'
     : hasSummary || hasSavedAudio
-      ? 'Run final speaker timing'
-      : 'No speaker timing yet';
+      ? 'Run final speaker analysis'
+      : 'No speaker analysis yet';
 }
 
 function renderSpeakerInsights() {
   if (!elements.speakerSummary) return;
 
   const session = state.currentSession;
+  const renderableSegments = getRenderableTranscriptSegments(session);
   const pendingSegments = getPendingSpeakerSegmentCount(session?.id);
   const pendingRecordingPasses = getPendingRecordingPasses(session?.id).length;
   const queueBusy = state.speakerTrackingPendingChunks > 0 || state.speakerTrackingInFlight;
-  const summary = buildSpeakerSummary(state.currentSegments);
-  const slotRollup = buildManualSpeakerSlotRollup(session, state.currentSegments);
+  const summary = buildSpeakerSummary(renderableSegments);
+  const slotRollup = buildManualSpeakerSlotRollup(session, renderableSegments);
   const sessionEnded = session?.status === 'ended';
   const stoppedSession = session && ['paused', 'ended'].includes(session.status);
   const activeCapture = Boolean(session && session.status === 'active' && ['connecting', 'listening', 'reconnecting'].includes(state.runtimeStatus));
@@ -2753,7 +2821,7 @@ function renderSpeakerInsights() {
 
   if (!session) {
     if (elements.speakerStatusLine) elements.speakerStatusLine.textContent = '';
-    elements.speakerSummary.innerHTML = '<div class="note">No speaker timing data yet.</div>';
+    elements.speakerSummary.innerHTML = '<div class="note">No speaker analysis data yet.</div>';
     renderSpeakerFinalizeButton();
     return;
   }
@@ -2764,7 +2832,7 @@ function renderSpeakerInsights() {
       ? [renderSpeakerTimingSummary(slotRollup, summary, { final: hasFinalSpeakerTiming }), renderSpeakerSummaryDetailsDisclosure(summary)]
           .filter(Boolean)
           .join('')
-      : '<div class="note">Speaker timing is unavailable in this browser.</div>';
+      : '<div class="note">Speaker analysis is unavailable in this browser.</div>';
     renderSpeakerFinalizeButton();
     return;
   }
@@ -2790,7 +2858,9 @@ function renderSpeakerInsights() {
 }
 
 function getTranscriptDisplayCounts() {
-  if (!state.currentSession && !state.currentSegments.length) {
+  const renderableSegments = getRenderableTranscriptSegments();
+
+  if (!state.currentSession && !renderableSegments.length) {
     return {
       visibleRows: 0,
       savedSegments: 0,
@@ -2804,7 +2874,7 @@ function getTranscriptDisplayCounts() {
 
   return {
     visibleRows: mergedRows.length + (appendedLiveRow ? 1 : 0),
-    savedSegments: state.currentSegments.length,
+    savedSegments: renderableSegments.length,
   };
 }
 
@@ -2858,6 +2928,7 @@ function buildLiveTranscriptState() {
   const session = state.currentSession;
   const sourceLabel = getLanguageName(session?.sourceLanguage || state.settings.sourceLanguage || '');
   const targetLabel = getLanguageName(session?.targetLanguage || state.settings.targetLanguage || '');
+  const renderableSegments = getRenderableTranscriptSegments();
 
   if (!session) {
     return {
@@ -2878,7 +2949,7 @@ function buildLiveTranscriptState() {
   const sourceDraft = String(session.draftSource || '').trim();
   const targetDraft = String(session.draftTranslation || '').trim();
   const hasActiveSpeech = Boolean(sourceDraft) && (state.speechActive || Boolean(state.activeDraftItemId));
-  const lastSegment = state.currentSegments[state.currentSegments.length - 1];
+  const lastSegment = renderableSegments[renderableSegments.length - 1];
   const draftEchoesLastFinal = Boolean(
     !state.activeDraftItemId &&
       lastSegment &&
@@ -2895,9 +2966,9 @@ function buildLiveTranscriptState() {
     ? 'You are reading earlier transcript text. Jump to live to catch up.'
     : 'New text appends at the bottom as speech continues.';
 
-  if (browsingEarlier && (state.currentSegments.length || hasRenderableLiveDraft)) {
+  if (browsingEarlier && (renderableSegments.length || hasRenderableLiveDraft)) {
     liveStateLabel = 'Reading earlier text';
-  } else if (!hasRenderableLiveDraft && state.currentSegments.length) {
+  } else if (!hasRenderableLiveDraft && renderableSegments.length) {
     liveStateLabel = 'Waiting';
     liveMeta = 'The transcript stays ready and will append the next segment below.';
   } else if (hasActiveSpeech && targetDraft) {
@@ -2912,7 +2983,7 @@ function buildLiveTranscriptState() {
   } else if (sourceDraft) {
     liveStateLabel = 'Translating';
     liveMeta = 'Translation will appear beneath it as soon as it is ready.';
-  } else if (!state.currentSegments.length) {
+  } else if (!renderableSegments.length) {
     liveStateLabel = 'Waiting';
     liveMeta = 'Start listening and text will begin appending here.';
   }
@@ -2957,8 +3028,16 @@ function getAutomaticSpeakerLabelForSegment(segment, session = state.currentSess
 function getTranscriptSpeakerLabel(segment) {
   const manualLabel = getManualSpeakerLabelForSegment(segment);
   if (manualLabel) return manualLabel;
-  if (segment.speakerLabel) return String(segment.speakerLabel || '').trim();
-  if (segment.speakerRawLabel) return getAutomaticSpeakerLabelForSegment(segment);
+  const rawLabel = getSegmentRawSpeakerLabel(segment);
+  const storedLabel = String(segment?.speakerLabel || '').trim();
+  if (rawLabel) {
+    const automaticLabel = resolveSpeakerLabel(rawLabel, state.currentSession, getDefaultSpeakerLabel(rawLabel));
+    if (!storedLabel || storedLabel === getDefaultSpeakerLabel(rawLabel) || storedLabel === formatSpeakerLabel(rawLabel)) {
+      return automaticLabel;
+    }
+    return storedLabel;
+  }
+  if (storedLabel) return storedLabel;
   const seededNames = parseSpeakerNames(state.currentSession?.speakerNames || state.settings.speakerNames || '');
   if (seededNames.length === 1) {
     return seededNames[0];
@@ -2978,10 +3057,12 @@ function getTranscriptAuxParts(segment) {
 function buildTranscriptDisplayItemFromSegment(segment, { sourceLabel, targetLabel }) {
   const translatedText = String(segment.translatedText || segment.translatedDraft || '').trim();
   const translationPending = !translatedText && segment.translationStatus !== 'error';
+  const title = getTranscriptSpeakerLabel(segment);
+  const rawLabel = getSegmentRawSpeakerLabel(segment);
   return {
     key: segment.id,
-    title: getTranscriptSpeakerLabel(segment),
-    speakerKey: normalizeTranscriptSpeakerKey(segment.speakerLabel || segment.speakerRawLabel || ''),
+    title,
+    speakerKey: normalizeTranscriptSpeakerKey(rawLabel || title || ''),
     timestamp: buildTranscriptTimestamp(segment),
     auxText: getTranscriptAuxParts(segment).join(' • '),
     sourceLabel,
@@ -3205,7 +3286,7 @@ function renderTranscriptLiveBand(liveDraft) {
 
   const sourceLabel = liveDraft.sourceLabel;
   const targetLabel = liveDraft.targetLabel;
-  const committedWindows = buildCommittedReaderWindows(state.currentSegments, { sourceLabel, targetLabel });
+  const committedWindows = buildCommittedReaderWindows(getRenderableTranscriptSegments(), { sourceLabel, targetLabel });
   const livePreview = buildTranscriptDisplayItemFromLiveDraft(liveDraft);
 
   let currentCommitted = committedWindows[committedWindows.length - 1] || null;
@@ -3252,7 +3333,7 @@ function renderTranscriptLiveBand(liveDraft) {
 
   const historyBrowsing = !state.transcriptPinnedToBottom && Boolean(elements.transcriptHistoryDetails?.open);
   const bandStatus = historyBrowsing ? 'History open' : state.settings.autoScroll ? 'Following live' : 'Manual follow';
-  const idle = !state.currentSession || (!state.currentSegments.length && !liveDraft.visible);
+  const idle = !state.currentSession || (!getRenderableTranscriptSegments().length && !liveDraft.visible);
 
   elements.transcriptLiveBand.classList.toggle('transcript-live-band--idle', idle);
   elements.transcriptLiveBand.innerHTML = `
@@ -3441,7 +3522,7 @@ function shouldMergeTranscriptFeedRows(previousRow, nextRow, previousSegment, ne
 function buildTranscriptFeedRows(sourceLabel, targetLabel) {
   const rows = [];
 
-  state.currentSegments.forEach((segment) => {
+  getRenderableTranscriptSegments().forEach((segment) => {
     const nextRow = buildTranscriptDisplayItemFromSegment(segment, { sourceLabel, targetLabel });
     const lastRow = rows[rows.length - 1];
 
@@ -3572,7 +3653,7 @@ function getCurrentPlaybackAbsoluteMs() {
 }
 
 function updateSpeakerPlaybackIndicator() {
-  const currentPlaybackSegment = state.currentSegments.find((segment) => segment.id === state.sessionPlaybackSegmentId);
+  const currentPlaybackSegment = getRenderableTranscriptSegments().find((segment) => segment.id === state.sessionPlaybackSegmentId);
   const activeSpeakerKey = currentPlaybackSegment ? getSpeakerSummaryKeyForSegment(currentPlaybackSegment) : '';
 
   Array.from(elements.speakerSummary?.querySelectorAll('.speaker-stat[data-speaker-key]') || []).forEach((card) => {
@@ -4285,8 +4366,8 @@ function renderControls() {
   elements.endSessionButton.textContent = ended ? 'New Session' : 'End Session';
   elements.endSessionButton.disabled = !session && !ended;
   if (elements.renameSessionButton) elements.renameSessionButton.disabled = !session;
-  if (elements.exportMarkdownButton) elements.exportMarkdownButton.disabled = !session || !state.currentSegments.length;
-  if (elements.exportTxtButton) elements.exportTxtButton.disabled = !session || !state.currentSegments.length;
+  if (elements.exportMarkdownButton) elements.exportMarkdownButton.disabled = !session || !getRenderableTranscriptSegments(session).length;
+  if (elements.exportTxtButton) elements.exportTxtButton.disabled = !session || !getRenderableTranscriptSegments(session).length;
 }
 
 function renderResumeButtons() {
@@ -4339,6 +4420,8 @@ async function createSession({ sourceLanguage, targetLanguage, glossary, speaker
     manualSpeakerPauseReason: 'idle',
     manualSpeakerCurrentLabel: '',
     manualSpeakerPendingChangeAtMs: null,
+    finalSpeakerTurns: [],
+    finalAnalyzedSegments: [],
     speakerFinalizedAt: '',
   };
 
@@ -4370,10 +4453,12 @@ async function loadSession(sessionId) {
   state.manualSpeakerPaused = session.manualSpeakerPaused !== false;
   state.manualSpeakerPauseReason = String(session.manualSpeakerPauseReason || (state.currentSession?.status === 'active' && state.manualSpeakerPaused ? 'manual' : 'idle')).trim() || 'idle';
   state.manualSpeakerEditingEventId = '';
+  state.currentSession.finalSpeakerTurns = Array.isArray(session.finalSpeakerTurns) ? session.finalSpeakerTurns : [];
+  state.currentSession.finalAnalyzedSegments = Array.isArray(session.finalAnalyzedSegments) ? session.finalAnalyzedSegments : [];
   state.currentSession.speakerFinalizedAt = String(session.speakerFinalizedAt || '').trim();
   state.speakerTrackingStatus = state.speakerTrackingSupported
-    ? 'Automatic speaker timing runs after you stop the session.'
-    : 'This browser does not support automatic speaker timing.';
+    ? 'Final speaker analysis runs after you stop the session.'
+    : 'This browser does not support final speaker analysis.';
   state.draftByItemId.clear();
   state.commitMetaByItemId.clear();
   resetManualTranscriptSuppressionState();
@@ -4418,12 +4503,12 @@ async function refreshSessionRecordings(sessionId = state.currentSession?.id) {
   return recordings;
 }
 
-async function persistRecordingClip({ sessionId, blob, startMs, endMs, mimeType }) {
+async function persistRecordingClip({ sessionId, blob, startMs, endMs, mimeType, kind = 'session-audio' }) {
   if (!sessionId || !blob || !blob.size || endMs <= startMs) return null;
   const recording = {
     id: crypto.randomUUID(),
     sessionId,
-    kind: 'session-audio',
+    kind,
     startMs,
     endMs,
     durationMs: Math.max(0, endMs - startMs),
@@ -4492,11 +4577,44 @@ async function ensureScreenWakeLock(enabled) {
   await releaseScreenWakeLock();
 }
 
-async function runDiarizeAudioChunk(request) {
-  if (typeof state.debugDiarizeAudioChunk === 'function') {
-    return state.debugDiarizeAudioChunk(request);
+async function runSessionAnalysisRequest(request) {
+  const response =
+    typeof state.debugDiarizeAudioChunk === 'function'
+      ? await state.debugDiarizeAudioChunk(request)
+      : await runFinalSessionAnalysis(request);
+
+  if (Array.isArray(response?.speakerTurns) && Array.isArray(response?.words)) {
+    return response;
   }
-  return diarizeAudioChunk(request);
+
+  const segments = Array.isArray(response?.segments)
+    ? response.segments
+    : Array.isArray(response?.speakerTurns)
+      ? response.speakerTurns
+      : [];
+  const speakerTurns = Array.isArray(response?.speakerTurns)
+    ? response.speakerTurns
+    : segments.map((segment, index) => ({
+        id: String(segment?.id || `turn-${index + 1}`),
+        speaker: String(segment?.speaker || segment?.rawSpeaker || segment?.label || '').trim(),
+        rawSpeaker: String(segment?.rawSpeaker || segment?.speaker || '').trim(),
+        label: String(segment?.label || '').trim(),
+        text: String(segment?.text || '').trim(),
+        start: Number(segment?.start || 0),
+        end: Number(segment?.end || 0),
+      }));
+  const words = Array.isArray(response?.words)
+    ? response.words
+    : segments.flatMap((segment) => (Array.isArray(segment?.words) ? segment.words : []));
+
+  return {
+    durationSeconds: Number(response?.durationSeconds || response?.duration || 0),
+    text: String(response?.text || ''),
+    words,
+    speakerTurns,
+    segments,
+    raw: response?.raw || response,
+  };
 }
 
 async function markRecordingsAsDiarized(recordings = [], diarizedAt = nowIso()) {
@@ -4553,7 +4671,7 @@ async function markRecordingsPendingDiarization(recordings = []) {
 
 function getSpeakerFinalizeRecordings(recordings = state.sessionRecordings) {
   return (Array.isArray(recordings) ? recordings : [])
-    .filter((recording) => hasRecordingBlob(recording))
+    .filter((recording) => isSessionAnalysisRecording(recording))
     .sort((left, right) => Number(left?.startMs || 0) - Number(right?.startMs || 0));
 }
 
@@ -4624,7 +4742,7 @@ function scheduleAutomaticSpeakerFinalize({ reason = 'stopped', delayMs = 600 } 
 
   state.speakerFinalizeAutoTimer = window.setTimeout(() => {
     state.speakerFinalizeAutoTimer = null;
-    finalizeSpeakerTiming({ auto: true, reason }).catch((error) => console.warn('Automatic speaker timing finalize failed', error));
+    finalizeSpeakerTiming({ auto: true, reason }).catch((error) => console.warn('Final speaker analysis failed', error));
   }, Math.max(0, Number(delayMs || 0)));
 }
 
@@ -4635,7 +4753,7 @@ async function applyDiarizedRecordingPass(
   if (!audioBlob || !session) return 0;
   const diarized = diarizedSegments
     ? { segments: diarizedSegments }
-    : await runDiarizeAudioChunk({
+    : await runSessionAnalysisRequest({
         apiKey: state.settings.apiKey,
         audioBlob,
         filename,
@@ -4691,7 +4809,7 @@ async function normalizeRecordingClipForFinalSpeakerPass(recording) {
 async function diarizeRecordingClip(recording, session = state.currentSession, { assignmentState = null } = {}) {
   if (!recording?.blob || !session) return 0;
   const prepared = await normalizeRecordingClipForFinalSpeakerPass(recording);
-  const diarized = await runDiarizeAudioChunk({
+  const diarized = await runSessionAnalysisRequest({
     apiKey: state.settings.apiKey,
     audioBlob: prepared.audioBlob,
     filename: prepared.filename,
@@ -4764,10 +4882,10 @@ function createMonoWavBlob(samples, sampleRate) {
 }
 
 async function mergeRecordingBatchToWav(recordings = []) {
-  if (!recordings.length) throw new Error('No session recordings available for final speaker timing.');
+  if (!recordings.length) throw new Error('No session recordings available for final speaker analysis.');
   const AudioContextClass = getSpeakerFinalizeAudioContextClass();
   if (!AudioContextClass) {
-    throw new Error('This browser cannot merge saved audio clips for final speaker timing.');
+    throw new Error('This browser cannot merge saved audio clips for final speaker analysis.');
   }
 
   let audioContext;
@@ -4790,7 +4908,7 @@ async function mergeRecordingBatchToWav(recordings = []) {
     }
 
     if (!decodedBuffers.length) {
-      throw new Error('The saved audio clips could not be decoded for final speaker timing.');
+      throw new Error('The saved audio clips could not be decoded for final speaker analysis.');
     }
 
     const sampleRate = decodedBuffers[0].sampleRate || audioContext.sampleRate || 16000;
@@ -4819,6 +4937,270 @@ async function mergeRecordingBatchToWav(recordings = []) {
       // ignore
     }
   }
+}
+
+async function buildSessionAnalysisWav(sessionId = state.currentSession?.id) {
+  if (!sessionId) {
+    throw new Error('No session is open for final analysis.');
+  }
+
+  await waitForPendingSessionRecordingWrites();
+  const allRecordings = await listRecordingsBySession(sessionId);
+  const sourceRecordings = allRecordings
+    .filter((recording) => recording.sessionId === sessionId && isSessionAnalysisRecording(recording))
+    .sort((left, right) => Number(left.startMs || 0) - Number(right.startMs || 0));
+
+  if (!sourceRecordings.length) {
+    throw new Error('No saved session audio yet for final analysis.');
+  }
+
+  const wavBlob = await mergeRecordingBatchToWav(sourceRecordings);
+  return {
+    wavBlob,
+    recordings: sourceRecordings,
+    startMs: Number(sourceRecordings[0]?.startMs || 0),
+    endMs: Number(sourceRecordings[sourceRecordings.length - 1]?.endMs || sourceRecordings[sourceRecordings.length - 1]?.startMs || 0),
+    durationMs: Math.max(0, Number(sourceRecordings[sourceRecordings.length - 1]?.endMs || 0) - Number(sourceRecordings[0]?.startMs || 0)),
+    filename: `session-analysis-${sessionId}.wav`,
+  };
+}
+
+function getAnalysisWordSpeaker(word = {}, speakerTurns = []) {
+  const direct = String(word?.speaker || word?.label || '').trim();
+  if (direct) {
+    const matchedDirectTurn = speakerTurns.find((turn) => {
+      const candidates = [turn?.analysisSpeaker, turn?.speaker, turn?.rawSpeaker, turn?.label]
+        .map((value) => String(value || '').trim())
+        .filter(Boolean);
+      return candidates.includes(direct);
+    });
+    return String(matchedDirectTurn?.speaker || matchedDirectTurn?.rawSpeaker || direct).trim();
+  }
+  const start = Number(word?.start || 0);
+  const end = Number(word?.end ?? start);
+  const matchedTurn = speakerTurns.find((turn) => Number(turn?.start || 0) <= start && Number(turn?.end || 0) >= end);
+  return String(matchedTurn?.speaker || matchedTurn?.rawSpeaker || matchedTurn?.analysisSpeaker || matchedTurn?.label || '').trim();
+}
+
+function assignNamedSpeakersFromManualAnchors({ speakerTurns = [], manualSpeakerEvents = [] } = {}) {
+  const normalizedTurns = (Array.isArray(speakerTurns) ? speakerTurns : []).map((turn, index) => ({
+    ...turn,
+    analysisSpeaker: String(turn?.speaker || turn?.rawSpeaker || turn?.label || '').trim() || `analysis-speaker-${index + 1}`,
+  }));
+  const normalizedEvents = (Array.isArray(manualSpeakerEvents) ? manualSpeakerEvents : [])
+    .map((event) => ({
+      label: String(event?.label || '').trim(),
+      startMs: Number(event?.startMs || 0),
+      endMs: Number(event?.endMs || 0),
+    }))
+    .filter((event) => event.label && event.endMs > event.startMs);
+
+  const totalsBySpeaker = new Map();
+  const overlapBySpeaker = new Map();
+  const anonymousSpeakerMap = new Map();
+
+  const getAnonymousSpeakerId = (speakerKey) => {
+    const normalizedKey = String(speakerKey || '').trim() || `analysis-speaker-${anonymousSpeakerMap.size + 1}`;
+    if (!anonymousSpeakerMap.has(normalizedKey)) {
+      anonymousSpeakerMap.set(normalizedKey, String(anonymousSpeakerMap.size + 1));
+    }
+    return anonymousSpeakerMap.get(normalizedKey);
+  };
+
+  normalizedTurns.forEach((turn) => {
+    const key = turn.analysisSpeaker;
+    const startMs = Math.round(Number(turn?.start || 0) * 1000);
+    const endMs = Math.round(Number(turn?.end || 0) * 1000);
+    if (!key || endMs <= startMs) return;
+    totalsBySpeaker.set(key, (totalsBySpeaker.get(key) || 0) + (endMs - startMs));
+
+    normalizedEvents.forEach((event) => {
+      const sharedMs = overlapMs(startMs, endMs, event.startMs, event.endMs);
+      if (sharedMs <= 0) return;
+      const byLabel = overlapBySpeaker.get(key) || new Map();
+      byLabel.set(event.label, (byLabel.get(event.label) || 0) + sharedMs);
+      overlapBySpeaker.set(key, byLabel);
+    });
+  });
+
+  const assignments = new Map();
+  overlapBySpeaker.forEach((labelMap, speakerKey) => {
+    const ranked = [...labelMap.entries()].sort((a, b) => b[1] - a[1]);
+    if (!ranked.length) return;
+    const [bestLabel, bestOverlap] = ranked[0];
+    const secondOverlap = Number(ranked[1]?.[1] || 0);
+    const totalSpeech = Number(totalsBySpeaker.get(speakerKey) || 0);
+    const strongEnough = bestOverlap >= 5000 && totalSpeech > 0 && bestOverlap / totalSpeech >= 0.35;
+    const clearLead = bestOverlap >= secondOverlap + Math.max(1500, Math.round(bestOverlap * 0.15));
+    if (strongEnough && clearLead) {
+      assignments.set(speakerKey, bestLabel);
+    }
+  });
+
+  return normalizedTurns.map((turn) => {
+    const key = turn.analysisSpeaker;
+    const anonymousSpeaker = getAnonymousSpeakerId(key);
+    const namedLabel = assignments.get(key);
+    return {
+      ...turn,
+      rawSpeaker: anonymousSpeaker,
+      speaker: anonymousSpeaker,
+      assignedLabel: namedLabel || '',
+      label: namedLabel || formatSpeakerLabel(anonymousSpeaker || 'Speaker'),
+    };
+  });
+}
+
+function buildFinalSegmentsFromAnalysis({ words = [], speakerTurns = [] } = {}) {
+  const normalizedWords = (Array.isArray(words) ? words : [])
+    .map((word, index) => ({
+      id: String(word?.id || `word-${index + 1}`),
+      text: String(word?.word || word?.text || '').trim(),
+      start: Number(word?.start || 0),
+      end: Number(word?.end || word?.start || 0),
+      speaker: getAnalysisWordSpeaker(word, speakerTurns),
+    }))
+    .filter((word) => word.text && word.end >= word.start);
+
+  if (!normalizedWords.length) {
+    return speakerTurns.map((turn, index) => ({
+      id: `segment-${index + 1}`,
+      startMs: Math.round(Number(turn?.start || 0) * 1000),
+      endMs: Math.round(Number(turn?.end || 0) * 1000),
+      speaker: String(turn?.speaker || turn?.rawSpeaker || '').trim(),
+      label: String(turn?.label || turn?.assignedLabel || '').trim() || formatSpeakerLabel(String(turn?.speaker || turn?.rawSpeaker || '').trim()),
+      text: String(turn?.text || '').trim(),
+    })).filter((segment) => segment.text && segment.endMs > segment.startMs);
+  }
+
+  const segments = [];
+  let current = null;
+
+  const flush = () => {
+    if (!current) return;
+    current.text = current.words.map((item) => item.text).join(' ').replace(/\s+([,.;:!?])/g, '$1').trim();
+    delete current.words;
+    if (current.text && current.endMs > current.startMs) {
+      segments.push(current);
+    }
+    current = null;
+  };
+
+  normalizedWords.forEach((word, index) => {
+    const startMs = Math.round(word.start * 1000);
+    const endMs = Math.round(word.end * 1000);
+    const nextSpeakerTurn = speakerTurns.find((turn) => String(turn?.speaker || turn?.rawSpeaker || '').trim() === word.speaker);
+    const label =
+      String(nextSpeakerTurn?.assignedLabel || nextSpeakerTurn?.label || '').trim() ||
+      (word.speaker ? formatSpeakerLabel(word.speaker) : 'Speaker');
+
+    if (!current) {
+      current = { id: `segment-${segments.length + 1}`, startMs, endMs, speaker: word.speaker, label, words: [word] };
+      return;
+    }
+
+    const gapMs = Math.max(0, startMs - current.endMs);
+    const durationMs = Math.max(0, endMs - current.startMs);
+    const speakerChanged = current.speaker !== word.speaker;
+    const longGap = gapMs > 1200;
+    const tooLong = durationMs > 12000;
+
+    if (speakerChanged || longGap || tooLong) {
+      flush();
+      current = { id: `segment-${segments.length + 1}`, startMs, endMs, speaker: word.speaker, label, words: [word] };
+      return;
+    }
+
+    current.endMs = Math.max(current.endMs, endMs);
+    current.words.push(word);
+  });
+
+  flush();
+  return segments;
+}
+
+function getOverlappingTranscriptSegments(targetSegment, sourceSegments = []) {
+  const startMs = Math.max(0, Number(targetSegment?.startMs || 0));
+  const endMs = Math.max(startMs, Number(targetSegment?.endMs || startMs));
+  return (Array.isArray(sourceSegments) ? sourceSegments : [])
+    .filter(
+      (segment) =>
+        overlapMs(startMs, endMs, Number(segment?.startMs || 0), Number(segment?.speechEndMs || segment?.endMs || segment?.startMs || 0)) > 0
+    )
+    .sort((left, right) => Number(left?.startMs || 0) - Number(right?.startMs || 0) || Number(left?.sequence || 0) - Number(right?.sequence || 0));
+}
+
+function mergeOverlappingTranslatedText(targetSegment, sourceSegments = []) {
+  return getOverlappingTranscriptSegments(targetSegment, sourceSegments).reduce((mergedText, segment) => {
+    return mergeTranscriptFeedText(mergedText, String(segment?.translatedText || segment?.translatedDraft || '').trim());
+  }, '');
+}
+
+async function buildRenderableFinalAnalyzedSegments({ finalSegments = [], session = state.currentSession, sourceSegments = state.currentSegments } = {}) {
+  if (!session) return [];
+
+  const sameLanguage = String(session.sourceLanguage || '').trim().toLowerCase() === String(session.targetLanguage || '').trim().toLowerCase();
+  const sourceLanguageName = getLanguageName(session.sourceLanguage);
+  const targetLanguageName = getLanguageName(session.targetLanguage);
+  const glossary = buildSessionGlossary(session);
+  const normalizedSegments = [];
+
+  for (const [index, segment] of (Array.isArray(finalSegments) ? finalSegments : []).entries()) {
+    const startMs = Math.max(0, Number(segment?.startMs || 0));
+    const endMs = Math.max(startMs, Number(segment?.endMs || startMs));
+    const rawSpeaker = String(segment?.speaker || segment?.rawSpeaker || '').trim();
+    const sourceText = String(segment?.text || segment?.sourceText || '').trim();
+    let translatedText = mergeOverlappingTranslatedText({ startMs, endMs }, sourceSegments);
+    let translationStatus = translatedText ? 'done' : sameLanguage ? 'done' : 'pending';
+
+    if (!translatedText && sameLanguage) {
+      translatedText = sourceText;
+    }
+
+    if (!translatedText && !sameLanguage && sourceText && state.settings.apiKey) {
+      try {
+        translatedText = await translateText({
+          apiKey: state.settings.apiKey,
+          sourceLanguageName,
+          targetLanguageName,
+          glossary,
+          sourceText,
+          draft: false,
+        });
+        translationStatus = translatedText ? 'done' : 'pending';
+      } catch (error) {
+        console.warn('Unable to backfill final segment translation', error);
+        translationStatus = 'error';
+      }
+    }
+
+    normalizedSegments.push(
+      normalizeFinalAnalyzedSegment(
+        {
+          id: segment?.id || `${session.id}:final-analyzed-${index + 1}`,
+          sessionId: session.id,
+          sequence: Number(segment?.sequence || index + 1),
+          startMs,
+          endMs,
+          speechEndMs: endMs,
+          sourceLanguage: session.sourceLanguage,
+          targetLanguage: session.targetLanguage,
+          sourceText,
+          translatedText,
+          translationStatus,
+          speakerRawLabel: rawSpeaker,
+          speakerLabel: String(segment?.label || '').trim() || getDefaultSpeakerLabel(rawSpeaker),
+          speakerStatus: rawSpeaker ? 'done' : 'unmatched',
+          speakerDurationMs: Math.max(1000, endMs - startMs),
+          createdAt: buildDerivedSegmentCreatedAt(session, endMs),
+        },
+        session,
+        index
+      )
+    );
+  }
+
+  return normalizedSegments;
 }
 
 function buildSpeakerFinalizeBatches(recordings = []) {
@@ -4864,7 +5246,7 @@ async function diarizeRecordingBatch(batch, session = state.currentSession, { as
     return diarizeRecordingClip(batch.recordings[0], session, { assignmentState });
   }
   const mergedAudio = await mergeRecordingBatchToWav(batch.recordings);
-  const diarized = await runDiarizeAudioChunk({
+  const diarized = await runSessionAnalysisRequest({
     apiKey: state.settings.apiKey,
     audioBlob: mergedAudio,
     filename: `session-final-speaker-batch-${batch.index + 1}.wav`,
@@ -5286,13 +5668,28 @@ async function stopSessionRecording() {
   state.sessionRecordingSessionId = null;
 }
 
+async function persistAnalysisChunk(options = {}) {
+  return persistRecordingClip({
+    ...options,
+    kind: options.kind || 'session-audio',
+  });
+}
+
+async function stopAnalysisRecording() {
+  return stopSessionRecording();
+}
+
+async function startAnalysisRecording(stream) {
+  return startSessionRecording(stream);
+}
+
 async function startSessionRecording(stream) {
   if (!stream || !state.currentSession || typeof MediaRecorder === 'undefined') {
     stopSpeakerTracks(stream);
     return;
   }
 
-  await stopSessionRecording();
+  await stopAnalysisRecording();
 
   try {
     const mimeType = pickSpeakerCaptureMimeType();
@@ -5317,7 +5714,7 @@ async function startSessionRecording(stream) {
       chunkStartMs = chunkEndMs;
       state.sessionRecordingChunkStartMs = chunkEndMs;
       if (chunkEndMs <= startMs) return;
-      const persistTask = persistRecordingClip({
+      const persistTask = persistAnalysisChunk({
         sessionId,
         blob,
         startMs,
@@ -5422,208 +5819,148 @@ async function startSpeakerTimingFromCurrentSession() {
   return false;
 }
 
-async function finalizeSpeakerTiming({ auto = false, reason = 'manual' } = {}) {
+async function finalizeSpeakerTiming({ auto = false } = {}) {
   if (!state.currentSession) {
     if (!auto) showToast('Create or open a session first.');
     return false;
   }
 
   if (!state.speakerTrackingSupported) {
-    if (!auto) showToast('Speaker timing is not supported in this browser.');
+    if (!auto) showToast('Speaker analysis is not supported in this browser.');
     return false;
   }
 
   if (state.speakerFinalizeInProgress) return false;
 
   if (state.currentSession.status === 'active') {
-    state.speakerTrackingStatus = 'Automatic speaker timing runs after you stop the session.';
+    state.speakerTrackingStatus = 'Final speaker analysis runs after you stop the session.';
     renderSpeakerInsights();
     if (!auto) {
-      showToast('Stop the session first, then run final speaker timing.', 4500);
+      showToast('Stop the session first, then run final speaker analysis.', 4500);
     }
     return false;
   }
 
   clearSpeakerFinalizeAutoTimer();
-
   const sessionId = state.currentSession.id;
-  await waitForPendingSessionRecordingWrites();
-  const recordings = getSpeakerFinalizeRecordings(
-    state.sessionRecordings.length ? state.sessionRecordings : await refreshSessionRecordings(sessionId)
-  );
-
-  if (!recordings.length) {
-    state.speakerTrackingStatus = 'No saved session audio yet for automatic speaker timing.';
-    renderSpeakerInsights();
-    renderRecordingReview();
-    if (!auto) {
-      showToast('No saved session audio yet for automatic speaker timing.', 4500);
+  const ensureFinalizationStillApplies = () => {
+    if (!state.currentSession || state.currentSession.id !== sessionId) {
+      const error = new Error('The open session changed before final speaker analysis finished.');
+      error.code = 'SESSION_CHANGED';
+      throw error;
     }
-    return false;
-  }
-
-  const finalBatches = buildSpeakerFinalizeBatches(recordings);
-  if (!finalBatches.length) {
-    state.speakerTrackingStatus = 'No saved session audio yet for automatic speaker timing.';
-    renderSpeakerInsights();
-    renderRecordingReview();
-    if (!auto) {
-      showToast('No saved session audio yet for automatic speaker timing.', 4500);
+    if (state.currentSession.status === 'active') {
+      const error = new Error('The session resumed before final speaker analysis finished.');
+      error.code = 'SESSION_RESUMED';
+      throw error;
     }
-    return false;
-  }
+  };
 
   state.speakerFinalizeInProgress = true;
   setSpeakerFinalizeProgress({
-    total: finalBatches.length,
+    total: 1,
     completed: 0,
     failed: 0,
-    currentIndex: finalBatches.length ? 1 : 0,
-    statusLine: 'Running the final speaker pass across the saved session audio...',
-    note:
-      reason === 'ended'
-        ? 'Preparing the saved clips after the session ended.'
-        : 'Preparing the saved clips for the final speaker pass now.',
+    currentIndex: 1,
+    statusLine: 'Running final speaker analysis on the saved session audio...',
+    note: 'Building one session WAV, then analyzing speakers from the full file.',
   });
-  state.speakerTrackingStatus = 'Running the final speaker pass across the saved session audio...';
+  state.speakerTrackingStatus = 'Running final speaker analysis on the saved session audio...';
   renderSpeakerInsights();
   renderRecordingReview();
 
   try {
-    state.currentSession.speakerFinalizedAt = '';
     state.speakerSpansBySession.set(sessionId, []);
-    await markRecordingsPendingDiarization(recordings);
     await resetAutomaticSpeakerLabelsForSession(state.currentSession);
-    await persistCurrentSessionNow();
 
-    const assignmentState = createSpeakerFinalAssignmentState(state.currentSession);
-    let completedPasses = 0;
-    let failedPasses = 0;
+    const analysisInput = await buildSessionAnalysisWav(sessionId);
+    ensureFinalizationStillApplies();
+    const analysis = await runSessionAnalysisRequest({
+      apiKey: state.settings.apiKey,
+      audioBlob: analysisInput.wavBlob,
+      filename: analysisInput.filename,
+      language: state.currentSession.sourceLanguage,
+    });
+    ensureFinalizationStillApplies();
 
-    for (const [index, batch] of finalBatches.entries()) {
-      if (state.currentSession?.id !== sessionId || state.currentSession.status === 'active') {
-        const deferredError = new Error('Speaker timing will resume after the next stop.');
-        deferredError.name = 'SpeakerFinalizeDeferred';
-        throw deferredError;
-      }
+    const namedSpeakerTurns = assignNamedSpeakersFromManualAnchors({
+      speakerTurns: analysis.speakerTurns,
+      manualSpeakerEvents: state.manualSpeakerEvents,
+    });
 
-      const totalPasses = finalBatches.length;
-      const clipRange = `${formatDurationShort(batch.startMs || 0)} to ${formatDurationShort(batch.endMs || batch.startMs || 0)}`;
-      const clipCount = batch.recordings.length;
-      setSpeakerFinalizeProgress({
-        total: totalPasses,
-        completed: completedPasses,
-        failed: failedPasses,
-        currentIndex: index + 1,
-        statusLine: `Analyzing final speaker batch ${index + 1} of ${totalPasses}...`,
-        note: `Batch ${index + 1} of ${totalPasses}, ${clipCount} clip${clipCount === 1 ? '' : 's'} (${clipRange}).`,
-      });
-      state.speakerTrackingStatus = `Analyzing final speaker batch ${index + 1} of ${totalPasses}...`;
-      renderSpeakerInsights();
+    const finalSegments = buildFinalSegmentsFromAnalysis({
+      words: analysis.words,
+      speakerTurns: namedSpeakerTurns,
+    });
 
-      const result = await diarizeRecordingBatchWithRetry(batch, state.currentSession, {
-        assignmentState,
-        onRetry: (error, nextAttempt, maxAttempts, recording, recordingIndex, totalRecordings, usingClipFallback = false) => {
-          setSpeakerFinalizeProgress({
-            total: totalPasses,
-            completed: completedPasses,
-            failed: failedPasses,
-            currentIndex: index + 1,
-            statusLine: usingClipFallback
-              ? `Retrying clip ${Number(recordingIndex || 0) + 1} of ${Number(totalRecordings || clipCount)} inside final batch ${index + 1}...`
-              : `Retrying final speaker batch ${index + 1} of ${totalPasses}...`,
-            note: usingClipFallback
-              ? `The merged final pass fell back to individual clips. Retrying clip ${Number(recordingIndex || 0) + 1}/${Number(
-                  totalRecordings || clipCount
-                )}, attempt ${nextAttempt}/${maxAttempts}${recording?.startMs !== undefined ? ` (${formatDurationShort(recording.startMs || 0)})` : ''}.`
-              : `Batch ${index + 1} of ${totalPasses} hit a temporary issue. Retrying ${nextAttempt}/${maxAttempts}...`,
-          });
-          state.speakerTrackingStatus = usingClipFallback
-            ? `Retrying saved clip ${Number(recordingIndex || 0) + 1} of ${Number(totalRecordings || clipCount)}...`
-            : `Retrying final speaker batch ${index + 1} of ${totalPasses}...`;
-          if (error?.message) {
-            console.warn('Retrying final speaker batch after diarization error', error);
-          }
-          renderSpeakerInsights();
-        },
-      });
+    setSpeakerFinalizeProgress({
+      total: 1,
+      completed: 0,
+      failed: 0,
+      currentIndex: 1,
+      statusLine: 'Applying final speaker analysis to the saved transcript...',
+      note: 'Matching speaker turns, segment boundaries, and translations.',
+    });
 
-      if (result.ok) {
-        completedPasses += 1;
-        setSpeakerFinalizeProgress({
-          total: totalPasses,
-          completed: completedPasses,
-          failed: failedPasses,
-          currentIndex: Math.min(totalPasses, index + 1),
-          statusLine: `Analyzing final speaker batch ${index + 1} of ${totalPasses}...`,
-          note:
-            result.mode === 'fallback-individual'
-              ? `Finished batch ${index + 1} of ${totalPasses} with clip-by-clip recovery.`
-              : `Finished batch ${index + 1} of ${totalPasses}.`,
-        });
-      } else {
-        failedPasses += 1;
-        console.warn('Final speaker batch diarization failed', result.error);
-        setSpeakerFinalizeProgress({
-          total: totalPasses,
-          completed: completedPasses,
-          failed: failedPasses,
-          currentIndex: Math.min(totalPasses, index + 1),
-          statusLine:
-            result.partial || result.mode === 'fallback-individual'
-              ? `Final batch ${index + 1} of ${totalPasses} only finished partly. The remaining clips stay queued.`
-              : `Final speaker batch ${index + 1} of ${totalPasses} will stay queued for another try.`,
-          note:
-            result.partial || result.mode === 'fallback-individual'
-              ? `Batch ${index + 1} of ${totalPasses} recovered ${Number(result.completedRecordings || 0)} clip${
-                  Number(result.completedRecordings || 0) === 1 ? '' : 's'
-                }, while ${Number(result.failedRecordings || clipCount)} clip${Number(result.failedRecordings || clipCount) === 1 ? '' : 's'} still need another try.`
-              : `Batch ${index + 1} of ${totalPasses} could not be processed yet. It will stay queued for another try.`,
-        });
-      }
+    const renderableFinalSegments = await buildRenderableFinalAnalyzedSegments({
+      finalSegments,
+      session: state.currentSession,
+      sourceSegments: [...state.currentSegments],
+    });
+    ensureFinalizationStillApplies();
 
-      renderSpeakerInsights();
-    }
+    const diarizedSegments = finalSegments.map((segment) => ({
+      speaker: segment.speaker,
+      rawSpeaker: segment.speaker,
+      label: segment.label,
+      text: segment.text,
+      start: Math.max(0, Number(segment.startMs || 0) / 1000),
+      end: Math.max(0, Number(segment.endMs || 0) / 1000),
+    }));
 
+    await applySpeakerLabelsFromDiarizedChunk({
+      sessionId,
+      chunkStartMs: 0,
+      chunkEndMs: Math.max(analysisInput.endMs || 0, Math.round(Number(analysis.durationSeconds || 0) * 1000)),
+      diarizedSegments,
+      force: true,
+    });
+
+    await markRecordingsAsDiarized(analysisInput.recordings);
     await applyManualSpeakerEventsToCurrentSession({ unresolvedStatus: 'unmatched' });
+    ensureFinalizationStillApplies();
 
-    const latestRecordings = getSpeakerFinalizeRecordings(await refreshSessionRecordings(sessionId));
-    const remainingRecordingPasses = latestRecordings.filter((recording) => !recording.diarizedAt && hasRecordingBlob(recording)).length;
+    state.currentSession.finalSpeakerTurns = namedSpeakerTurns;
+    state.currentSession.finalAnalyzedSegments = renderableFinalSegments;
+    state.currentSession.speakerFinalizedAt = nowIso();
+    await persistCurrentSessionNow();
+    renderCurrentView();
 
-    if (remainingRecordingPasses > 0) {
-      const processedPasses = Math.max(0, latestRecordings.length - remainingRecordingPasses);
-      state.currentSession.speakerFinalizedAt = '';
-      await persistCurrentSessionNow();
-      state.speakerTrackingStatus = processedPasses
-        ? `Final speaker timing updated for ${processedPasses} clip${processedPasses === 1 ? '' : 's'}. ${remainingRecordingPasses} clip${remainingRecordingPasses === 1 ? '' : 's'} still need another try.`
-        : `Final speaker timing hit a temporary issue. ${remainingRecordingPasses} clip${remainingRecordingPasses === 1 ? '' : 's'} still need another try.`;
-      showToast(
-        processedPasses
-          ? `Final speaker timing updated for ${processedPasses}/${latestRecordings.length || remainingRecordingPasses} clips. ${remainingRecordingPasses} still queued.`
-          : 'Final speaker timing hit a temporary issue. The remaining clips stay queued for retry.',
-        5000
-      );
-    } else {
-      state.currentSession.speakerFinalizedAt = nowIso();
-      await persistCurrentSessionNow();
-      state.speakerTrackingStatus = 'Final speaker timing updated.';
-      showToast('Final speaker timing is ready.');
-    }
-
+    setSpeakerFinalizeProgress({
+      total: 1,
+      completed: 1,
+      failed: 0,
+      currentIndex: 1,
+      statusLine: 'Final speaker analysis finished.',
+      note: `${namedSpeakerTurns.length} speaker turn${namedSpeakerTurns.length === 1 ? '' : 's'} analyzed across the saved session audio.`,
+    });
+    state.speakerTrackingStatus = 'Final speaker analysis updated.';
+    showToast('Final speaker analysis is ready.');
     return true;
   } catch (error) {
-    if (error?.name === 'SpeakerFinalizeDeferred') {
-      state.currentSession.speakerFinalizedAt = '';
-      await persistCurrentSessionNow();
-      state.speakerTrackingStatus = 'Automatic speaker timing will resume after you stop the session again.';
+    console.warn('Unable to finalize speaker analysis', error);
+    if (error?.code === 'SESSION_RESUMED') {
+      state.speakerTrackingStatus = 'Final speaker analysis was canceled because the session resumed.';
+      if (!auto) showToast(error.message, 4500);
       return false;
     }
-
-    console.warn('Unable to finalize speaker timing', error);
-    state.currentSession.speakerFinalizedAt = '';
-    await persistCurrentSessionNow();
-    state.speakerTrackingStatus = 'Speaker timing hit a temporary issue. The remaining clips stay queued for retry.';
-    showToast('Speaker timing hit a temporary issue. Try the remaining clips again in a moment.', 5000);
+    if (error?.code === 'SESSION_CHANGED') {
+      state.speakerTrackingStatus = 'Final speaker analysis stopped because another session was opened.';
+      if (!auto) showToast(error.message, 4500);
+      return false;
+    }
+    state.speakerTrackingStatus = 'Speaker analysis hit a temporary issue.';
+    showToast(error?.message || 'Speaker analysis hit a temporary issue.', 5000);
     return false;
   } finally {
     state.speakerFinalizeInProgress = false;
@@ -5936,7 +6273,7 @@ function queueSpeakerAttribution(chunk) {
     .then(async () => {
       state.speakerTrackingInFlight = true;
       const filenameExtension = chunk.mimeType.includes('mp4') ? 'm4a' : chunk.mimeType.includes('ogg') ? 'ogg' : 'webm';
-      const diarized = await runDiarizeAudioChunk({
+      const diarized = await runSessionAnalysisRequest({
         apiKey: state.settings.apiKey,
         audioBlob: chunk.blob,
         filename: `speaker-chunk-${chunk.index}.${filenameExtension}`,
@@ -6085,7 +6422,7 @@ function buildRealtimeClientOptions() {
       const micLevelStream = stream.clone();
       stopSpeakerTracks(stream);
 
-      startSessionRecording(sessionRecordingStream).catch((error) => {
+      startAnalysisRecording(sessionRecordingStream).catch((error) => {
         console.warn('Local session recording failed to start', error);
       });
       startMicLevelMeter(micLevelStream).catch((error) => {
@@ -6104,9 +6441,9 @@ function buildRealtimeClientOptions() {
       state.speechActive = false;
       await pauseManualSpeakerTimer({ persist: false });
       clearSpeakerFinalizeAutoTimer();
-      await stopSpeakerTracking({ statusMessage: 'Automatic speaker timing runs after you stop the session.' });
+      await stopSpeakerTracking({ statusMessage: 'Final speaker analysis runs after you stop the session.' });
       await stopMicLevelMeter();
-      await stopSessionRecording();
+      await stopAnalysisRecording();
       await ensureScreenWakeLock(false);
       flushListeningClock();
       flushSpeechClock();
@@ -6169,9 +6506,9 @@ async function startListening({ silent = false } = {}) {
   }
   if (state.client) {
     resetLiveCommitState();
-    await stopSpeakerTracking({ statusMessage: 'Automatic speaker timing will rerun after you stop the session.' });
+    await stopSpeakerTracking({ statusMessage: 'Final speaker analysis will rerun after you stop the session.' });
     await stopMicLevelMeter();
-    await stopSessionRecording();
+    await stopAnalysisRecording();
     await state.client.disconnect({ nextStatus: 'stopped', message: 'Resetting the live connection...' });
     state.client = null;
   }
@@ -6210,9 +6547,9 @@ async function startListening({ silent = false } = {}) {
     resetLiveCommitState();
     state.speechActive = false;
     await pauseManualSpeakerTimer({ persist: false });
-    await stopSpeakerTracking({ statusMessage: 'Automatic speaker timing runs after you stop the session.' });
+    await stopSpeakerTracking({ statusMessage: 'Final speaker analysis runs after you stop the session.' });
     await stopMicLevelMeter();
-    await stopSessionRecording();
+    await stopAnalysisRecording();
     await ensureScreenWakeLock(false);
     state.client = null;
     const message = error?.message || 'Unable to start live transcription.';
@@ -6235,9 +6572,9 @@ async function pauseListening() {
   flushSpeechClock();
   state.speechActive = false;
   await pauseManualSpeakerTimer({ persist: false });
-  await stopSpeakerTracking({ statusMessage: 'Paused. Automatic speaker timing will run after you stop the session.' });
+  await stopSpeakerTracking({ statusMessage: 'Paused. Final speaker analysis will run after you stop the session.' });
   await stopMicLevelMeter();
-  await stopSessionRecording();
+  await stopAnalysisRecording();
   if (state.client) {
     await state.client.disconnect({ nextStatus: 'paused', message: pausedMessage });
   }
@@ -6261,9 +6598,9 @@ async function stopListening() {
   flushSpeechClock();
   state.speechActive = false;
   await pauseManualSpeakerTimer({ persist: false });
-  await stopSpeakerTracking({ statusMessage: 'Stopped. Automatic speaker timing is running on the saved session audio.' });
+  await stopSpeakerTracking({ statusMessage: 'Stopped. Final speaker analysis is running on the saved session audio.' });
   await stopMicLevelMeter();
-  await stopSessionRecording();
+  await stopAnalysisRecording();
   if (state.client) {
     await state.client.disconnect({ nextStatus: 'stopped', message: stoppedMessage });
     await ensureScreenWakeLock(false);
@@ -6291,9 +6628,9 @@ async function endCurrentSession() {
   flushSpeechClock();
   state.speechActive = false;
   await pauseManualSpeakerTimer({ persist: false });
-  await stopSpeakerTracking({ statusMessage: 'Ending session. Automatic speaker timing is running on the saved session audio.' });
+  await stopSpeakerTracking({ statusMessage: 'Ending session. Final speaker analysis is running on the saved session audio.' });
   await stopMicLevelMeter();
-  await stopSessionRecording();
+  await stopAnalysisRecording();
   if (state.client) {
     await state.client.disconnect({ nextStatus: 'ended', message: 'Session ended.' });
     await ensureScreenWakeLock(false);
@@ -6853,9 +7190,9 @@ async function rolloverConnection() {
   resetLiveCommitState();
   flushListeningClock();
   flushSpeechClock();
-  await stopSpeakerTracking({ statusMessage: 'Automatic speaker timing will rerun after you stop the session.' });
+  await stopSpeakerTracking({ statusMessage: 'Final speaker analysis will rerun after you stop the session.' });
   await stopMicLevelMeter();
-  await stopSessionRecording();
+  await stopAnalysisRecording();
   await state.client.disconnect({ nextStatus: 'reconnecting', message: 'Refreshing the live connection...' });
   state.client = null;
   await persistCurrentSessionNow();
@@ -6870,22 +7207,24 @@ function closeClosestActionMenu(element) {
 }
 
 async function exportCurrentSession(kind) {
-  if (!state.currentSession || !state.currentSegments.length) {
+  const segments = getRenderableTranscriptSegments();
+
+  if (!state.currentSession || !segments.length) {
     showToast('There is nothing to export yet.');
     return;
   }
 
   if (kind === 'md') {
-    exportSessionMarkdown(state.currentSession, state.currentSegments, buildTranscriptTimestamp);
+    exportSessionMarkdown(state.currentSession, segments, buildTranscriptTimestamp);
     return;
   }
 
-  exportSessionTxt(state.currentSession, state.currentSegments, buildTranscriptTimestamp);
+  exportSessionTxt(state.currentSession, segments, buildTranscriptTimestamp);
 }
 
 async function exportHistoricalSession(sessionId, kind) {
   const session = await getSession(sessionId);
-  const segments = await listSegmentsBySession(sessionId);
+  const segments = getRenderableTranscriptSegments(session, await listSegmentsBySession(sessionId));
   if (!session || !segments.length) {
     showToast('That session has no transcript segments to export.');
     return;
@@ -6933,6 +7272,32 @@ async function applySpeakerAliasesToCurrentSession(nextAliases) {
 
   for (const segment of updatedSegments) {
     await upsertSegment(segment);
+  }
+
+  if (Array.isArray(state.currentSession.finalAnalyzedSegments) && state.currentSession.finalAnalyzedSegments.length) {
+    state.currentSession.finalAnalyzedSegments = state.currentSession.finalAnalyzedSegments.map((segment, index) => {
+      const normalized = normalizeFinalAnalyzedSegment(segment, state.currentSession, index);
+      const rawLabel = getSegmentRawSpeakerLabel(normalized);
+      if (!rawLabel) return normalized;
+      return {
+        ...normalized,
+        speakerRawLabel: rawLabel,
+        speakerLabel: resolveSpeakerLabel(rawLabel, state.currentSession, normalized.speakerLabel || getDefaultSpeakerLabel(rawLabel)),
+      };
+    });
+  }
+
+  if (Array.isArray(state.currentSession.finalSpeakerTurns) && state.currentSession.finalSpeakerTurns.length) {
+    state.currentSession.finalSpeakerTurns = state.currentSession.finalSpeakerTurns.map((turn) => {
+      const rawLabel = String(turn?.speaker || turn?.rawSpeaker || '').trim();
+      if (!rawLabel) return turn;
+      return {
+        ...turn,
+        rawSpeaker: rawLabel,
+        speaker: rawLabel,
+        label: resolveSpeakerLabel(rawLabel, state.currentSession, String(turn?.assignedLabel || turn?.label || '').trim() || getDefaultSpeakerLabel(rawLabel)),
+      };
+    });
   }
 
   await persistCurrentSessionNow();
@@ -7461,9 +7826,9 @@ function bindEvents() {
   window.addEventListener('pagehide', () => {
     flushListeningClock();
     flushSpeechClock();
-    stopSpeakerTracking({ statusMessage: 'Leaving the page. Automatic speaker timing will wait until you stop the session again.' }).catch(() => {});
+    stopSpeakerTracking({ statusMessage: 'Leaving the page. Final speaker analysis will wait until you stop the session again.' }).catch(() => {});
     stopMicLevelMeter().catch(() => {});
-    stopSessionRecording().catch(() => {});
+    stopAnalysisRecording().catch(() => {});
     ensureScreenWakeLock(false).catch(() => {});
     if (state.currentSession && state.currentSession.status !== 'ended' && ['listening', 'connecting', 'reconnecting'].includes(state.runtimeStatus)) {
       state.currentSession.runtimeStatus = 'stopped';
@@ -7642,6 +8007,7 @@ async function setDebugRecordings(recordings = []) {
         sessionId,
         startMs,
         endMs,
+        kind: recording?.kind || 'session-audio',
         mimeType: recording?.mimeType || blob.type || 'audio/wav',
         blob,
         diarizedAt: recording?.diarizedAt || '',
@@ -7713,6 +8079,8 @@ async function createDebugSession({
     manualSpeakerPauseReason: 'idle',
     manualSpeakerCurrentLabel: '',
     manualSpeakerPendingChangeAtMs: null,
+    finalSpeakerTurns: [],
+    finalAnalyzedSegments: [],
     speakerFinalizedAt: '',
   };
   state.currentSession = session;

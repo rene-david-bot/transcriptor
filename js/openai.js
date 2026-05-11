@@ -548,9 +548,9 @@ export class RealtimeTranscriptionClient {
   }
 }
 
-export async function diarizeAudioChunk({ apiKey, audioBlob, filename, language, signal }) {
+export async function runFinalSessionAnalysis({ apiKey, audioBlob, filename, language, signal }) {
   const formData = new FormData();
-  formData.set('file', audioBlob, filename || 'speaker-chunk.webm');
+  formData.set('file', audioBlob, filename || 'session-analysis.wav');
   formData.set('model', SPEAKER_DIARIZATION_MODEL);
   formData.set('response_format', 'diarized_json');
   formData.set('chunking_strategy', 'auto');
@@ -570,14 +570,39 @@ export async function diarizeAudioChunk({ apiKey, audioBlob, filename, language,
 
   const json = await response.json().catch(() => null);
   if (!response.ok) {
-    throw new Error(extractErrorMessage(json, `Speaker diarization failed (${response.status})`));
+    throw new Error(extractErrorMessage(json, `Session analysis failed (${response.status})`));
   }
+
+  const segments = Array.isArray(json?.segments) ? json.segments : [];
+  const rawSpeakerTurns = Array.isArray(json?.speaker_turns) && json.speaker_turns.length ? json.speaker_turns : segments;
+  const words = Array.isArray(json?.words)
+    ? json.words
+    : rawSpeakerTurns.flatMap((segment) => (Array.isArray(segment?.words) ? segment.words : []));
+
+  const speakerTurns = rawSpeakerTurns
+    .map((segment, index) => ({
+      id: String(segment?.id || `turn-${index + 1}`),
+      speaker: String(segment?.speaker || segment?.label || '').trim(),
+      rawSpeaker: String(segment?.rawSpeaker || segment?.speaker || '').trim(),
+      label: String(segment?.label || '').trim(),
+      text: String(segment?.text || '').trim(),
+      start: Number(segment?.start || 0),
+      end: Number(segment?.end || 0),
+    }))
+    .filter((segment) => segment.end > segment.start);
 
   return {
     durationSeconds: Number(json?.duration || 0),
     text: String(json?.text || ''),
-    segments: Array.isArray(json?.segments) ? json.segments : [],
+    words,
+    speakerTurns,
+    segments,
+    raw: json,
   };
+}
+
+export async function diarizeAudioChunk(options) {
+  return runFinalSessionAnalysis(options);
 }
 
 export async function translateText({

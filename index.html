@@ -139,7 +139,7 @@
                     autocomplete="off"
                     placeholder="Rene, Moderator, Guest"
                   />
-                  <small>Used for manual speaker timing and to name automatic speakers after the final pass on the saved session audio.</small>
+                  <small>Used for manual speaker timing and to name speakers after the final saved-audio analysis pass.</small>
                 </label>
 
                 <section class="inline-settings-card">
@@ -270,7 +270,7 @@
                   </div>
 
                   <div class="button-row button-row--wrap control-secondary-actions">
-                    <button class="button button--secondary button--small" id="finalizeSpeakerButton" type="button">Run final speaker timing</button>
+                    <button class="button button--secondary button--small" id="finalizeSpeakerButton" type="button">Run final speaker analysis</button>
                     <button class="button button--ghost button--small" id="openMicSettingsButton" type="button">Mic settings</button>
                   </div>
                 </section>
@@ -363,12 +363,12 @@
                     <summary class="live-disclosure__summary">
                       <div>
                         <p class="eyebrow">Insights</p>
-                        <h3>Speaker timing &amp; session audio</h3>
+                        <h3>Speaker analysis &amp; session audio</h3>
                       </div>
                     </summary>
                     <div class="live-disclosure__body">
                       <div class="speaker-summary" id="speakerSummary">
-                        <div class="note">No speaker timing data yet.</div>
+                        <div class="note">No speaker analysis data yet.</div>
                       </div>
                       <div class="review-audio-panel">
                         <div class="review-audio-panel__top">
@@ -430,7 +430,7 @@
                         <li>Final transcript segments are saved locally after each completed turn.</li>
                         <li>After long listening sessions, the connection rolls over automatically.</li>
                         <li>Resume continues the same logical session and transcript history.</li>
-                        <li>Automatic speaker timing runs after Stop using the saved session audio, not during live capture.</li>
+                        <li>Final speaker analysis runs after Stop using the saved session audio, not during live capture.</li>
                       </ul>
                     </div>
                   </details>
@@ -601,6 +601,6 @@
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-    <script type="module" src="./js/app.js?v=20260510-final-speaker-pass-only"></script>
+    <script type="module" src="./js/app.js?v=20260511-final-speaker-pass-v81"></script>
   </body>
 </html>
