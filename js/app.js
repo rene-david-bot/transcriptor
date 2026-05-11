@@ -195,6 +195,7 @@ const state = {
   sessionRecordingMimeType: '',
   sessionRecordingChunkStartMs: 0,
   sessionRecordingSessionId: null,
+  sessionChunkStopTimer: null,
   micLevelStream: null,
   micLevelAudioContext: null,
   micLevelSourceNode: null,
@@ -210,6 +211,9 @@ const state = {
   sessionRecordings: [],
   sessionPlaybackClipIndex: -1,
   sessionPlaybackObjectUrl: '',
+  sessionPlaybackMode: 'clip',
+  sessionPlaybackBaseStartMs: 0,
+  sessionPlaybackCombinedSignature: '',
   sessionPlaybackSegmentId: '',
   sessionPlaybackAutoScroll: true,
   sessionPlaybackPreviewMs: null,
@@ -493,6 +497,38 @@ async function waitForPendingSessionRecordingWrites() {
     const pending = [...state.sessionRecordingPersistTasks];
     await Promise.allSettled(pending);
   }
+}
+
+function clearSessionChunkStopTimer() {
+  window.clearTimeout(state.sessionChunkStopTimer);
+  state.sessionChunkStopTimer = null;
+}
+
+function buildSessionRecordingBlobSignature(recordings = state.sessionRecordings) {
+  return (Array.isArray(recordings) ? recordings : [])
+    .filter((recording) => hasRecordingBlob(recording))
+    .map(
+      (recording) =>
+        `${recording.id || ''}:${Number(recording.startMs || 0)}:${Number(recording.endMs || 0)}:${recording.blob?.size || 0}:${
+          recording.mimeType || recording.blob?.type || ''
+        }`
+    )
+    .join('|');
+}
+
+function buildCombinedSessionRecordingBlob(recordings = state.sessionRecordings) {
+  const playableRecordings = (Array.isArray(recordings) ? recordings : []).filter((recording) => hasRecordingBlob(recording));
+  if (!playableRecordings.length) return null;
+
+  const firstRecording = playableRecordings[0];
+  return {
+    blob: new Blob(
+      playableRecordings.map((recording) => recording.blob),
+      { type: firstRecording.mimeType || firstRecording.blob?.type || 'audio/webm' }
+    ),
+    signature: buildSessionRecordingBlobSignature(playableRecordings),
+    startMs: Number(firstRecording.startMs || 0),
+  };
 }
 
 function getManualSpeakerEntryId(entry, index = 0) {
@@ -3645,11 +3681,18 @@ function isReviewAudioPlaying() {
   );
 }
 
+function getSessionPlaybackBaseStartMs() {
+  return Math.max(0, Number(state.sessionPlaybackBaseStartMs || 0));
+}
+
+function getCombinedSessionPlaybackOffsetMs(absoluteMs) {
+  return Math.max(0, clampSessionPlaybackMs(absoluteMs) - getSessionPlaybackBaseStartMs());
+}
+
 function getCurrentPlaybackAbsoluteMs() {
   const audio = elements.reviewAudio;
-  const recording = state.sessionRecordings[state.sessionPlaybackClipIndex];
-  if (!audio || !recording) return null;
-  return Number(recording.startMs || 0) + Math.round((audio.currentTime || 0) * 1000);
+  if (!audio || !audio.src || state.sessionPlaybackClipIndex === -1) return null;
+  return getSessionPlaybackBaseStartMs() + Math.round((audio.currentTime || 0) * 1000);
 }
 
 function updateSpeakerPlaybackIndicator() {
@@ -3677,9 +3720,123 @@ function resetSessionPlaybackState() {
   }
   state.sessionPlaybackClipIndex = -1;
   state.sessionPlaybackObjectUrl = '';
+  state.sessionPlaybackMode = 'clip';
+  state.sessionPlaybackBaseStartMs = 0;
+  state.sessionPlaybackCombinedSignature = '';
   state.sessionPlaybackSegmentId = '';
   state.sessionPlaybackPreviewMs = null;
   state.reviewAudioFloatingActive = false;
+}
+
+async function waitForReviewAudioReady(audio, timeoutMs = 2500) {
+  if (!audio) return false;
+
+  if (Number.isFinite(audio.duration) && audio.readyState >= 1) {
+    return true;
+  }
+
+  await new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      cleanup();
+      reject(new Error('Timed out while loading the saved audio clip.'));
+    }, Math.max(400, Number(timeoutMs || 0)));
+
+    const cleanup = () => {
+      window.clearTimeout(timer);
+      audio.removeEventListener('loadedmetadata', handleReady);
+      audio.removeEventListener('canplay', handleReady);
+      audio.removeEventListener('error', handleError);
+    };
+
+    const handleReady = () => {
+      cleanup();
+      resolve(true);
+    };
+
+    const handleError = () => {
+      cleanup();
+      reject(new Error('The saved audio clip could not be loaded.'));
+    };
+
+    audio.addEventListener('loadedmetadata', handleReady);
+    audio.addEventListener('canplay', handleReady);
+    audio.addEventListener('error', handleError);
+  });
+
+  return true;
+}
+
+async function loadCombinedSessionPlayback({ autoplay = false, seekMs = null, forceScroll = false, userGesture = false } = {}) {
+  const audio = elements.reviewAudio;
+  const combined = buildCombinedSessionRecordingBlob();
+  if (!audio || !combined?.blob) return false;
+
+  ensureReviewAudioPlaybackDefaults();
+  state.sessionPlaybackPreviewMs = null;
+
+  const targetMs = seekMs === null ? combined.startMs : clampSessionPlaybackMs(seekMs);
+
+  if (
+    state.sessionPlaybackMode === 'combined' &&
+    state.sessionPlaybackObjectUrl &&
+    state.sessionPlaybackCombinedSignature === combined.signature &&
+    audio.src
+  ) {
+    audio.currentTime = Math.max(0, getCombinedSessionPlaybackOffsetMs(targetMs) / 1000);
+    state.sessionPlaybackClipIndex = findRecordingIndexForTime(targetMs);
+    renderRecordingReview();
+    if (autoplay) {
+      await audio.play().catch(() => {});
+    }
+    updatePlaybackHighlight({ shouldScroll: true, forceScroll });
+    return true;
+  }
+
+  const objectUrl = URL.createObjectURL(combined.blob);
+  audio.src = objectUrl;
+  audio.load();
+
+  if (autoplay && userGesture) {
+    try {
+      const playAttempt = audio.play();
+      if (playAttempt && typeof playAttempt.catch === 'function') {
+        playAttempt.catch(() => {});
+      }
+    } catch {
+      // ignore user-gesture priming failures
+    }
+  }
+
+  try {
+    await waitForReviewAudioReady(audio);
+  } catch (error) {
+    URL.revokeObjectURL(objectUrl);
+    throw error;
+  }
+
+  if (state.sessionPlaybackObjectUrl) {
+    URL.revokeObjectURL(state.sessionPlaybackObjectUrl);
+  }
+
+  state.sessionPlaybackObjectUrl = objectUrl;
+  state.sessionPlaybackMode = 'combined';
+  state.sessionPlaybackBaseStartMs = combined.startMs;
+  state.sessionPlaybackCombinedSignature = combined.signature;
+  state.sessionPlaybackClipIndex = findRecordingIndexForTime(targetMs);
+
+  audio.currentTime = Math.max(0, getCombinedSessionPlaybackOffsetMs(targetMs) / 1000);
+  renderRecordingReview();
+  updatePlaybackHighlight({ shouldScroll: true, forceScroll });
+
+  if (autoplay) {
+    try {
+      await audio.play();
+    } catch {
+      // ignore autoplay rejection
+    }
+  }
+
+  return true;
 }
 
 function updatePlaybackHighlight({ shouldScroll = false, forceScroll = false } = {}) {
@@ -3736,7 +3893,7 @@ async function flushSessionRecordingData({ targetMs = null, timeoutMs = 2500 } =
   }
 
   const recorder = state.sessionRecorder;
-  if (!recorder || recorder.state === 'inactive' || typeof recorder.requestData !== 'function') {
+  if (!recorder || recorder.state === 'inactive') {
     return false;
   }
 
@@ -3746,7 +3903,15 @@ async function flushSessionRecordingData({ targetMs = null, timeoutMs = 2500 } =
     const initialLatestEndMs = getLatestSavedRecordingEndMs();
 
     try {
-      recorder.requestData();
+      clearSessionChunkStopTimer();
+      await new Promise((resolve) => {
+        recorder.addEventListener('stop', resolve, { once: true });
+        try {
+          recorder.stop();
+        } catch {
+          resolve();
+        }
+      });
     } catch (error) {
       console.warn('Unable to flush the current session recording chunk', error);
       return false;
@@ -3815,9 +3980,24 @@ async function loadRecordingClip(index, { autoplay = false, seekMs = null, force
   const audio = elements.reviewAudio;
   const recording = state.sessionRecordings[index];
   if (!audio || !recording?.blob) return false;
+
   ensureReviewAudioPlaybackDefaults();
   state.sessionPlaybackPreviewMs = null;
-  if (state.sessionPlaybackClipIndex === index && audio.src) {
+
+  if (state.sessionPlaybackMode === 'combined' && audio.src) {
+    if (seekMs !== null) {
+      audio.currentTime = Math.max(0, getCombinedSessionPlaybackOffsetMs(seekMs) / 1000);
+      state.sessionPlaybackClipIndex = findRecordingIndexForTime(seekMs);
+    }
+    renderRecordingReview();
+    if (autoplay) {
+      await audio.play().catch(() => {});
+    }
+    updatePlaybackHighlight({ shouldScroll: true, forceScroll });
+    return true;
+  }
+
+  if (state.sessionPlaybackClipIndex === index && state.sessionPlaybackMode === 'clip' && audio.src) {
     if (seekMs !== null) {
       audio.currentTime = Math.max(0, clampRecordingSeekOffsetMs(recording, seekMs) / 1000);
     }
@@ -3828,12 +4008,8 @@ async function loadRecordingClip(index, { autoplay = false, seekMs = null, force
     updatePlaybackHighlight({ shouldScroll: true, forceScroll });
     return true;
   }
-  if (state.sessionPlaybackObjectUrl) {
-    URL.revokeObjectURL(state.sessionPlaybackObjectUrl);
-  }
+
   const objectUrl = URL.createObjectURL(recording.blob);
-  state.sessionPlaybackObjectUrl = objectUrl;
-  state.sessionPlaybackClipIndex = index;
   audio.src = objectUrl;
   audio.load();
 
@@ -3848,9 +4024,34 @@ async function loadRecordingClip(index, { autoplay = false, seekMs = null, force
     }
   }
 
-  await new Promise((resolve) => {
-    audio.addEventListener('loadedmetadata', resolve, { once: true });
-  }).catch(() => {});
+  try {
+    await waitForReviewAudioReady(audio);
+  } catch (error) {
+    URL.revokeObjectURL(objectUrl);
+    audio.removeAttribute('src');
+    audio.load();
+    if (state.sessionRecordings.length > 1) {
+      console.warn('Saved session clip failed to load directly, falling back to combined playback.', error);
+      return loadCombinedSessionPlayback({
+        autoplay,
+        seekMs: seekMs === null ? Number(recording.startMs || 0) : seekMs,
+        forceScroll,
+        userGesture,
+      });
+    }
+    throw error;
+  }
+
+  if (state.sessionPlaybackObjectUrl) {
+    URL.revokeObjectURL(state.sessionPlaybackObjectUrl);
+  }
+
+  state.sessionPlaybackObjectUrl = objectUrl;
+  state.sessionPlaybackClipIndex = index;
+  state.sessionPlaybackMode = 'clip';
+  state.sessionPlaybackBaseStartMs = Number(recording.startMs || 0);
+  state.sessionPlaybackCombinedSignature = '';
+
   ensureReviewAudioPlaybackDefaults();
   if (seekMs !== null) {
     audio.currentTime = Math.max(0, clampRecordingSeekOffsetMs(recording, seekMs) / 1000);
@@ -3883,14 +4084,18 @@ function primeReviewAudioPlaybackForUserGesture(targetMs = null) {
   const clipIndex = desiredMs === null ? state.sessionPlaybackClipIndex : findRecordingIndexForTime(desiredMs);
   if (clipIndex === -1) return false;
 
-  if (state.sessionPlaybackClipIndex === clipIndex && audio.src && desiredMs !== null) {
-    const recording = state.sessionRecordings[clipIndex];
-    if (recording) {
-      try {
-        audio.currentTime = Math.max(0, clampRecordingSeekOffsetMs(recording, desiredMs) / 1000);
-      } catch {
-        // ignore seek priming errors
+  if (audio.src && desiredMs !== null) {
+    try {
+      if (state.sessionPlaybackMode === 'combined') {
+        audio.currentTime = Math.max(0, getCombinedSessionPlaybackOffsetMs(desiredMs) / 1000);
+      } else if (state.sessionPlaybackClipIndex === clipIndex) {
+        const recording = state.sessionRecordings[clipIndex];
+        if (recording) {
+          audio.currentTime = Math.max(0, clampRecordingSeekOffsetMs(recording, desiredMs) / 1000);
+        }
       }
+    } catch {
+      // ignore seek priming errors
     }
   }
 
@@ -3945,6 +4150,11 @@ async function playReviewAudio({ userGesture = false } = {}) {
     if (!played) {
       showToast('No saved audio clip covers that part yet.', 3000);
     }
+    return;
+  }
+  if (audio.ended && state.sessionPlaybackMode === 'combined') {
+    audio.currentTime = 0;
+    await audio.play().catch(() => {});
     return;
   }
   if (audio.ended && state.sessionPlaybackClipIndex >= state.sessionRecordings.length - 1) {
@@ -4004,9 +4214,9 @@ function renderRecordingReview() {
   const count = state.sessionRecordings.length;
   const durationMs = getSessionRecordingDurationMs();
   const undiarized = state.sessionRecordings.filter((recording) => !recording.diarizedAt).length;
-  const currentIndex = state.sessionPlaybackClipIndex;
-  const currentClip = currentIndex >= 0 ? state.sessionRecordings[currentIndex] : null;
   const currentPlaybackMs = getVisibleSessionPlaybackMs();
+  const currentIndex = currentPlaybackMs !== null ? findRecordingIndexForTime(currentPlaybackMs) : state.sessionPlaybackClipIndex;
+  const currentClip = currentIndex >= 0 ? state.sessionRecordings[currentIndex] : null;
   const playing = isReviewAudioPlaying();
   const floatingPlayback = count > 0 && (playing || state.reviewAudioFloatingActive);
 
@@ -4048,7 +4258,12 @@ function renderRecordingReview() {
   syncReviewAudioTransportMount({ floatingPlayback: floatingPlayback && count > 0 });
   if (elements.reviewAudio) {
     elements.reviewAudio.classList.add('hidden');
-    elements.reviewAudio.dataset.clipLabel = currentClip ? `${formatDurationShort(currentClip.startMs || 0)}-${formatDurationShort(currentClip.endMs || 0)}` : '';
+    elements.reviewAudio.dataset.clipLabel =
+      state.sessionPlaybackMode === 'combined' && durationMs
+        ? `00:00-${formatDurationShort(durationMs)}`
+        : currentClip
+          ? `${formatDurationShort(currentClip.startMs || 0)}-${formatDurationShort(currentClip.endMs || 0)}`
+          : '';
   }
 
   if (elements.reviewCurrentTime) {
@@ -4881,6 +5096,37 @@ function createMonoWavBlob(samples, sampleRate) {
   return new Blob([wavBuffer], { type: 'audio/wav' });
 }
 
+function createMonoWavBlobFromDecodedBuffers(decodedBuffers = [], fallbackSampleRate = 16000) {
+  if (!decodedBuffers.length) {
+    throw new Error('The saved audio clips could not be decoded for final speaker analysis.');
+  }
+
+  const sampleRate = decodedBuffers[0].sampleRate || fallbackSampleRate || 16000;
+  const totalFrames = decodedBuffers.reduce((total, buffer) => total + buffer.length, 0);
+  const monoSamples = new Float32Array(totalFrames);
+
+  let writeOffset = 0;
+  decodedBuffers.forEach((buffer) => {
+    const channelCount = Math.max(1, Number(buffer.numberOfChannels || 1));
+    const channelData = Array.from({ length: channelCount }, (_, index) => buffer.getChannelData(index));
+    for (let frame = 0; frame < buffer.length; frame += 1) {
+      let sample = 0;
+      for (let channelIndex = 0; channelIndex < channelCount; channelIndex += 1) {
+        sample += channelData[channelIndex]?.[frame] || 0;
+      }
+      monoSamples[writeOffset + frame] = sample / channelCount;
+    }
+    writeOffset += buffer.length;
+  });
+
+  return createMonoWavBlob(monoSamples, sampleRate);
+}
+
+async function decodeRecordingBlobToAudioBuffer(audioContext, blob) {
+  const arrayBuffer = await blob.arrayBuffer();
+  return audioContext.decodeAudioData(arrayBuffer.slice(0));
+}
+
 async function mergeRecordingBatchToWav(recordings = []) {
   if (!recordings.length) throw new Error('No session recordings available for final speaker analysis.');
   const AudioContextClass = getSpeakerFinalizeAudioContextClass();
@@ -4897,39 +5143,47 @@ async function mergeRecordingBatchToWav(recordings = []) {
 
   try {
     const decodedBuffers = [];
+    let failedDirectDecode = false;
     for (const recording of recordings) {
       const blob = recording?.blob;
       if (!blob) continue;
-      const arrayBuffer = await blob.arrayBuffer();
-      const decoded = await audioContext.decodeAudioData(arrayBuffer.slice(0));
-      if (decoded?.length) {
-        decodedBuffers.push(decoded);
+      try {
+        const decoded = await decodeRecordingBlobToAudioBuffer(audioContext, blob);
+        if (decoded?.length) {
+          decodedBuffers.push(decoded);
+        }
+      } catch (error) {
+        failedDirectDecode = true;
+        console.warn('Unable to decode a saved session clip directly, trying a combined audio fallback.', error);
+        break;
       }
+    }
+
+    if (!failedDirectDecode && decodedBuffers.length) {
+      return createMonoWavBlobFromDecodedBuffers(decodedBuffers, audioContext.sampleRate || 16000);
+    }
+
+    const combined = buildCombinedSessionRecordingBlob(recordings);
+    if (combined?.blob) {
+      try {
+        const combinedBuffer = await decodeRecordingBlobToAudioBuffer(audioContext, combined.blob);
+        if (combinedBuffer?.length) {
+          return createMonoWavBlobFromDecodedBuffers([combinedBuffer], audioContext.sampleRate || 16000);
+        }
+      } catch (error) {
+        console.warn('Unable to decode the combined saved session audio blob.', error);
+      }
+    }
+
+    if (decodedBuffers.length) {
+      return createMonoWavBlobFromDecodedBuffers(decodedBuffers, audioContext.sampleRate || 16000);
     }
 
     if (!decodedBuffers.length) {
       throw new Error('The saved audio clips could not be decoded for final speaker analysis.');
     }
 
-    const sampleRate = decodedBuffers[0].sampleRate || audioContext.sampleRate || 16000;
-    const totalFrames = decodedBuffers.reduce((total, buffer) => total + buffer.length, 0);
-    const monoSamples = new Float32Array(totalFrames);
-
-    let writeOffset = 0;
-    decodedBuffers.forEach((buffer) => {
-      const channelCount = Math.max(1, Number(buffer.numberOfChannels || 1));
-      const channelData = Array.from({ length: channelCount }, (_, index) => buffer.getChannelData(index));
-      for (let frame = 0; frame < buffer.length; frame += 1) {
-        let sample = 0;
-        for (let channelIndex = 0; channelIndex < channelCount; channelIndex += 1) {
-          sample += channelData[channelIndex]?.[frame] || 0;
-        }
-        monoSamples[writeOffset + frame] = sample / channelCount;
-      }
-      writeOffset += buffer.length;
-    });
-
-    return createMonoWavBlob(monoSamples, sampleRate);
+    return createMonoWavBlobFromDecodedBuffers(decodedBuffers, audioContext.sampleRate || 16000);
   } finally {
     try {
       await audioContext.close();
@@ -5645,7 +5899,12 @@ async function stopSpeakerTracking({ statusMessage } = {}) {
 }
 
 async function stopSessionRecording() {
+  clearSessionChunkStopTimer();
+
   const recorder = state.sessionRecorder;
+  const stream = state.sessionRecordingStream;
+  state.sessionRecordingSessionId = null;
+
   if (recorder && recorder.state !== 'inactive') {
     await new Promise((resolve) => {
       recorder.addEventListener('stop', resolve, { once: true });
@@ -5659,13 +5918,108 @@ async function stopSessionRecording() {
 
   await waitForPendingSessionRecordingWrites();
 
-  stopSpeakerTracks(state.sessionRecordingStream);
+  stopSpeakerTracks(stream);
   state.sessionRecordingFlushPromise = null;
   state.sessionRecorder = null;
   state.sessionRecordingStream = null;
   state.sessionRecordingMimeType = '';
   state.sessionRecordingChunkStartMs = 0;
   state.sessionRecordingSessionId = null;
+}
+
+function shouldContinueSessionRecording(sessionId, stream) {
+  return Boolean(
+    state.sessionRecordingSessionId === sessionId &&
+      state.sessionRecordingStream === stream &&
+      state.currentSession?.id === sessionId &&
+      state.currentSession.status === 'active'
+  );
+}
+
+function startSessionChunkRecorder({ stream, sessionId, chunkStartMs = getEffectiveActiveDuration() } = {}) {
+  if (!stream || !sessionId) return;
+
+  try {
+    const preferredMimeType = state.sessionRecordingMimeType || pickSpeakerCaptureMimeType();
+    const recorder = preferredMimeType ? new MediaRecorder(stream, { mimeType: preferredMimeType }) : new MediaRecorder(stream);
+    const chunkParts = [];
+    const effectiveMimeType = recorder.mimeType || preferredMimeType || 'audio/webm';
+
+    state.sessionRecorder = recorder;
+    state.sessionRecordingMimeType = effectiveMimeType;
+    state.sessionRecordingChunkStartMs = chunkStartMs;
+
+    recorder.addEventListener('dataavailable', (event) => {
+      if (event.data?.size) {
+        chunkParts.push(event.data);
+      }
+    });
+
+    recorder.addEventListener(
+      'stop',
+      () => {
+        clearSessionChunkStopTimer();
+        if (state.sessionRecorder === recorder) {
+          state.sessionRecorder = null;
+        }
+
+        const chunkEndMs = getEffectiveActiveDuration();
+        state.sessionRecordingChunkStartMs = chunkEndMs;
+
+        const chunkBlob = chunkParts.length ? new Blob(chunkParts, { type: effectiveMimeType }) : null;
+        if (chunkBlob && chunkEndMs > chunkStartMs) {
+          const persistTask = persistAnalysisChunk({
+            sessionId,
+            blob: chunkBlob,
+            startMs: chunkStartMs,
+            endMs: chunkEndMs,
+            mimeType: effectiveMimeType,
+          }).catch((error) => {
+            console.warn('Unable to persist session recording clip', error);
+          });
+          trackPendingSessionRecordingWrite(persistTask);
+        }
+
+        if (shouldContinueSessionRecording(sessionId, stream)) {
+          startSessionChunkRecorder({ stream, sessionId, chunkStartMs: chunkEndMs });
+        }
+      },
+      { once: true }
+    );
+
+    recorder.addEventListener(
+      'error',
+      () => {
+        clearSessionChunkStopTimer();
+        if (state.sessionRecorder === recorder) {
+          state.sessionRecorder = null;
+        }
+        state.sessionRecordingSessionId = null;
+        state.sessionRecordingSupported = false;
+        stopSpeakerTracks(stream);
+        state.sessionRecordingStream = null;
+      },
+      { once: true }
+    );
+
+    recorder.start();
+    state.sessionChunkStopTimer = window.setTimeout(() => {
+      try {
+        if (recorder.state !== 'inactive') {
+          recorder.stop();
+        }
+      } catch {
+        // ignore
+      }
+    }, SESSION_RECORDING_CHUNK_MS);
+  } catch (error) {
+    console.warn('Unable to rotate local session recording', error);
+    state.sessionRecordingSupported = false;
+    state.sessionRecorder = null;
+    state.sessionRecordingSessionId = null;
+    stopSpeakerTracks(stream);
+    state.sessionRecordingStream = null;
+  }
 }
 
 async function persistAnalysisChunk(options = {}) {
@@ -5691,55 +6045,19 @@ async function startSessionRecording(stream) {
 
   await stopAnalysisRecording();
 
-  try {
-    const mimeType = pickSpeakerCaptureMimeType();
-    const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
-    const sessionId = state.currentSession.id;
-    const effectiveMimeType = recorder.mimeType || mimeType || 'audio/webm';
-    let chunkStartMs = getEffectiveActiveDuration();
+  const sessionId = state.currentSession.id;
+  state.sessionRecordingFlushPromise = null;
+  state.sessionRecordingStream = stream;
+  state.sessionRecordingMimeType = '';
+  state.sessionRecordingChunkStartMs = getEffectiveActiveDuration();
+  state.sessionRecordingSessionId = sessionId;
+  state.sessionRecordingSupported = true;
 
-    state.sessionRecorder = recorder;
-    state.sessionRecordingFlushPromise = null;
-    state.sessionRecordingStream = stream;
-    state.sessionRecordingMimeType = effectiveMimeType;
-    state.sessionRecordingChunkStartMs = chunkStartMs;
-    state.sessionRecordingSessionId = sessionId;
-    state.sessionRecordingSupported = true;
-
-    recorder.addEventListener('dataavailable', (event) => {
-      if (!event.data?.size) return;
-      const chunkEndMs = getEffectiveActiveDuration();
-      const blob = event.data;
-      const startMs = chunkStartMs;
-      chunkStartMs = chunkEndMs;
-      state.sessionRecordingChunkStartMs = chunkEndMs;
-      if (chunkEndMs <= startMs) return;
-      const persistTask = persistAnalysisChunk({
-        sessionId,
-        blob,
-        startMs,
-        endMs: chunkEndMs,
-        mimeType: effectiveMimeType,
-      }).catch((error) => {
-        console.warn('Unable to persist session recording clip', error);
-      });
-      trackPendingSessionRecordingWrite(persistTask);
-    });
-
-    recorder.addEventListener(
-      'stop',
-      () => {
-        state.sessionRecorder = null;
-      },
-      { once: true }
-    );
-
-    recorder.start(SESSION_RECORDING_CHUNK_MS);
-  } catch (error) {
-    console.warn('Unable to start local session recording', error);
-    state.sessionRecordingSupported = false;
-    stopSpeakerTracks(stream);
-  }
+  startSessionChunkRecorder({
+    stream,
+    sessionId,
+    chunkStartMs: state.sessionRecordingChunkStartMs,
+  });
 }
 
 async function flushSpeakerRecorderChunk({ continueTracking = true } = {}) {
@@ -7598,6 +7916,12 @@ function bindEvents() {
   elements.reviewAudio?.addEventListener('ended', async () => {
     state.sessionPlaybackPreviewMs = null;
     state.reviewAudioFloatingActive = false;
+    if (state.sessionPlaybackMode === 'combined') {
+      renderRecordingReview();
+      updatePlaybackHighlight();
+      updateSpeakerPlaybackIndicator();
+      return;
+    }
     const nextIndex = state.sessionPlaybackClipIndex + 1;
     if (nextIndex < state.sessionRecordings.length) {
       await loadRecordingClip(nextIndex, { autoplay: true });
