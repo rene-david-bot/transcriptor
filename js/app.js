@@ -1633,6 +1633,66 @@ function getStoredFinalAnalyzedSegments(session = state.currentSession) {
     .sort((left, right) => left.startMs - right.startMs || left.sequence - right.sequence || left.id.localeCompare(right.id));
 }
 
+function getStoredFinalSpeakerTurns(session = state.currentSession) {
+  return (Array.isArray(session?.finalSpeakerTurns) ? session.finalSpeakerTurns : [])
+    .map((turn, index) => {
+      const startMs = Math.max(0, Math.round(Number(turn?.startMs ?? Number(turn?.start || 0) * 1000) || 0));
+      const endMs = Math.max(startMs, Math.round(Number(turn?.endMs ?? Number(turn?.end || turn?.start || 0) * 1000) || startMs));
+      const rawSpeaker = String(turn?.rawSpeaker || turn?.speaker || '').trim();
+      const fallbackLabel = String(turn?.assignedLabel || turn?.label || '').trim() || getDefaultSpeakerLabel(rawSpeaker);
+      return {
+        id: String(turn?.id || `${session?.id || 'session'}:final-turn-${index + 1}`),
+        startMs,
+        endMs,
+        rawSpeaker,
+        label: rawSpeaker ? resolveSpeakerLabel(rawSpeaker, session, fallbackLabel) : fallbackLabel,
+        text: String(turn?.text || '').trim(),
+      };
+    })
+    .filter((turn) => turn.label && turn.endMs > turn.startMs)
+    .sort((left, right) => left.startMs - right.startMs || left.endMs - right.endMs || left.id.localeCompare(right.id));
+}
+
+function getRenderableAutomaticSpeakerWindows(session = state.currentSession, segments = state.currentSegments) {
+  const finalTurns = getStoredFinalSpeakerTurns(session);
+  if (session && session.status !== 'active' && String(session.speakerFinalizedAt || '').trim() && finalTurns.length) {
+    return finalTurns.map((turn) => ({
+      id: turn.id,
+      speakerKey: getSpeakerSummaryKey(turn.rawSpeaker, turn.label),
+      rawSpeaker: turn.rawSpeaker,
+      label: turn.label,
+      startMs: turn.startMs,
+      endMs: turn.endMs,
+      durationMs: Math.max(0, turn.endMs - turn.startMs),
+      text: turn.text,
+      source: 'final-turn',
+    }));
+  }
+
+  return (Array.isArray(segments) ? segments : [])
+    .map((segment) => {
+      const rawSpeaker = getSegmentRawSpeakerLabel(segment);
+      const label = getTranscriptSpeakerLabel(segment) || String(segment?.speakerLabel || '').trim() || getDefaultSpeakerLabel(rawSpeaker);
+      const startMs = Math.max(0, Number(segment?.startMs ?? segment?.endMs ?? 0));
+      const endMs = Math.max(startMs, Number(segment?.speechEndMs ?? segment?.endMs ?? segment?.startMs ?? 0));
+      const durationMs = Math.max(0, Number(segment?.speakerDurationMs || endMs - startMs || 0));
+      if (!label || endMs <= startMs) return null;
+      return {
+        id: String(segment?.id || `${session?.id || 'session'}:auto-window-${startMs}`),
+        speakerKey: getSpeakerSummaryKey(rawSpeaker, label),
+        rawSpeaker,
+        label,
+        startMs,
+        endMs,
+        durationMs,
+        text: String(segment?.sourceText || '').trim(),
+        source: 'segment',
+      };
+    })
+    .filter(Boolean)
+    .sort((left, right) => left.startMs - right.startMs || left.endMs - right.endMs || left.id.localeCompare(right.id));
+}
+
 function getRenderableTranscriptSegments(session = state.currentSession, currentSegments = state.currentSegments) {
   const finalSegments = getStoredFinalAnalyzedSegments(session);
   if (session && session.status !== 'active' && String(session.speakerFinalizedAt || '').trim() && finalSegments.length) {
@@ -2062,16 +2122,17 @@ function computeWordOverlapScore(firstText, secondText) {
   return shared / Math.max(1, Math.min(firstSet.size, secondSet.size));
 }
 
-function buildSpeakerSummary(segments) {
+function buildSpeakerSummary(segments, session = state.currentSession) {
   const summaryMap = new Map();
+  const automaticWindows = getRenderableAutomaticSpeakerWindows(session, segments);
 
-  for (const segment of segments) {
-    const rawLabel = getSegmentRawSpeakerLabel(segment);
-    const label = getTranscriptSpeakerLabel(segment) || getDefaultSpeakerLabel(rawLabel);
+  for (const window of automaticWindows) {
+    const rawLabel = String(window?.rawSpeaker || '').trim();
+    const label = String(window?.label || '').trim() || getDefaultSpeakerLabel(rawLabel);
     if (!label) continue;
-    const segmentStartMs = Number(segment.startMs ?? segment.endMs ?? 0);
-    const segmentEndMs = Number(segment.endMs ?? segment.startMs ?? 0);
-    const key = getSpeakerSummaryKey(rawLabel, label);
+    const segmentStartMs = Number(window?.startMs ?? window?.endMs ?? 0);
+    const segmentEndMs = Number(window?.endMs ?? window?.startMs ?? 0);
+    const key = String(window?.speakerKey || getSpeakerSummaryKey(rawLabel, label)).trim();
     const current = summaryMap.get(key) || {
       key,
       label,
@@ -2082,16 +2143,16 @@ function buildSpeakerSummary(segments) {
       startMs: null,
       endMs: null,
     };
-    current.durationMs += Math.max(1000, segment.speakerDurationMs || segment.endMs - segment.startMs || 0);
+    current.durationMs += Math.max(0, Number(window?.durationMs || segmentEndMs - segmentStartMs || 0));
     current.segments += 1;
     current.startMs = current.startMs === null ? segmentStartMs : Math.min(current.startMs, segmentStartMs);
     current.endMs = current.endMs === null ? segmentEndMs : Math.max(current.endMs, segmentEndMs);
     summaryMap.set(key, current);
   }
 
-  const slotRollup = buildManualSpeakerSlotRollup(state.currentSession, segments);
+  const slotRollup = buildManualSpeakerSlotRollup(session, automaticWindows);
   slotRollup.speakers.forEach((speaker) => {
-    const key = getSpeakerSummaryKeyForManualLabel(speaker.label, state.currentSession);
+    const key = getSpeakerSummaryKeyForManualLabel(speaker.label, session);
     const current = summaryMap.get(key) || {
       key,
       label: speaker.label,
@@ -2114,7 +2175,7 @@ function buildSpeakerSummary(segments) {
   );
 }
 
-function buildManualSpeakerSlots(session = state.currentSession, segments = state.currentSegments) {
+function buildManualSpeakerSlots(session = state.currentSession, automaticWindows = getRenderableAutomaticSpeakerWindows(session, getRenderableTranscriptSegments(session))) {
   if (!session) return [];
   const sessionEvents = getManualSpeakerEventsForSession(session);
   const slotSegments = [...sessionEvents]
@@ -2135,14 +2196,14 @@ function buildManualSpeakerSlots(session = state.currentSession, segments = stat
       const startMs = Math.max(0, Number(event.startMs || 0));
       const endMs = Math.max(startMs, Number(event.endMs || startMs));
 
-      const overlappingSegments = segments.filter(
-        (segment) => overlapMs(startMs, endMs, Number(segment.startMs || 0), Number(segment.speechEndMs || segment.endMs || segment.startMs || 0)) > 0
+      const overlappingWindows = (Array.isArray(automaticWindows) ? automaticWindows : []).filter(
+        (window) => overlapMs(startMs, endMs, Number(window?.startMs || 0), Number(window?.endMs || window?.startMs || 0)) > 0
       );
 
-      const rawSpeakerDurations = overlappingSegments.reduce((accumulator, segment) => {
-        const rawSpeaker = String(segment.speakerRawLabel || '').trim();
+      const rawSpeakerDurations = overlappingWindows.reduce((accumulator, window) => {
+        const rawSpeaker = String(window?.rawSpeaker || '').trim();
         if (!rawSpeaker) return accumulator;
-        const sharedMs = overlapMs(startMs, endMs, Number(segment.startMs || 0), Number(segment.speechEndMs || segment.endMs || segment.startMs || 0));
+        const sharedMs = overlapMs(startMs, endMs, Number(window?.startMs || 0), Number(window?.endMs || window?.startMs || 0));
         accumulator[rawSpeaker] = (accumulator[rawSpeaker] || 0) + sharedMs;
         return accumulator;
       }, {});
@@ -2154,19 +2215,19 @@ function buildManualSpeakerSlots(session = state.currentSession, segments = stat
         startMs,
         endMs,
         windowMs: Math.max(0, endMs - startMs),
-        speechMs: overlappingSegments.reduce(
-          (total, segment) => total + overlapMs(startMs, endMs, Number(segment.startMs || 0), Number(segment.speechEndMs || segment.endMs || segment.startMs || 0)),
+        speechMs: overlappingWindows.reduce(
+          (total, window) => total + overlapMs(startMs, endMs, Number(window?.startMs || 0), Number(window?.endMs || window?.startMs || 0)),
           0
         ),
-        segmentCount: overlappingSegments.length,
+        segmentCount: overlappingWindows.length,
         rawSpeakerDurations,
       };
     })
     .filter(Boolean);
 }
 
-function buildManualSpeakerSlotRollup(session = state.currentSession, segments = state.currentSegments) {
-  const slots = buildManualSpeakerSlots(session, segments);
+function buildManualSpeakerSlotRollup(session = state.currentSession, automaticWindows = getRenderableAutomaticSpeakerWindows(session, getRenderableTranscriptSegments(session))) {
+  const slots = buildManualSpeakerSlots(session, automaticWindows);
   const speakerMap = new Map();
 
   slots.forEach((slot) => {
@@ -2264,7 +2325,7 @@ function createSpeakerFinalAssignmentState(session = state.currentSession) {
 }
 
 function buildCanonicalFinalDiarizedSegments({ diarizedSegments = [], session = state.currentSession, assignmentState = null } = {}) {
-  const manualSlots = buildManualSpeakerSlots(session, state.currentSegments);
+  const manualSlots = buildManualSpeakerSlots(session);
   const resolvedAssignmentState = assignmentState || createSpeakerFinalAssignmentState(session);
   const usedRawLabels = resolvedAssignmentState.usedRawLabels || new Set();
   const rawByManualLabel = resolvedAssignmentState.rawByManualLabel || new Map();
@@ -2663,36 +2724,29 @@ function renderSpeakerTimingSummary(slotRollup, summary, { final = false } = {})
   `;
 }
 
-function buildAutomaticSpeakerTimingRows(summary = [], segments = getRenderableTranscriptSegments()) {
-  const sortedSegments = (Array.isArray(segments) ? segments : [])
-    .filter((segment) => {
-      const rawLabel = getSegmentRawSpeakerLabel(segment);
-      const label = getTranscriptSpeakerLabel(segment) || segment?.speakerLabel || getDefaultSpeakerLabel(rawLabel);
-      return Boolean(label);
-    })
-    .sort((left, right) => {
-      const leftStart = Number(left?.startMs ?? left?.endMs ?? 0);
-      const rightStart = Number(right?.startMs ?? right?.endMs ?? 0);
-      return leftStart - rightStart || Number(left?.sequence || 0) - Number(right?.sequence || 0);
-    });
+function buildAutomaticSpeakerTimingRows(summary = [], session = state.currentSession, segments = getRenderableTranscriptSegments(session)) {
+  const sortedWindows = getRenderableAutomaticSpeakerWindows(session, segments);
+  if (!sortedWindows.length) return [];
 
-  if (!sortedSegments.length) return [];
+  const speakerTotalsByKey = new Map();
+  sortedWindows.forEach((window) => {
+    const key = String(window?.speakerKey || '').trim();
+    if (!key) return;
+    speakerTotalsByKey.set(key, (speakerTotalsByKey.get(key) || 0) + Math.max(0, Number(window?.durationMs || 0)));
+  });
 
-  const speakerTotalsByKey = new Map(
-    (Array.isArray(summary) ? summary : []).map((speaker) => [speaker.key, Math.max(0, Number(speaker?.durationMs || 0))])
-  );
   const speakerPartIndex = new Map();
   const rows = [];
 
-  sortedSegments.forEach((segment) => {
-    const rawLabel = getSegmentRawSpeakerLabel(segment);
-    const label = getTranscriptSpeakerLabel(segment) || segment?.speakerLabel || getDefaultSpeakerLabel(rawLabel);
+  sortedWindows.forEach((window) => {
+    const rawLabel = String(window?.rawSpeaker || '').trim();
+    const label = String(window?.label || '').trim() || getDefaultSpeakerLabel(rawLabel);
     if (!label) return;
 
-    const speakerKey = getSpeakerSummaryKey(rawLabel, label);
-    const startMs = Math.max(0, Number(segment?.startMs ?? segment?.endMs ?? 0));
-    const endMs = Math.max(startMs, Number(segment?.speechEndMs ?? segment?.endMs ?? segment?.startMs ?? 0));
-    const durationMs = Math.max(0, Number(segment?.speakerDurationMs || endMs - startMs));
+    const speakerKey = String(window?.speakerKey || getSpeakerSummaryKey(rawLabel, label)).trim();
+    const startMs = Math.max(0, Number(window?.startMs ?? window?.endMs ?? 0));
+    const endMs = Math.max(startMs, Number(window?.endMs ?? window?.startMs ?? 0));
+    const durationMs = Math.max(0, Number(window?.durationMs || endMs - startMs));
     if (durationMs <= 0 && endMs <= startMs) return;
 
     const previousRow = rows[rows.length - 1];
@@ -2962,7 +3016,7 @@ function renderSpeakerInsights() {
   const pendingRecordingPasses = getPendingRecordingPasses(session?.id).length;
   const queueBusy = state.speakerTrackingPendingChunks > 0 || state.speakerTrackingInFlight;
   const summary = buildSpeakerSummary(renderableSegments);
-  const slotRollup = buildManualSpeakerSlotRollup(session, renderableSegments);
+  const slotRollup = buildManualSpeakerSlotRollup(session);
   const sessionEnded = session?.status === 'ended';
   const stoppedSession = session && ['paused', 'ended'].includes(session.status);
   const activeCapture = Boolean(session && session.status === 'active' && ['connecting', 'listening', 'reconnecting'].includes(state.runtimeStatus));
