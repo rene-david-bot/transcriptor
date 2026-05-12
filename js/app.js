@@ -3143,12 +3143,25 @@ function buildTranscriptTimestamp(segment) {
 
 function buildLiveSessionSummaryTitle(session) {
   if (!session) return 'No active session';
+  const sessionTitle = String(session.title || '').trim();
+  if (sessionTitle) return sessionTitle;
   return `${getLanguageName(session.sourceLanguage)} → ${getLanguageName(session.targetLanguage)}`;
+}
+
+function hasCustomSessionTitle(session) {
+  if (!session) return false;
+  const sessionTitle = String(session.title || '').trim();
+  if (!sessionTitle) return false;
+  return sessionTitle !== buildSessionTitle(session.createdAt, session.sourceLanguage, session.targetLanguage);
 }
 
 function buildLiveSessionSummaryMeta(session, counts) {
   if (!session) return 'Start a session to begin.';
-  const parts = [slugDate(session.createdAt), `${counts.savedSegments} saved segment${counts.savedSegments === 1 ? '' : 's'}`];
+  const parts = [];
+  if (hasCustomSessionTitle(session)) {
+    parts.push(slugDate(session.createdAt));
+  }
+  parts.push(`${counts.savedSegments} saved segment${counts.savedSegments === 1 ? '' : 's'}`);
   return parts.join(' • ');
 }
 
