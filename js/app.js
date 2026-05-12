@@ -124,6 +124,8 @@ const DISPLAY_ROW_TARGET_MS = 7000;
 const DISPLAY_ROW_MAX_MS = 10000;
 const DISPLAY_ROW_MAX_GAP_MS = 1800;
 const DISPLAY_ROW_MAX_SENTENCE_COUNT = 2;
+const LIVE_TRANSCRIPT_MAX_VISIBLE_ROWS = 160;
+const LIVE_TRANSCRIPT_BUILD_SEGMENT_LIMIT = LIVE_TRANSCRIPT_MAX_VISIBLE_ROWS * 4;
 const TRANSCRIPT_FOLLOW_TRIGGER_RATIO = 0.72;
 const TRANSCRIPT_FOLLOW_SLACK_PX = 20;
 const SPEAKER_CHUNK_MS = 20000;
@@ -236,12 +238,16 @@ const state = {
   manualSpeakerPendingChangeAtMs: null,
   manualSpeakerCustomNameDraft: '',
   manualSpeakerEditingEventId: '',
+  manualSpeakerUiLastRenderedAt: 0,
   sessionPersistTimer: null,
   clockTimer: null,
   installPrompt: null,
   activeDraftItemId: null,
   liveTranscriptView: 'both',
   transcriptPinnedToBottom: true,
+  transcriptVisibleRowCount: 0,
+  transcriptHiddenRowCount: 0,
+  transcriptRenderFrame: 0,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -1446,12 +1452,50 @@ function getEffectiveSpeechDuration() {
   return state.speechStartedAtMs ? base + (Date.now() - state.speechStartedAtMs) : base;
 }
 
+function updateSessionDurationClock() {
+  if (!elements.durationValue || !elements.speechOnlyValue) return;
+  if (!state.currentSession) {
+    elements.durationValue.textContent = '00:00';
+    elements.speechOnlyValue.textContent = '00:00';
+    return;
+  }
+  elements.durationValue.textContent = formatDuration(getEffectiveActiveDuration());
+  elements.speechOnlyValue.textContent = formatDuration(getEffectiveSpeechDuration());
+}
+
+function updateManualSpeakerTimerClock() {
+  if (!elements.speakerChangeTimer) return;
+  elements.speakerChangeTimer.textContent = formatManualStopwatchTime(getManualSpeakerElapsedMs());
+}
+
+function shouldUpdatePlaybackHighlightOnClock() {
+  const audio = elements.reviewAudio;
+  return Boolean(
+    state.sessionPlaybackPreviewMs !== null ||
+      state.sessionPlaybackSegmentId ||
+      (audio && audio.src && !audio.paused && !audio.ended)
+  );
+}
+
+function tickClockUi() {
+  updateSessionDurationClock();
+  const shouldRefreshManualSpeakerUi = Boolean(
+    state.currentSession && (state.currentSession.status === 'active' || state.manualSpeakerEvents.length || state.manualSpeakerEditingEventId)
+  );
+  if (shouldRefreshManualSpeakerUi && Date.now() - Number(state.manualSpeakerUiLastRenderedAt || 0) >= 1000) {
+    renderManualSpeakerControls();
+  } else {
+    updateManualSpeakerTimerClock();
+  }
+  if (shouldUpdatePlaybackHighlightOnClock()) {
+    updatePlaybackHighlight();
+  }
+}
+
 function startClockTimer() {
   window.clearInterval(state.clockTimer);
   state.clockTimer = window.setInterval(() => {
-    renderSessionSummary();
-    renderManualSpeakerControls();
-    updatePlaybackHighlight();
+    tickClockUi();
   }, 100);
 }
 
@@ -3077,23 +3121,16 @@ function renderSpeakerInsights() {
 }
 
 function getTranscriptDisplayCounts() {
-  const renderableSegments = getRenderableTranscriptSegments();
-
-  if (!state.currentSession && !renderableSegments.length) {
+  if (!state.currentSession && !state.transcriptVisibleRowCount) {
     return {
       visibleRows: 0,
       savedSegments: 0,
     };
   }
 
-  const liveDraft = buildLiveTranscriptState();
-  const feedRows = buildTranscriptFeedRows(liveDraft.sourceLabel, liveDraft.targetLabel);
-  const liveRow = buildTranscriptDisplayItemFromLiveDraft(liveDraft);
-  const { rows: mergedRows, liveRow: appendedLiveRow } = mergeLiveRowIntoFeedRows(feedRows, liveRow);
-
   return {
-    visibleRows: mergedRows.length + (appendedLiveRow ? 1 : 0),
-    savedSegments: renderableSegments.length,
+    visibleRows: state.transcriptVisibleRowCount || 0,
+    savedSegments: Number(state.currentSession?.segmentCount ?? getRenderableTranscriptSegments().length),
   };
 }
 
@@ -3222,12 +3259,38 @@ function buildLiveTranscriptState() {
   };
 }
 
-function renderDrafts() {
+function renderDrafts({ immediate = false } = {}) {
   const liveDraft = buildLiveTranscriptState();
   if (elements.transcriptSourceHeading) elements.transcriptSourceHeading.textContent = liveDraft.sourceLabel;
   if (elements.transcriptTargetHeading) elements.transcriptTargetHeading.textContent = liveDraft.targetLabel;
   if (elements.transcriptLiveState) elements.transcriptLiveState.textContent = liveDraft.liveStateLabel;
-  renderTranscript();
+  scheduleTranscriptRender({ immediate });
+}
+
+function cancelScheduledTranscriptRender() {
+  if (!state.transcriptRenderFrame) return;
+  window.cancelAnimationFrame(state.transcriptRenderFrame);
+  state.transcriptRenderFrame = 0;
+}
+
+function resetTranscriptRenderState() {
+  cancelScheduledTranscriptRender();
+  state.transcriptVisibleRowCount = 0;
+  state.transcriptHiddenRowCount = 0;
+}
+
+function scheduleTranscriptRender({ immediate = false } = {}) {
+  if (immediate) {
+    cancelScheduledTranscriptRender();
+    renderTranscript();
+    return;
+  }
+
+  if (state.transcriptRenderFrame) return;
+  state.transcriptRenderFrame = window.requestAnimationFrame(() => {
+    state.transcriptRenderFrame = 0;
+    renderTranscript();
+  });
 }
 
 function renderTranscriptParagraph({ kind, label, text, pending = false }) {
@@ -3738,10 +3801,26 @@ function shouldMergeTranscriptFeedRows(previousRow, nextRow, previousSegment, ne
   return mergedSentenceCount <= 1 && nextTotalDurationMs <= DISPLAY_ROW_TARGET_MS;
 }
 
+function getTranscriptFeedSourceSegments() {
+  const segments = getRenderableTranscriptSegments();
+  if (state.currentSession?.status !== 'active' || segments.length <= LIVE_TRANSCRIPT_BUILD_SEGMENT_LIMIT) {
+    return {
+      segments,
+      trimmedSegmentCount: 0,
+    };
+  }
+
+  return {
+    segments: segments.slice(-LIVE_TRANSCRIPT_BUILD_SEGMENT_LIMIT),
+    trimmedSegmentCount: Math.max(0, segments.length - LIVE_TRANSCRIPT_BUILD_SEGMENT_LIMIT),
+  };
+}
+
 function buildTranscriptFeedRows(sourceLabel, targetLabel) {
   const rows = [];
+  const { segments, trimmedSegmentCount } = getTranscriptFeedSourceSegments();
 
-  getRenderableTranscriptSegments().forEach((segment) => {
+  segments.forEach((segment) => {
     const nextRow = buildTranscriptDisplayItemFromSegment(segment, { sourceLabel, targetLabel });
     const lastRow = rows[rows.length - 1];
 
@@ -3766,7 +3845,33 @@ function buildTranscriptFeedRows(sourceLabel, targetLabel) {
     });
   });
 
-  return rows;
+  return {
+    rows,
+    trimmedSegmentCount,
+  };
+}
+
+function limitVisibleTranscriptRows(rows = [], liveRow = null) {
+  const session = state.currentSession;
+  const limit = session?.status === 'active' ? LIVE_TRANSCRIPT_MAX_VISIBLE_ROWS : 0;
+  const liveCount = liveRow ? 1 : 0;
+  const totalVisible = rows.length + liveCount;
+
+  if (!limit || totalVisible <= limit) {
+    return {
+      rows,
+      liveRow,
+      hiddenCount: 0,
+    };
+  }
+
+  const rowBudget = Math.max(0, limit - liveCount);
+  const nextRows = rowBudget > 0 ? rows.slice(-rowBudget) : [];
+  return {
+    rows: nextRows,
+    liveRow,
+    hiddenCount: Math.max(0, totalVisible - (nextRows.length + liveCount)),
+  };
 }
 
 function mergeLiveRowIntoFeedRows(rows, liveRow) {
@@ -3811,20 +3916,28 @@ function renderTranscriptHistory() {
   const shouldFollow = Boolean(state.settings.autoScroll && state.transcriptPinnedToBottom);
   const previousScrollTop = list.scrollTop;
 
-  const feedRows = buildTranscriptFeedRows(sourceLabel, targetLabel);
+  const { rows: feedRows, trimmedSegmentCount } = buildTranscriptFeedRows(sourceLabel, targetLabel);
   const liveRow = buildTranscriptDisplayItemFromLiveDraft(liveDraft);
   const { rows: mergedRows, liveRow: appendedLiveRow, mergedIntoLastRow } = mergeLiveRowIntoFeedRows(feedRows, liveRow);
+  const { rows: displayRows, liveRow: displayLiveRow, hiddenCount } = limitVisibleTranscriptRows(mergedRows, appendedLiveRow);
 
-  if (!mergedRows.length && !appendedLiveRow) {
+  state.transcriptVisibleRowCount = displayRows.length + (displayLiveRow ? 1 : 0);
+  state.transcriptHiddenRowCount = hiddenCount;
+
+  if (!displayRows.length && !displayLiveRow) {
     list.innerHTML = `<div class="transcript-empty">${escapeHtml(
       state.currentSession
         ? 'Transcript lines will appear here as speech is captured and translated.'
         : 'Listen in one language and read in another. Start a session to begin.'
     )}</div>`;
   } else {
-    const rowMarkup = mergedRows
+    const hiddenNote = hiddenCount || trimmedSegmentCount
+      ? `<div class="note">Showing the latest ${state.transcriptVisibleRowCount} row${state.transcriptVisibleRowCount === 1 ? '' : 's'} during live capture.${hiddenCount ? ` ${hiddenCount} older row${hiddenCount === 1 ? '' : 's'} stay saved and reappear after you stop, end, or reopen the session from History.` : ' Older transcript stays saved and reappears after you stop, end, or reopen the session from History.'}</div>`
+      : '';
+
+    const rowMarkup = displayRows
       .map((row, index) => {
-        const isNewestMergedRow = mergedIntoLastRow && index === mergedRows.length - 1;
+        const isNewestMergedRow = mergedIntoLastRow && index === displayRows.length - 1;
         return renderTranscriptFeedPair(row, {
           live: isNewestMergedRow,
           showPendingNote: false,
@@ -3832,8 +3945,10 @@ function renderTranscriptHistory() {
       })
       .join('');
 
-    list.innerHTML = `${rowMarkup}${appendedLiveRow ? renderTranscriptFeedPair(appendedLiveRow, { live: true, showPendingNote: false }) : ''}`;
+    list.innerHTML = `${hiddenNote}${rowMarkup}${displayLiveRow ? renderTranscriptFeedPair(displayLiveRow, { live: true, showPendingNote: false }) : ''}`;
   }
+
+  renderSessionSummary();
 
   requestAnimationFrame(() => {
     if (shouldFollow) {
@@ -4073,6 +4188,10 @@ async function ensureWholeSessionPlaybackPrepared({ seekMs = null, force = false
 }
 
 function updatePlaybackHighlight({ shouldScroll = false, forceScroll = false } = {}) {
+  const audio = elements.reviewAudio;
+  const playbackActive = Boolean(state.sessionPlaybackPreviewMs !== null || (audio && audio.src && !audio.paused && !audio.ended));
+  if (!playbackActive && !state.sessionPlaybackSegmentId) return;
+
   const absoluteMs = getCurrentPlaybackAbsoluteMs();
   const rows = Array.from(elements.transcriptList?.querySelectorAll('.transcript-pair[data-start-ms]') || []);
   const previousSegmentId = state.sessionPlaybackSegmentId;
@@ -4598,6 +4717,7 @@ function buildManualSpeakerRowsForDisplay() {
 
 function renderManualSpeakerControls() {
   if (!elements.speakerChangeTimer) return;
+  state.manualSpeakerUiLastRenderedAt = Date.now();
   const session = state.currentSession;
   const options = getSpeakerOptionsForManualControls();
   const currentLabel = state.manualSpeakerCurrentLabel || options[0] || 'Speaker A';
@@ -4898,6 +5018,7 @@ async function loadSession(sessionId) {
   const session = await getSession(sessionId);
   if (!session) return null;
   resetSessionPlaybackState();
+  resetTranscriptRenderState();
   state.currentSession = session;
   state.currentSegments = await listSegmentsBySession(sessionId);
   state.sessionRecordings = await listRecordingsBySession(sessionId);
@@ -4945,8 +5066,7 @@ async function loadSession(sessionId) {
 
 function renderCurrentView() {
   applySettingsToForms();
-  renderSessionSummary();
-  renderDrafts();
+  renderDrafts({ immediate: true });
   renderSpeakerInsights();
   renderRecordingReview();
   renderManualSpeakerControls();
@@ -6940,6 +7060,7 @@ async function handleStartFromSetup(event) {
   }
 
   const session = await createSession(formValues);
+  resetTranscriptRenderState();
   state.currentSession = session;
   state.currentSegments = [];
   state.sessionRecordings = [];
@@ -7643,6 +7764,7 @@ async function finalizeSegmentFromEvent(event) {
 
   upsertCurrentSegmentInState(labeledSegment);
   await upsertSegment(labeledSegment);
+  state.commitMetaByItemId.delete(itemId);
   clearDraftState(itemId, { preserveVisibleDraft: true });
   await persistCurrentSessionNow();
   renderCurrentView();
@@ -7929,6 +8051,7 @@ async function deleteHistoricalSession(sessionId) {
   if (!confirmed) return;
   await deleteSession(sessionId);
   if (state.currentSession?.id === sessionId) {
+    resetTranscriptRenderState();
     state.currentSession = null;
     state.currentSegments = [];
     setStatus('idle', 'Waiting to start.');
@@ -8342,6 +8465,7 @@ function bindEvents() {
     }
     await refreshSessions();
     if (state.currentSession?.status === 'ended') {
+      resetTranscriptRenderState();
       state.currentSession = null;
       state.currentSegments = [];
       setStatus('idle', 'Waiting to start.');
@@ -8357,6 +8481,7 @@ function bindEvents() {
       await stopListening();
     }
     await clearAllSessions();
+    resetTranscriptRenderState();
     state.currentSession = null;
     state.currentSegments = [];
     state.lastActiveSessionId = null;
@@ -8657,6 +8782,7 @@ async function createDebugSession({
     finalAnalyzedSegments: [],
     speakerFinalizedAt: '',
   };
+  resetTranscriptRenderState();
   state.currentSession = session;
   state.sessions = [session, ...state.sessions.filter((item) => item.id !== session.id)];
   state.currentSegments = [];
@@ -8696,6 +8822,7 @@ async function ensureDebugSession({ sourceLanguage = 'en', targetLanguage = 'de'
       glossary: '',
       speakerNames: '',
     });
+    resetTranscriptRenderState();
     state.currentSession = session;
     state.currentSegments = [];
     clearLiveDraftCarry();
